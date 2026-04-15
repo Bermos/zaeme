@@ -9,6 +9,13 @@ export default defineNuxtConfig({
 
   modules: ['@nuxt/ui'],
 
+  css: ['~/assets/css/main.css'],
+
+  ui: {
+    // Disable @nuxt/fonts to avoid network requests to external font providers
+    fonts: false,
+  },
+
   runtimeConfig: {
     // Private — server-only
     databaseUrl: process.env.DATABASE_URL ?? '',
@@ -28,17 +35,6 @@ export default defineNuxtConfig({
     public: {
       baseUrl: process.env.BASE_URL ?? 'http://localhost:3000',
       r2PublicUrl: process.env.R2_PUBLIC_URL ?? '',
-    },
-  },
-
-  // Disable external font providers (network not available in self-hosted environments)
-  fonts: {
-    providers: {
-      google: false,
-      googleicons: false,
-      bunny: false,
-      fontshare: false,
-      fontsource: false,
     },
   },
 
