@@ -1,8 +1,14 @@
-import { pgTable, text, timestamp, jsonb } from 'drizzle-orm/pg-core'
+import { pgTable, text, timestamp, jsonb, pgEnum } from 'drizzle-orm/pg-core'
 import { createId } from '@paralleldrive/cuid2'
 import { relations } from 'drizzle-orm'
 import { events } from './events.js'
 import { attendees } from './attendees.js'
+
+export const travelCommitmentStatusEnum = pgEnum('travel_commitment_status', [
+  'pending',
+  'confirmed',
+  'declined',
+])
 
 // Clustered travel groups (SBB connection groups)
 export const travelGroups = pgTable('travel_groups', {
@@ -26,7 +32,7 @@ export const travelGroupCommitments = pgTable('travel_group_commitments', {
   id: text('id').primaryKey().$defaultFn(() => createId()),
   travelGroupId: text('travel_group_id').notNull().references(() => travelGroups.id, { onDelete: 'cascade' }),
   attendeeId: text('attendee_id').notNull().references(() => attendees.id, { onDelete: 'cascade' }),
-  isTaking: text('is_taking').notNull().default('pending'), // pending | confirmed | declined
+  isTaking: travelCommitmentStatusEnum('is_taking').notNull().default('pending'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
