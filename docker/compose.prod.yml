@@ -1,0 +1,60 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      AUTO_MIGRATE: "true"
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: ${BASE_URL}
+      BASE_URL: ${BASE_URL}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME}
+      R2_PUBLIC_URL: ${R2_PUBLIC_URL}
+      ENABLE_AI: ${ENABLE_AI:-false}
+      ENABLE_SBB: ${ENABLE_SBB:-true}
+      ENABLE_MAGIC_LINK: ${ENABLE_MAGIC_LINK:-true}
+    labels:
+      # Example Traefik labels — adjust to your domain
+      - "traefik.enable=true"
+      - "traefik.http.routers.zaeme.rule=Host(`${DOMAIN:-zaeme.example.com}`)"
+      - "traefik.http.routers.zaeme.entrypoints=websecure"
+      - "traefik.http.routers.zaeme.tls.certresolver=letsencrypt"
+      - "traefik.http.services.zaeme.loadbalancer.server.port=3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@example.com}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "letsencrypt:/letsencrypt"
+
+volumes:
+  letsencrypt:

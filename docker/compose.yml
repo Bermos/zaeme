@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: zaeme
+      POSTGRES_USER: zaeme
+      POSTGRES_PASSWORD: zaeme
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zaeme"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://zaeme:zaeme@postgres:5432/zaeme
+      AUTO_MIGRATE: "true"
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-changeme-dev-secret}
+      BETTER_AUTH_URL: ${BASE_URL:-http://localhost:3000}
+      BASE_URL: ${BASE_URL:-http://localhost:3000}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-}
+      R2_PUBLIC_URL: ${R2_PUBLIC_URL:-}
+      ENABLE_AI: ${ENABLE_AI:-false}
+      ENABLE_SBB: ${ENABLE_SBB:-true}
+      ENABLE_MAGIC_LINK: ${ENABLE_MAGIC_LINK:-true}
+
+volumes:
+  postgres_data:

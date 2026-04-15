@@ -1,0 +1,17 @@
+{
+  "name": "zaeme",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter app dev",
+    "build": "pnpm --filter app build",
+    "db:generate": "pnpm --filter @zaeme/db generate",
+    "db:migrate": "pnpm --filter @zaeme/db migrate",
+    "db:studio": "pnpm --filter @zaeme/db studio",
+    "db:seed": "pnpm --filter @zaeme/db seed"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

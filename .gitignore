@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Nuxt
+app/.nuxt/
+app/.output/
+app/dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor
+.vscode/
+.idea/
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+dist/
+build/
+
+# Database migrations (generated, keep in git for production)
+# packages/db/migrations/
+
+# TypeScript
+*.tsbuildinfo
