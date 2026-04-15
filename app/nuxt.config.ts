@@ -43,4 +43,10 @@ export default defineNuxtConfig({
       tasks: true,
     },
   },
+
+  vite: {
+    optimizeDeps: {
+      include: []
+    }
+  },
 })

@@ -1,6 +1,6 @@
 import { getDb, users } from '@zaeme/db'
 import { eq } from 'drizzle-orm'
-import { getAuth } from '../../utils/auth'
+import { auth } from '../../utils/auth'
 
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig()
@@ -34,7 +34,6 @@ export default defineEventHandler(async (event) => {
   }
 
   // Create admin via Better Auth
-  const auth = getAuth()
   const signUpResponse = await auth.api.signUpEmail({
     body: {
       email: adminEmail,

@@ -1,8 +1,6 @@
-import { getAuth } from '../../utils/auth'
-import { toWebRequest } from 'better-auth/node'
+import { auth } from '../../utils/auth'
 
 export default defineEventHandler(async (event) => {
-  const auth = getAuth()
-  const webRequest = toWebRequest(event.node.req)
+  const webRequest = toWebRequest(event)
   return auth.handler(webRequest)
 })

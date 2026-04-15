@@ -25,6 +25,9 @@ importers:
       better-auth:
         specifier: ^1.6.4
         version: 1.6.4(@opentelemetry/api@1.9.1)(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(kysely@0.28.16)(postgres@3.4.9))(vue@3.5.32(typescript@5.9.3))
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(kysely@0.28.16)(postgres@3.4.9)
       h3:
         specifier: ^1.15.3
         version: 1.15.11
