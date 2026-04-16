@@ -17,17 +17,17 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 ## Phase 1 — Event Core
 
-- [ ] Event schema + Drizzle migrations
-- [ ] Event creation form (title, type, description, dates, location)
-- [ ] Draft / brainstorm mode — private, planners only
-- [ ] Event detail page (planner view)
-- [ ] Event status transitions (draft → published → completed → cancelled)
-- [ ] Co-planner invite — add user as co-planner with role
-- [ ] Planner permission checks on all API routes
-- [ ] Event list / dashboard for admin
-- [ ] Event slug generation + collision handling
-- [ ] Series support — parent event + episode creation
-- [ ] Concert event type — `ticketUrl`, `performerNote`, public visibility default
+- [x] Event schema + Drizzle migrations
+- [x] Event creation form (title, type, description, dates, location)
+- [x] Draft / brainstorm mode — private, planners only
+- [x] Event detail page (planner view)
+- [x] Event status transitions (draft → published → completed → cancelled)
+- [x] Co-planner invite — add user as co-planner with role
+- [x] Planner permission checks on all API routes
+- [x] Event list / dashboard for admin
+- [x] Event slug generation + collision handling
+- [x] Series support — parent event + episode creation
+- [x] Concert event type — `ticketUrl`, `performerNote`, public visibility default
 
 -----
 

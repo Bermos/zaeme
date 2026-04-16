@@ -20,6 +20,13 @@ useSeoMeta({
   ogTitle: title,
   ogDescription: description
 })
+
+const { data: session } = authClient.useSession(useFetch)
+
+async function signOut() {
+  await authClient.signOut()
+  await navigateTo('/')
+}
 </script>
 
 <template>
@@ -36,6 +43,37 @@ useSeoMeta({
 
       <template #right>
         <UColorModeButton />
+        <template v-if="session">
+          <UButton
+            to="/events/new"
+            icon="i-lucide-plus"
+            label="New event"
+            size="sm"
+            variant="ghost"
+          />
+          <UDropdownMenu
+            :items="[[
+              { label: 'Dashboard', icon: 'i-lucide-layout-dashboard', to: '/dashboard' },
+              { label: 'Log out', icon: 'i-lucide-log-out', color: 'error', onSelect: signOut }
+            ]]"
+            :content="{ align: 'end' }"
+          >
+            <UButton
+              variant="ghost"
+              size="sm"
+              :label="session.user.name"
+              icon="i-lucide-user"
+              trailing-icon="i-lucide-chevron-down"
+            />
+          </UDropdownMenu>
+        </template>
+        <UButton
+          v-else
+          to="/login"
+          label="Log in"
+          size="sm"
+          variant="ghost"
+        />
       </template>
     </UHeader>
 
