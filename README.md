@@ -25,18 +25,18 @@ Self-hostable. Open source. Built with love in Bern.
 
 ## Stack
 
-|             |                                                                              |
-|-------------|------------------------------------------------------------------------------|
-|**Framework**|[Nuxt 4](https://nuxt.com) — full-stack, SSR for invite pages                 |
-|**UI**       |[Nuxt UI](https://ui.nuxt.com) + [Tailwind CSS](https://tailwindcss.com)      |
-|**Database** |[Neon PostgreSQL](https://neon.tech) + [Drizzle ORM](https://orm.drizzle.team)|
-|**Auth**     |[Better Auth](https://better-auth.com) — email/password + magic link          |
-|**Files**    |[Cloudflare R2](https://developers.cloudflare.com/r2/) — presigned uploads    |
-|**Email**    |[Resend](https://resend.com) + [React Email](https://react.email)             |
-|**Jobs**     |[Inngest](https://inngest.com) — background jobs, reminders, travel clustering|
-|**Transit**  |[transport.opendata.ch](https://transport.opendata.ch) — SBB timetables       |
-|**AI**       |[Anthropic SDK](https://docs.anthropic.com) — Claude for assistant + MCP      |
-|**IDs**      |[cuid2](https://github.com/paralleldrive/cuid2)                               |
+|               |                                                                                |
+|---------------|--------------------------------------------------------------------------------|
+| **Framework** | [Nuxt 4](https://nuxt.com) — full-stack, SSR for invite pages                  |
+| **UI**        | [Nuxt UI](https://ui.nuxt.com) + [Tailwind CSS](https://tailwindcss.com)       |
+| **Database**  | [Neon PostgreSQL](https://neon.tech) + [Drizzle ORM](https://orm.drizzle.team) |
+| **Auth**      | [Better Auth](https://better-auth.com) — email/password + magic link           |
+| **Files**     | [Cloudflare R2](https://developers.cloudflare.com/r2/) — presigned uploads     |
+| **Email**     | [Resend](https://resend.com) + [React Email](https://react.email)              |
+| **Jobs**      | [Inngest](https://inngest.com) — background jobs, reminders, travel clustering |
+| **Transit**   | [transport.opendata.ch](https://transport.opendata.ch) — SBB timetables        |
+| **AI**        | [Anthropic SDK](https://docs.anthropic.com) — Claude for assistant + MCP       |
+| **IDs**       | [cuid2](https://github.com/paralleldrive/cuid2)                                |
 
 -----
 
@@ -155,7 +155,7 @@ See [ROADMAP.md](./ROADMAP.md) for the full task list.
 
 zäme is not a startup. It’s a tool built for a specific kind of person — someone who organizes real things with real friends and wants something that feels personal, not like a SaaS product.
 
-It is open source because others might find it useful. The canonical instance lives at [zaeme.ch](https://zaeme.ch) and is run by the author. There is no business model, no tracking, no ads.
+It is open source because others might find it useful. 
 
 -----
 

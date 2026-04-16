@@ -11,11 +11,17 @@ export default defineNuxtConfig({
 
   css: ['~/assets/css/main.css'],
 
-  routeRules: {
-    '/': { prerender: true }
-  },
-
   compatibilityDate: '2025-01-15',
+
+  vite: {
+    optimizeDeps: {
+      include: [
+        'zod',
+        'better-auth/vue',
+        'better-auth/client/plugins'
+      ]
+    }
+  },
 
   eslint: {
     config: {
@@ -25,4 +31,5 @@ export default defineNuxtConfig({
       }
     }
   }
+
 })
