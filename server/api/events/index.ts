@@ -1,18 +1,16 @@
-import { eq, desc } from 'drizzle-orm'
+import { desc, eq } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { z } from 'zod'
-import { db } from '../../utils/db'
-import { requireAuth } from '../../utils/session'
-import { event, eventPlanner } from '../../database/schema/events'
+import { db } from '#server/utils/db'
+import { requireAuth } from '#server/utils/session'
+import { event, eventPlanner } from '#server/database/schema'
 
 export default defineEventHandler(async (e) => {
-  const method = getMethod(e)
-
-  if (method === 'GET') {
+  if (e.method === 'GET') {
     // List events where the user is a planner
     const session = await requireAuth(e)
 
-    const rows = await db
+    return db
       .select({
         id: event.id,
         slug: event.slug,
@@ -31,12 +29,10 @@ export default defineEventHandler(async (e) => {
       .from(event)
       .innerJoin(eventPlanner, eq(event.id, eventPlanner.eventId))
       .where(eq(eventPlanner.userId, session.user.id))
-      .orderBy(desc(event.createdAt))
-
-    return rows
+      .orderBy(desc(event.createdAt));
   }
 
-  if (method === 'POST') {
+  if (e.method === 'POST') {
     const session = await requireAuth(e)
 
     const schema = z.object({

@@ -1,15 +1,13 @@
-import { eq, and } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { z } from 'zod'
-import { db } from '../../../../utils/db'
-import { requireAuth } from '../../../../utils/session'
-import { event, eventPlanner } from '../../../../database/schema/events'
-import { user } from '../../../../database/schema/auth'
+import { db } from '#server/utils/db'
+import { requireAuth } from '#server/utils/session'
+import { event, eventPlanner, user } from '#server/database/schema'
 
 export default defineEventHandler(async (e) => {
   const session = await requireAuth(e)
   const slug = getRouterParam(e, 'slug')!
-  const method = getMethod(e)
 
   const [row] = await db
     .select()
@@ -35,8 +33,8 @@ export default defineEventHandler(async (e) => {
     throw createError({ statusCode: 403, message: 'Forbidden' })
   }
 
-  if (method === 'GET') {
-    const planners = await db
+  if (e.method === 'GET') {
+    return db
       .select({
         userId: eventPlanner.userId,
         role: eventPlanner.role,
@@ -45,12 +43,10 @@ export default defineEventHandler(async (e) => {
       })
       .from(eventPlanner)
       .innerJoin(user, eq(eventPlanner.userId, user.id))
-      .where(eq(eventPlanner.eventId, row.id))
-
-    return planners
+      .where(eq(eventPlanner.eventId, row.id));
   }
 
-  if (method === 'POST') {
+  if (e.method === 'POST') {
     const schema = z.object({
       userId: z.string().min(1),
       role: z.enum(['co_planner', 'logistics']).default('co_planner')

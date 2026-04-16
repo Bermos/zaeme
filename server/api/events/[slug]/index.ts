@@ -1,14 +1,13 @@
 import { eq, and } from 'drizzle-orm'
 import { z } from 'zod'
-import { db } from '../../../utils/db'
-import { requireAuth } from '../../../utils/session'
-import { event, eventPlanner } from '../../../database/schema/events'
-import { user } from '../../../database/schema/auth'
+import { db } from '#server/utils/db'
+import { requireAuth } from '#server/utils/session'
+import { event, eventPlanner } from '#server/database/schema'
+import { user } from '#server/database/schema'
 
 export default defineEventHandler(async (e) => {
   const session = await requireAuth(e)
   const slug = getRouterParam(e, 'slug')!
-  const method = getMethod(e)
 
   // Load event
   const [row] = await db
@@ -35,7 +34,7 @@ export default defineEventHandler(async (e) => {
     throw createError({ statusCode: 403, message: 'Forbidden' })
   }
 
-  if (method === 'GET') {
+  if (e.method === 'GET') {
     // Include planners list
     const planners = await db
       .select({
@@ -51,7 +50,7 @@ export default defineEventHandler(async (e) => {
     return { ...row, planners }
   }
 
-  if (method === 'PATCH') {
+  if (e.method === 'PATCH') {
     const schema = z.object({
       title: z.string().min(1).max(200).optional(),
       description: z.string().optional().nullable(),

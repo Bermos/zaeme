@@ -1,6 +1,6 @@
 import { like, desc } from 'drizzle-orm'
 import { db } from './db'
-import { event } from '../database/schema/events'
+import { event } from '#server/database/schema/events'
 
 /**
  * Slugify a string: lowercase, replace spaces/special chars with hyphens.

@@ -1,5 +1,5 @@
-import { db } from '../../utils/db'
-import { user } from '../../database/schema/auth'
+import { db } from '#server/utils/db'
+import { user } from '#server/database/schema'
 
 export default defineEventHandler(async () => {
   const adminUsers = await db

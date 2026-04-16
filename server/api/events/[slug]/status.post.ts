@@ -1,8 +1,8 @@
 import { eq, and } from 'drizzle-orm'
 import { z } from 'zod'
-import { db } from '../../../utils/db'
-import { requireAuth } from '../../../utils/session'
-import { event, eventPlanner } from '../../../database/schema/events'
+import { db } from '#server/utils/db'
+import { requireAuth } from '#server/utils/session'
+import { event, eventPlanner } from '#server/database/schema'
 
 // Valid status transitions
 const TRANSITIONS: Record<string, string[]> = {

@@ -1,14 +1,13 @@
-import { eq, and, desc } from 'drizzle-orm'
+import { and, desc, eq } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { z } from 'zod'
-import { db } from '../../../utils/db'
-import { requireAuth } from '../../../utils/session'
-import { event, eventPlanner } from '../../../database/schema/events'
+import { db } from '#server/utils/db'
+import { requireAuth } from '#server/utils/session'
+import { event, eventPlanner } from '#server/database/schema'
 
 export default defineEventHandler(async (e) => {
   const session = await requireAuth(e)
   const slug = getRouterParam(e, 'slug')!
-  const method = getMethod(e)
 
   const [parent] = await db
     .select()
@@ -38,17 +37,15 @@ export default defineEventHandler(async (e) => {
     throw createError({ statusCode: 403, message: 'Forbidden' })
   }
 
-  if (method === 'GET') {
-    const episodes = await db
+  if (e.method === 'GET') {
+    return db
       .select()
       .from(event)
       .where(eq(event.parentId, parent.id))
-      .orderBy(desc(event.startsAt))
-
-    return episodes
+      .orderBy(desc(event.startsAt));
   }
 
-  if (method === 'POST') {
+  if (e.method === 'POST') {
     const schema = z.object({
       title: z.string().min(1).max(200),
       description: z.string().optional(),

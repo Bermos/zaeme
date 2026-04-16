@@ -13,7 +13,7 @@ const schema = z.object({
   endsAt: z.string().optional(),
   location: z.string().optional(),
   venueStation: z.string().optional(),
-  ticketUrl: z.string().url('Please enter a valid URL').optional().or(z.literal('')),
+  ticketUrl: z.url('Please enter a valid URL').optional().or(z.literal('')),
   performerNote: z.string().optional(),
   parentId: z.string().optional()
 })
