@@ -16,7 +16,6 @@ export default defineNuxtConfig({
   vite: {
     optimizeDeps: {
       include: [
-        'zod',
         'better-auth/vue',
         'better-auth/client/plugins'
       ]
