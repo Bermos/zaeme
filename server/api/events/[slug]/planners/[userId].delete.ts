@@ -1,7 +1,7 @@
 import { eq, and } from 'drizzle-orm'
-import { db } from '../../../../../utils/db'
-import { requireAuth } from '../../../../../utils/session'
-import { event, eventPlanner } from '../../../../../database/schema/events'
+import { db } from '../../../../utils/db'
+import { requireAuth } from '../../../../utils/session'
+import { event, eventPlanner } from '../../../../database/schema/events'
 
 export default defineEventHandler(async (e) => {
   const session = await requireAuth(e)
