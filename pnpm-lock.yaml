@@ -6,9 +6,7 @@ settings:
 
 importers:
 
-  .: {}
-
-  app:
+  .:
     dependencies:
       '@anthropic-ai/sdk':
         specifier: ^0.89.0
@@ -21,7 +19,7 @@ importers:
         version: 2.3.1
       '@zaeme/db':
         specifier: workspace:*
-        version: link:../packages/db
+        version: link:packages/db
       better-auth:
         specifier: ^1.6.4
         version: 1.6.4(@opentelemetry/api@1.9.1)(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(kysely@0.28.16)(postgres@3.4.9))(vue@3.5.32(typescript@5.9.3))
