@@ -11,7 +11,7 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 - [ ] Write full database schema (all tables, enums, relations)
 - [x] Set up Better Auth (email/password + magic link strategies)
 - [ ] First-run `/setup` page for admin account creation
-- [ ] Configure Nuxt UI + Tailwind CSS
+- [x] Configure Nuxt UI + Tailwind CSS
 - [ ] `.env.example` with all variables documented
 
 -----
