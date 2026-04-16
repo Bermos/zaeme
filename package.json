@@ -11,10 +11,12 @@
     "typecheck": "nuxt typecheck"
   },
   "dependencies": {
+    "@better-auth/passkey": "^1.6.5",
     "@iconify-json/lucide": "^1.2.102",
     "@iconify-json/simple-icons": "^1.2.78",
     "@neondatabase/serverless": "^1.0.2",
     "@nuxt/ui": "^4.6.1",
+    "better-auth": "^1.6.5",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "nuxt": "^4.4.2",
