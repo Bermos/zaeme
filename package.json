@@ -1,0 +1,46 @@
+{
+  "name": "t",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "lint": "eslint .",
+    "typecheck": "nuxt typecheck",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage",
+    "test:unit": "vitest --project unit",
+    "test:nuxt": "vitest --project nuxt",
+    "test:e2e": "vitest --project e2e"
+  },
+  "dependencies": {
+    "@iconify-json/lucide": "^1.2.102",
+    "@iconify-json/simple-icons": "^1.2.78",
+    "@nuxt/a11y": "1.0.0-alpha.1",
+    "@nuxt/image": "2.0.0",
+    "@nuxt/test-utils": "4.0.2",
+    "@nuxt/ui": "^4.6.1",
+    "@nuxtjs/eslint-module": "4.1.0",
+    "@nuxtjs/i18n": "10.2.4",
+    "@nuxtjs/mcp-toolkit": "0.13.4",
+    "better-auth": "^1.6.4",
+    "drizzle-orm": "^0.45.2",
+    "nuxt": "^4.4.2",
+    "nuxt-posthog": "1.6.3",
+    "tailwindcss": "^4.2.2"
+  },
+  "devDependencies": {
+    "@nuxt/eslint": "^1.15.2",
+    "@vitest/coverage-v8": "^4.1.4",
+    "@vue/test-utils": "^2.4.6",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "^10.2.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.4",
+    "vue-tsc": "^3.2.6"
+  },
+  "packageManager": "pnpm@10.33.0"
+}
