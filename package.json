@@ -8,7 +8,10 @@
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
     "lint": "eslint .",
-    "typecheck": "nuxt typecheck"
+    "typecheck": "nuxt typecheck",
+    "auth:generate": "pnpm dlx auth@latest generate --config ./server/utils/auth.ts --output ./server/database/schema/auth.ts -y",
+    "db:generate": "drizzle-kit generate --config ./server/database/drizzle.config.ts",
+    "db:migrate": "drizzle-kit migrate --config ./server/database/drizzle.config.ts"
   },
   "dependencies": {
     "@better-auth/passkey": "^1.6.5",
