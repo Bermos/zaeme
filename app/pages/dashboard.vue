@@ -5,7 +5,27 @@ definePageMeta({ middleware: 'auth' })
 
 const { data: session } = authClient.useSession(useFetch)
 
-const { data: events, status } = await useFetch('/api/events')
+type EventStatus = 'draft' | 'polling' | 'published' | 'completed' | 'cancelled'
+type EventType = 'hosted' | 'concert' | 'series'
+type PlannerRole = 'owner' | 'co_planner' | 'logistics'
+
+interface EventRow {
+  id: string
+  slug: string
+  title: string
+  type: EventType
+  status: EventStatus
+  startsAt: string | null
+  endsAt: string | null
+  location: string | null
+  isPublic: boolean
+  parentId: string | null
+  createdAt: string
+  updatedAt: string
+  plannerRole: PlannerRole
+}
+
+const { data: events, status } = await useFetch<EventRow[]>('/api/events')
 
 const statusBadge: Record<string, { color: 'neutral' | 'warning' | 'success' | 'primary' | 'error', label: string }> = {
   draft: { color: 'neutral', label: 'Draft' },

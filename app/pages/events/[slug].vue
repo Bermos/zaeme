@@ -8,7 +8,46 @@ const slug = route.params.slug as string
 
 useSeoMeta({ title: 'zäme — Event' })
 
-const { data: ev, refresh, status: fetchStatus } = await useFetch(`/api/events/${slug}`)
+type EventStatus = 'draft' | 'polling' | 'published' | 'completed' | 'cancelled'
+type EventType = 'hosted' | 'concert' | 'series'
+type PlannerRole = 'owner' | 'co_planner' | 'logistics'
+
+interface EventPlanner {
+  userId: string
+  role: PlannerRole
+  name: string
+  email: string
+}
+
+interface EventDetail {
+  id: string
+  slug: string
+  title: string
+  type: EventType
+  status: EventStatus
+  description: string | null
+  startsAt: string | null
+  endsAt: string | null
+  location: string | null
+  venueStation: string | null
+  ticketUrl: string | null
+  performerNote: string | null
+  isPublic: boolean
+  parentId: string | null
+  createdAt: string
+  updatedAt: string
+  planners: EventPlanner[]
+}
+
+interface EpisodeRow {
+  id: string
+  slug: string
+  title: string
+  status: EventStatus
+  startsAt: string | null
+}
+
+const { data: ev, refresh, status: fetchStatus } = await useFetch<EventDetail>(`/api/events/${slug}`)
 
 // Update page title when data loads
 watchEffect(() => {
@@ -49,12 +88,12 @@ const TRANSITIONS: Record<string, string[]> = {
 
 const nextStatuses = computed(() => TRANSITIONS[ev.value?.status ?? 'draft'] ?? [])
 
+const { data: session } = authClient.useSession(useFetch)
+
 const currentPlanner = computed(() =>
-  ev.value?.planners?.find((p: { userId: string }) => p.userId === session.value?.user?.id)
+  ev.value?.planners?.find(p => p.userId === session.value?.user?.id)
 )
 const isOwner = computed(() => currentPlanner.value?.role === 'owner')
-
-const { data: session } = authClient.useSession(useFetch)
 
 async function transitionStatus(newStatus: string) {
   statusLoading.value = true
@@ -76,13 +115,13 @@ async function transitionStatus(newStatus: string) {
 // --- Edit form ---
 const editSchema = z.object({
   title: z.string().min(1, 'Title is required').max(200),
-  description: z.string().optional().nullable(),
+  description: z.string().optional(),
   startsAt: z.string().optional(),
   endsAt: z.string().optional(),
-  location: z.string().optional().nullable(),
-  venueStation: z.string().optional().nullable(),
-  ticketUrl: z.string().url('Enter a valid URL').optional().or(z.literal('')).nullable(),
-  performerNote: z.string().optional().nullable(),
+  location: z.string().optional(),
+  venueStation: z.string().optional(),
+  ticketUrl: z.string().url('Enter a valid URL').optional().or(z.literal('')),
+  performerNote: z.string().optional(),
   isPublic: z.boolean()
 })
 
@@ -151,7 +190,7 @@ const addPlannerLoading = ref(false)
 const addPlannerError = ref<string | null>(null)
 
 const availableUsers = computed(() => {
-  const existingIds = new Set(ev.value?.planners?.map((p: { userId: string }) => p.userId) ?? [])
+  const existingIds = new Set(ev.value?.planners?.map(p => p.userId) ?? [])
   return (allUsers.value ?? []).filter(u => !existingIds.has(u.id))
 })
 
@@ -187,11 +226,19 @@ async function removePlanner(userId: string) {
   }
 }
 
-// Episodes for series
-const { data: episodes, refresh: refreshEpisodes } = await useFetch(
-  () => ev.value?.type === 'series' ? `/api/events/${slug}/episodes` : null,
-  { watch: [() => ev.value?.type] }
+// Episodes for series — only fetched when event type is series
+const isSeries = computed(() => ev.value?.type === 'series')
+const { data: episodes, refresh: refreshEpisodes } = useFetch<EpisodeRow[]>(
+  `/api/events/${slug}/episodes`,
+  {
+    immediate: isSeries.value,
+    watch: false
+  }
 )
+
+watch(isSeries, async (nowSeries) => {
+  if (nowSeries) await refreshEpisodes()
+})
 
 const newEpisodeOpen = ref(false)
 const newEpisodeSchema = z.object({
@@ -594,7 +641,6 @@ async function createEpisode() {
     <UModal
       v-model:open="editOpen"
       title="Edit event"
-      :ui="{ width: 'max-w-2xl' }"
     >
       <template #body>
         <UForm
@@ -856,5 +902,5 @@ async function createEpisode() {
         </UForm>
       </template>
     </UModal>
-  </ucontainer>
+  </UContainer>
 </template>

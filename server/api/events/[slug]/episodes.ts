@@ -1,9 +1,9 @@
 import { eq, and, desc } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { z } from 'zod'
-import { db } from '../../../../utils/db'
-import { requireAuth } from '../../../../utils/session'
-import { event, eventPlanner } from '../../../../database/schema/events'
+import { db } from '../../../utils/db'
+import { requireAuth } from '../../../utils/session'
+import { event, eventPlanner } from '../../../database/schema/events'
 
 export default defineEventHandler(async (e) => {
   const session = await requireAuth(e)
@@ -61,7 +61,7 @@ export default defineEventHandler(async (e) => {
     const body = await readValidatedBody(e, schema.parse)
 
     const id = createId()
-    const { generateUniqueSlug } = await import('../../../../utils/slugify')
+    const { generateUniqueSlug } = await import('../../../utils/slugify')
     const slug = await generateUniqueSlug(body.title)
 
     await db.transaction(async (tx) => {
