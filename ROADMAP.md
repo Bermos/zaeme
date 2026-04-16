@@ -6,18 +6,13 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 ## Phase 0 — Foundation
 
-- [ ] Initialise Nuxt 4 app with `pnpm` workspaces monorepo structure
-- [ ] Configure `packages/db` with Drizzle + `postgres.js` + Neon
+- [x] Initialise Nuxt 4 app with `pnpm` workspaces monorepo structure
+- [x] Configure `packages/db` with Drizzle + `postgres.js` + Neon
 - [ ] Write full database schema (all tables, enums, relations)
-- [ ] Configure `drizzle-kit` for migrations
-- [ ] Auto-migrate on server startup (`server/plugins/migrate.ts`)
-- [ ] Set up Better Auth (email/password + magic link strategies)
+- [x] Set up Better Auth (email/password + magic link strategies)
 - [ ] First-run `/setup` page for admin account creation
 - [ ] Configure Nuxt UI + Tailwind CSS
 - [ ] `.env.example` with all variables documented
-- [ ] `docker/compose.yml` for local development (Postgres sidecar)
-- [ ] `docker/compose.prod.yml` for production deployment
-- [ ] Seed script for development (`pnpm db:seed`)
 
 -----
 
