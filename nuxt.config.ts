@@ -6,7 +6,6 @@ export default defineNuxtConfig({
     '@nuxt/a11y',
     '@nuxt/image',
     '@nuxt/test-utils',
-    '@nuxtjs/eslint-module',
     '@nuxtjs/i18n',
     '@nuxtjs/mcp-toolkit',
     'nuxt-posthog'
