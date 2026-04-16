@@ -8,11 +8,11 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 - [x] Initialise Nuxt 4 app with `pnpm` workspaces monorepo structure
 - [x] Configure `packages/db` with Drizzle + `postgres.js` + Neon
-- [ ] Write full database schema (all tables, enums, relations)
+- [x] Write full database schema (all tables, enums, relations)
 - [x] Set up Better Auth (email/password + magic link strategies)
-- [ ] First-run `/setup` page for admin account creation
+- [x] First-run `/setup` page for admin account creation
 - [x] Configure Nuxt UI + Tailwind CSS
-- [ ] `.env.example` with all variables documented
+- [x] `.env.example` with all variables documented
 
 -----
 
