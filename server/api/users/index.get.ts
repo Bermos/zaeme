@@ -7,5 +7,5 @@ export default defineEventHandler(async (e) => {
 
   return db
     .select({ id: user.id, name: user.name, email: user.email })
-    .from(user);
+    .from(user)
 })

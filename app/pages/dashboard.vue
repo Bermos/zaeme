@@ -3,7 +3,7 @@ useSeoMeta({ title: 'zäme — Dashboard' })
 
 definePageMeta({ middleware: 'auth' })
 
-const { data: session } = authClient.useSession(useFetch)
+const { data: session } = await authClient.useSession(useFetch)
 
 type EventStatus = 'draft' | 'polling' | 'published' | 'completed' | 'cancelled'
 type EventType = 'hosted' | 'concert' | 'series'

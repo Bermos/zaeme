@@ -88,7 +88,7 @@ const TRANSITIONS: Record<string, string[]> = {
 
 const nextStatuses = computed(() => TRANSITIONS[ev.value?.status ?? 'draft'] ?? [])
 
-const { data: session } = authClient.useSession(useFetch)
+const { data: session } = await authClient.useSession(useFetch)
 
 const currentPlanner = computed(() =>
   ev.value?.planners?.find(p => p.userId === session.value?.user?.id)

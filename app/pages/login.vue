@@ -4,7 +4,7 @@ import { z } from 'zod'
 useSeoMeta({ title: 'zäme — Log in' })
 
 // Redirect if already logged in
-const { data: session } = authClient.useSession(useFetch)
+const { data: session } = await authClient.useSession(useFetch)
 if (session.value) {
   await navigateTo('/dashboard')
 }
