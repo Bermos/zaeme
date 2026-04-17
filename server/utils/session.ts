@@ -6,7 +6,7 @@ import { auth } from './auth'
  * Throws a 401 if not authenticated.
  */
 export async function requireAuth(event: H3Event) {
-  const session = await auth.api.getSession({ headers: toWebRequest(event).headers })
+  const session = await auth.api.getSession({ headers: new Headers(getRequestHeaders(event)) })
   if (!session?.user) {
     throw createError({ statusCode: 401, message: 'Unauthorized' })
   }
