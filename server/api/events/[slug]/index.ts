@@ -53,11 +53,11 @@ export default defineEventHandler(async (e) => {
     const schema = z.object({
       title: z.string().min(1).max(200).optional(),
       description: z.string().optional().nullable(),
-      startsAt: z.string().datetime({ offset: true }).optional().nullable(),
-      endsAt: z.string().datetime({ offset: true }).optional().nullable(),
+      startsAt: z.iso.datetime({ offset: true }).optional().nullable(),
+      endsAt: z.iso.datetime({ offset: true }).optional().nullable(),
       location: z.string().optional().nullable(),
       venueStation: z.string().optional().nullable(),
-      ticketUrl: z.string().url().optional().nullable(),
+      ticketUrl: z.url().optional().nullable(),
       performerNote: z.string().optional().nullable(),
       isPublic: z.boolean().optional()
     })

@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { db } from '#server/utils/db'
 import { requireAuth } from '#server/utils/session'
 import { event, eventPlanner } from '#server/database/schema'
+import { generateUniqueSlug } from '#server/utils/slugify'
 
 export default defineEventHandler(async (e) => {
   if (e.method === 'GET') {
@@ -39,11 +40,11 @@ export default defineEventHandler(async (e) => {
       title: z.string().min(1).max(200),
       type: z.enum(['hosted', 'concert', 'series']).default('hosted'),
       description: z.string().optional(),
-      startsAt: z.string().datetime({ offset: true }).optional().nullable(),
-      endsAt: z.string().datetime({ offset: true }).optional().nullable(),
+      startsAt: z.iso.datetime({ offset: true }).optional().nullable(),
+      endsAt: z.iso.datetime({ offset: true }).optional().nullable(),
       location: z.string().optional(),
       venueStation: z.string().optional(),
-      ticketUrl: z.string().url().optional().nullable(),
+      ticketUrl: z.url().optional().nullable(),
       performerNote: z.string().optional(),
       parentId: z.string().optional().nullable()
     })
@@ -54,7 +55,6 @@ export default defineEventHandler(async (e) => {
     const isPublic = body.type === 'concert'
 
     const id = createId()
-    const { generateUniqueSlug } = await import('../../utils/slugify')
     const slug = await generateUniqueSlug(body.title)
 
     await db.transaction(async (tx) => {

@@ -18,7 +18,9 @@ Purpose: quick operating rules for future agents touching this codebase.
   - Prefer `return db.select(...).from(...)` over temporary `const rows = ...; return rows`.
 
 - Keep Zod usage modern and concise in app forms.
-  - Prefer `z.email(...)` and `z.url(...)` over `z.string().email(...)` / `z.string().url(...)` when equivalent.
+  - Prefer `z.email(...)` over `z.string().email(...)`
+  - Prefer `z.url(...)` over `z.string().url(...)`
+  - Prefer `z.iso.datetime({ offset: true })` over `z.string().datetime({ offset: true })`
 
 ## Scope where these rules matter most
 
