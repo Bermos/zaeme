@@ -29,7 +29,7 @@ export default defineEventHandler(async (e) => {
       .from(event)
       .innerJoin(eventPlanner, eq(event.id, eventPlanner.eventId))
       .where(eq(eventPlanner.userId, session.user.id))
-      .orderBy(desc(event.createdAt));
+      .orderBy(desc(event.createdAt))
   }
 
   if (e.method === 'POST') {

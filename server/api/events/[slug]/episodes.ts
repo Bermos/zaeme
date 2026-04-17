@@ -42,7 +42,7 @@ export default defineEventHandler(async (e) => {
       .select()
       .from(event)
       .where(eq(event.parentId, parent.id))
-      .orderBy(desc(event.startsAt));
+      .orderBy(desc(event.startsAt))
   }
 
   if (e.method === 'POST') {

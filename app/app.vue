@@ -21,7 +21,7 @@ useSeoMeta({
   ogDescription: description
 })
 
-const { data: session } = authClient.useSession(useFetch)
+const { data: session } = await authClient.useSession(useFetch)
 
 async function signOut() {
   await authClient.signOut()

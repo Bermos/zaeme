@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 useSeoMeta({ title: 'zäme — Welcome' })
 
-const { data: session } = authClient.useSession(useFetch)
+const { data: session } = await authClient.useSession(useFetch)
 
 const schema = z.object({
   eventId: z.string().min(1, 'Please enter an event ID')
