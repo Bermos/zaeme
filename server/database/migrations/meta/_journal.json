@@ -15,6 +15,13 @@
       "when": 1776375311642,
       "tag": "0001_sudden_wilson_fisk",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776427230551,
+      "tag": "0002_amused_baron_zemo",
+      "breakpoints": true
     }
   ]
 }

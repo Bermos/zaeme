@@ -276,6 +276,59 @@ async function createEpisode() {
     newEpisodeLoading.value = false
   }
 }
+
+// --- Invite link ---
+interface InviteRow {
+  id: string
+  token: string
+  createdAt: string
+  updatedAt: string
+}
+// Only owner / co_planner can manage invites; fetch lazily so `logistics` planners
+// don't see a 403 in the console.
+const canManageInvite = computed(() =>
+  currentPlanner.value?.role === 'owner' || currentPlanner.value?.role === 'co_planner'
+)
+const { data: invite, refresh: refreshInvite } = useFetch<InviteRow | null>(
+  `/api/events/${slug}/invite`,
+  { immediate: false, watch: false, default: () => null }
+)
+
+watch(canManageInvite, async (can) => {
+  if (can) await refreshInvite()
+}, { immediate: true })
+
+const inviteUrl = computed(() => {
+  if (!invite.value) return null
+  if (import.meta.server) return `/invite/${invite.value.token}`
+  return `${window.location.origin}/invite/${invite.value.token}`
+})
+
+const inviteLoading = ref(false)
+
+async function createOrRotateInvite() {
+  inviteLoading.value = true
+  try {
+    await $fetch(`/api/events/${slug}/invite`, { method: 'POST' })
+    await refreshInvite()
+    toast.add({ title: 'Invite link ready', color: 'success' })
+  } catch (err: unknown) {
+    const e = err as { data?: { message?: string } }
+    toast.add({ title: 'Error', description: e?.data?.message ?? 'Failed to generate invite', color: 'error' })
+  } finally {
+    inviteLoading.value = false
+  }
+}
+
+async function copyInvite() {
+  if (!inviteUrl.value) return
+  try {
+    await navigator.clipboard.writeText(inviteUrl.value)
+    toast.add({ title: 'Invite link copied', color: 'success' })
+  } catch {
+    toast.add({ title: 'Copy failed', description: 'Please copy manually.', color: 'error' })
+  }
+}
 </script>
 
 <template>
@@ -631,6 +684,74 @@ async function createEpisode() {
                 />
                 <span class="font-medium text-error">Cancelled</span>
               </div>
+            </div>
+          </UCard>
+
+          <!-- Invite + RSVPs -->
+          <UCard v-if="canManageInvite">
+            <template #header>
+              <div class="flex items-center justify-between">
+                <h2 class="font-semibold">
+                  Invite
+                </h2>
+                <UButton
+                  :to="`/events/${slug}/attendees`"
+                  size="sm"
+                  icon="i-lucide-users"
+                  variant="ghost"
+                  label="RSVPs"
+                />
+              </div>
+            </template>
+
+            <div v-if="!invite">
+              <p class="text-sm text-muted mb-3">
+                Generate a public invite link to share with your guests.
+              </p>
+              <UButton
+                icon="i-lucide-link"
+                label="Generate invite link"
+                :loading="inviteLoading"
+                block
+                @click="createOrRotateInvite"
+              />
+            </div>
+
+            <div
+              v-else
+              class="space-y-3"
+            >
+              <p class="text-sm text-muted">
+                Anyone with this link can RSVP.
+              </p>
+              <div class="flex items-center gap-2">
+                <UInput
+                  :model-value="inviteUrl ?? ''"
+                  readonly
+                  class="flex-1 font-mono text-xs"
+                  size="sm"
+                />
+                <UButton
+                  icon="i-lucide-copy"
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Copy invite link"
+                  @click="copyInvite"
+                />
+              </div>
+              <UButton
+                icon="i-lucide-refresh-cw"
+                variant="soft"
+                color="warning"
+                size="sm"
+                label="Rotate link"
+                :loading="inviteLoading"
+                block
+                @click="createOrRotateInvite"
+              />
+              <p class="text-xs text-muted">
+                Rotating invalidates the previous link.
+              </p>
             </div>
           </UCard>
         </div>
