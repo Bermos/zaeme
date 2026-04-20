@@ -45,9 +45,7 @@ interface EpisodeRow {
   title: string
   status: EventStatus
   startsAt: string | null
-}
-
-const { data: ev, refresh, status: fetchStatus } = await useFetch<EventDetail>(`/api/events/${slug}`)
+} const { data: ev, refresh, status: fetchStatus } = await useFetch<EventDetail>(`/api/events/${slug}`)
 
 // Update page title when data loads
 watchEffect(() => {
@@ -276,6 +274,100 @@ async function createEpisode() {
     newEpisodeLoading.value = false
   }
 }
+
+// --- Invites ---
+interface InviteRow {
+  id: string
+  token: string
+  label: string | null
+  email: string | null
+  name: string | null
+  maxUses: number | null
+  usedCount: number
+  expiresAt: string | null
+  revokedAt: string | null
+  createdAt: string
+  rsvpCount: number
+}
+
+const { data: invites, refresh: refreshInvites } = await useFetch<InviteRow[]>(
+  `/api/events/${slug}/invites`
+)
+
+const inviteUrl = useInviteUrl()
+
+const newInviteOpen = ref(false)
+const newInviteSchema = z.object({
+  label: z.string().max(120).optional(),
+  email: z.email().optional().or(z.literal('')),
+  name: z.string().max(120).optional(),
+  maxUses: z.number().int().positive().max(10_000).optional(),
+  expiresAt: z.string().optional()
+})
+type NewInviteSchema = z.output<typeof newInviteSchema>
+const newInviteState = reactive<Partial<NewInviteSchema>>({})
+const newInviteLoading = ref(false)
+const newInviteError = ref<string | null>(null)
+
+async function createInvite() {
+  newInviteLoading.value = true
+  newInviteError.value = null
+  try {
+    const payload: Record<string, unknown> = {}
+    if (newInviteState.label) payload.label = newInviteState.label
+    if (newInviteState.email) payload.email = newInviteState.email
+    if (newInviteState.name) payload.name = newInviteState.name
+    if (newInviteState.maxUses) payload.maxUses = newInviteState.maxUses
+    if (newInviteState.expiresAt) payload.expiresAt = new Date(newInviteState.expiresAt).toISOString()
+
+    await $fetch(`/api/events/${slug}/invites`, { method: 'POST', body: payload })
+    await refreshInvites()
+    newInviteOpen.value = false
+    newInviteState.label = undefined
+    newInviteState.email = undefined
+    newInviteState.name = undefined
+    newInviteState.maxUses = undefined
+    newInviteState.expiresAt = undefined
+    toast.add({ title: 'Invite created', color: 'success' })
+  } catch (err: unknown) {
+    const e = err as { data?: { message?: string } }
+    newInviteError.value = e?.data?.message ?? 'Failed to create invite'
+  } finally {
+    newInviteLoading.value = false
+  }
+}
+
+async function copyInvite(token: string) {
+  const url = inviteUrl(token)
+  try {
+    await navigator.clipboard.writeText(url)
+    toast.add({ title: 'Link copied', description: url, color: 'success' })
+  } catch {
+    toast.add({ title: 'Copy failed', description: url, color: 'error' })
+  }
+}
+
+async function revokeInvite(id: string) {
+  try {
+    await $fetch(`/api/events/${slug}/invites/${id}`, { method: 'DELETE' })
+    await refreshInvites()
+    toast.add({ title: 'Invite revoked', color: 'success' })
+  } catch (err: unknown) {
+    const e = err as { data?: { message?: string } }
+    toast.add({ title: 'Error', description: e?.data?.message ?? 'Failed to revoke', color: 'error' })
+  }
+}
+
+const canManageInvites = computed(() =>
+  currentPlanner.value?.role === 'owner' || currentPlanner.value?.role === 'co_planner'
+)
+
+// --- RSVP summary ---
+interface RsvpSummary { yes: number, maybe: number, no: number, cheering: number, total: number, headcount: number }
+const { data: rsvpData } = await useFetch<{ summary: RsvpSummary }>(
+  `/api/events/${slug}/rsvps`,
+  { transform: d => ({ summary: d.summary }) }
+)
 </script>
 
 <template>
@@ -353,6 +445,13 @@ async function createEpisode() {
               </template>
             </UDropdownMenu>
           </UButton>
+          <UButton
+            icon="i-lucide-users"
+            variant="ghost"
+            size="sm"
+            :label="rsvpData?.summary ? `Guests (${rsvpData.summary.headcount})` : 'Guests'"
+            :to="`/events/${ev.slug}/rsvps`"
+          />
           <UButton
             icon="i-lucide-pencil"
             variant="ghost"
@@ -598,6 +697,80 @@ async function createEpisode() {
             </ul>
           </UCard>
 
+          <!-- Invites card -->
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <h2 class="font-semibold">
+                  Invites
+                </h2>
+                <UButton
+                  v-if="canManageInvites"
+                  size="sm"
+                  icon="i-lucide-link"
+                  variant="ghost"
+                  @click="newInviteOpen = true"
+                />
+              </div>
+            </template>
+
+            <div
+              v-if="!invites?.length"
+              class="text-sm text-muted py-2"
+            >
+              No invites yet. Create one to share a link.
+            </div>
+
+            <ul
+              v-else
+              class="divide-y divide-default"
+            >
+              <li
+                v-for="inv in invites"
+                :key="inv.id"
+                class="py-2.5 flex items-start gap-2"
+              >
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <p class="text-sm font-medium truncate">
+                      {{ inv.label || inv.email || 'Shareable link' }}
+                    </p>
+                    <UBadge
+                      v-if="inv.revokedAt"
+                      size="sm"
+                      color="error"
+                      variant="subtle"
+                    >
+                      Revoked
+                    </UBadge>
+                  </div>
+                  <p class="text-xs text-muted mt-0.5">
+                    {{ inv.usedCount }}{{ inv.maxUses ? ` / ${inv.maxUses}` : '' }} uses
+                    <span v-if="inv.rsvpCount"> · {{ inv.rsvpCount }} RSVP{{ inv.rsvpCount === 1 ? '' : 's' }}</span>
+                    <span v-if="inv.expiresAt"> · expires {{ new Date(inv.expiresAt).toLocaleDateString('en-CH') }}</span>
+                  </p>
+                </div>
+                <div class="shrink-0 flex items-center gap-0.5">
+                  <UButton
+                    icon="i-lucide-copy"
+                    variant="ghost"
+                    size="xs"
+                    :disabled="!!inv.revokedAt"
+                    @click="copyInvite(inv.token)"
+                  />
+                  <UButton
+                    v-if="canManageInvites && !inv.revokedAt"
+                    icon="i-lucide-x"
+                    variant="ghost"
+                    size="xs"
+                    color="error"
+                    @click="revokeInvite(inv.id)"
+                  />
+                </div>
+              </li>
+            </ul>
+          </UCard>
+
           <!-- Status history / info card -->
           <UCard>
             <template #header>
@@ -636,8 +809,6 @@ async function createEpisode() {
         </div>
       </div>
     </template>
-
-    <!-- Edit modal -->
     <UModal
       v-model:open="editOpen"
       title="Edit event"
@@ -897,6 +1068,103 @@ async function createEpisode() {
               label="Create episode"
               :loading="newEpisodeLoading"
               icon="i-lucide-plus"
+            />
+          </div>
+        </UForm>
+      </template>
+    </UModal>
+
+    <!-- New invite modal -->
+    <UModal
+      v-model:open="newInviteOpen"
+      title="Create invite link"
+    >
+      <template #body>
+        <UForm
+          :schema="newInviteSchema"
+          :state="newInviteState"
+          class="space-y-4 p-1"
+          @submit="createInvite"
+        >
+          <UFormField
+            label="Label"
+            name="label"
+            help="Optional — e.g. 'Family', 'Slack share'"
+          >
+            <UInput
+              v-model="newInviteState.label"
+              class="w-full"
+              placeholder="Shareable link"
+            />
+          </UFormField>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <UFormField
+              label="Recipient name"
+              name="name"
+              help="Shown on the invite page"
+            >
+              <UInput
+                v-model="newInviteState.name"
+                class="w-full"
+              />
+            </UFormField>
+            <UFormField
+              label="Recipient email"
+              name="email"
+              help="Leave blank for a shareable link"
+            >
+              <UInput
+                v-model="newInviteState.email"
+                type="email"
+                class="w-full"
+              />
+            </UFormField>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <UFormField
+              label="Max uses"
+              name="maxUses"
+              help="Unlimited if blank"
+            >
+              <UInput
+                v-model="newInviteState.maxUses"
+                type="number"
+                min="1"
+                class="w-full"
+              />
+            </UFormField>
+            <UFormField
+              label="Expires"
+              name="expiresAt"
+            >
+              <UInput
+                v-model="newInviteState.expiresAt"
+                type="datetime-local"
+                class="w-full"
+              />
+            </UFormField>
+          </div>
+
+          <UAlert
+            v-if="newInviteError"
+            color="error"
+            variant="subtle"
+            :description="newInviteError"
+          />
+
+          <div class="flex justify-end gap-3 pt-2">
+            <UButton
+              variant="ghost"
+              label="Cancel"
+              @click="newInviteOpen = false"
+            />
+            <UButton
+              type="submit"
+              label="Create invite"
+              :loading="newInviteLoading"
+              icon="i-lucide-link"
             />
           </div>
         </UForm>

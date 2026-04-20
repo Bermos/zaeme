@@ -15,3 +15,14 @@ export async function requireAuth(event: H3Event) {
   }
   return session
 }
+
+/**
+ * Return the current session if present, otherwise null. Used by
+ * routes that accept both guest-token and authenticated access.
+ */
+export async function optionalAuth(event: H3Event) {
+  const session = await auth.api.getSession({
+    headers: event.headers
+  })
+  return session?.user ? session : null
+}

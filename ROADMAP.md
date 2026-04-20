@@ -33,15 +33,15 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 ## Phase 2 — Invites & RSVP
 
-- [ ] Invite token generation per event
-- [ ] Public invite page (`/invite/[token]`) — SSR, OG meta tags
-- [ ] RSVP flow — yes / maybe / no / cheering (concert)
-- [ ] Guest RSVP (no account required) — name + email + token
-- [ ] Registered user RSVP
-- [ ] `+1` support on RSVP
-- [ ] Dietary / accessibility / note field on RSVP
-- [ ] RSVP management page for planners (list, edit, remove)
-- [ ] Magic link RSVP (guest clicks link in email, lands pre-authenticated)
+- [x] Invite token generation per event
+- [x] Public invite page (`/invite/[token]`) — SSR, OG meta tags
+- [x] RSVP flow — yes / maybe / no / cheering (concert)
+- [x] Guest RSVP (no account required) — name + email + token
+- [x] Registered user RSVP
+- [x] `+1` support on RSVP
+- [x] Dietary / accessibility / note field on RSVP
+- [x] RSVP management page for planners (list, edit, remove)
+- [x] Magic link RSVP (guest clicks link in email, lands pre-authenticated)
 
 -----
 
