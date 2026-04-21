@@ -70,6 +70,7 @@ export default defineEventHandler(async (e) => {
       uploadedByUserId: media.uploadedByUserId,
       uploadedByRsvpId: media.uploadedByRsvpId,
       assignedRsvpId: media.assignedRsvpId,
+      timelineItemId: media.timelineItemId,
       createdAt: media.createdAt,
       uploadedByUserName: uploaderUser.name,
       uploadedByUserEmail: uploaderUser.email

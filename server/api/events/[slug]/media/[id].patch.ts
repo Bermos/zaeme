@@ -4,13 +4,15 @@ import { db } from '#server/utils/db'
 import { optionalAuth } from '#server/utils/session'
 import { assertPlanner, loadEventBySlug } from '#server/utils/permissions'
 import { resolveInviteToken } from '#server/utils/invite'
-import { media, rsvp } from '#server/database/schema'
+import { media, rsvp, timelineItem } from '#server/database/schema'
 
 const bodySchema = z.object({
   // Either edit mode — planner session only — for ticket assignment & caption.
   caption: z.string().max(2000).optional().nullable(),
   // Ticket-only: planner assigns the ticket to a specific RSVP (pass null to unassign).
   assignedRsvpId: z.string().min(1).max(50).optional().nullable(),
+  // Planner: pin/unpin this media item to a timeline item (pass null to unpin).
+  timelineItemId: z.string().min(1).max(50).optional().nullable(),
   // Guest confirm path: the guest may edit the caption of their own upload
   // via `?rsvpToken=...` — passes the same token they used to upload.
   rsvpToken: z.string().min(1).max(200).optional().nullable()
@@ -81,9 +83,27 @@ export default defineEventHandler(async (e) => {
     }
   }
 
+  // `timelineItemId` is planner-only.
+  if (body.timelineItemId !== undefined) {
+    if (!isPlanner) {
+      throw createError({ statusCode: 403, message: 'Only planners can pin media to timeline items' })
+    }
+    if (body.timelineItemId !== null) {
+      const [target] = await db
+        .select({ id: timelineItem.id })
+        .from(timelineItem)
+        .where(and(eq(timelineItem.id, body.timelineItemId), eq(timelineItem.eventId, ev.id)))
+        .limit(1)
+      if (!target) {
+        throw createError({ statusCode: 422, message: 'Timeline item not found on this event' })
+      }
+    }
+  }
+
   const updates: Partial<typeof media.$inferInsert> = {}
   if (body.caption !== undefined) updates.caption = body.caption
   if (body.assignedRsvpId !== undefined) updates.assignedRsvpId = body.assignedRsvpId
+  if (body.timelineItemId !== undefined) updates.timelineItemId = body.timelineItemId
 
   if (Object.keys(updates).length === 0) {
     return { media: row }
