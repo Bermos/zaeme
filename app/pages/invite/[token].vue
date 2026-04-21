@@ -462,6 +462,16 @@ const formattedEnd = computed(() =>
           </div>
         </UForm>
       </UCard>
+
+      <!-- Media gallery: visible after RSVP on published/completed events -->
+      <MediaGallery
+        v-if="data.existingRsvp
+          && data.existingRsvp.status !== 'no'
+          && (data.event.status === 'published' || data.event.status === 'completed')"
+        :slug="data.event.slug"
+        :rsvp-token="data.invite.token"
+        class="mt-6"
+      />
     </template>
   </UContainer>
 </template>

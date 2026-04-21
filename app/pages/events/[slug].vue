@@ -364,9 +364,19 @@ const canManageInvites = computed(() =>
 
 // --- RSVP summary ---
 interface RsvpSummary { yes: number, maybe: number, no: number, cheering: number, total: number, headcount: number }
-const { data: rsvpData } = await useFetch<{ summary: RsvpSummary }>(
+interface RsvpRowMinimal { id: string, guestName: string | null, userName: string | null, guestEmail: string | null, userEmail: string | null, status: string }
+const { data: rsvpData } = await useFetch<{ summary: RsvpSummary, rsvps: RsvpRowMinimal[] }>(
   `/api/events/${slug}/rsvps`,
-  { transform: d => ({ summary: d.summary }) }
+  { transform: d => ({ summary: d.summary, rsvps: d.rsvps }) }
+)
+
+const attendeeOptions = computed(() =>
+  (rsvpData.value?.rsvps ?? [])
+    .filter(r => r.status !== 'no')
+    .map(r => ({
+      id: r.id,
+      label: (r.userName || r.guestName || r.userEmail || r.guestEmail || 'Unknown') as string
+    }))
 )
 </script>
 
@@ -641,9 +651,14 @@ const { data: rsvpData } = await useFetch<{ summary: RsvpSummary }>(
               </li>
             </ul>
           </UCard>
-        </div>
 
-        <!-- Sidebar -->
+          <!-- Media gallery -->
+          <MediaGallery
+            :slug="ev.slug"
+            :attendees="attendeeOptions"
+            :can-upload="ev.status !== 'cancelled'"
+          />
+        </div>
         <div class="space-y-6">
           <!-- Planners card -->
           <UCard>
