@@ -18,6 +18,7 @@ Self-hostable. Open source. Built with love in Bern.
 - **To-do lists** — shared organizer checklist and personal pack lists for attendees, seeded from a template you define.
 - **Chat** — per-event group chat for everyone attending.
 - **Media & documents** — share photos, tickets, booking confirmations. Assign tickets to specific people.
+- **Timeline / Itinerary** — structured event schedule with typed steps (transport, activity, accommodation, meal). Drag-to-reorder, media pinning per step.
 - **AI assistant** — Claude helps you brainstorm, plan itineraries, and draft pack list templates, with full event context.
 - **MCP server** — expose your events as an MCP resource so you can plan directly from Claude.ai.
 

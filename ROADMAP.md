@@ -123,7 +123,21 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 -----
 
-## Phase 8 — To-Do Lists
+## Phase 8 — Timeline / Itinerary
+
+- [x] `timeline_item` schema + Drizzle migrations
+- [x] Timeline CRUD API (`GET / POST /api/events/[slug]/timeline/`, `PATCH / DELETE /api/events/[slug]/timeline/[id]`)
+- [x] Planner-scoped write access; read access for all event participants
+- [x] Item types: transport, activity, accommodation, meal, other
+- [x] `sortOrder` field — drag-to-reorder in the UI
+- [x] Optional icon override (Heroicons / Lucide slug)
+- [x] `pollId` forward-reference for poll-conditional items (renders "pending" badge)
+- [x] `EventTimeline.vue` — timeline UI with type icons and inline editing
+- [x] Media pinning — attach a media item to a timeline step via `timelineItemId` FK
+
+-----
+
+## Phase 9 — To-Do Lists
 
 - [ ] Organizer to-do list — create, assign, complete, reorder
 - [ ] Assignee filter + progress view for planners
@@ -135,7 +149,7 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 -----
 
-## Phase 9 — AI Assistant
+## Phase 10 — AI Assistant
 
 - [ ] Anthropic SDK setup in Nuxt server
 - [ ] `POST /api/ai/chat` — streamed response with event context injection
@@ -147,7 +161,7 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 -----
 
-## Phase 10 — MCP Server
+## Phase 11 — MCP Server
 
 - [ ] `@modelcontextprotocol/sdk` setup
 - [ ] MCP endpoint (`POST /mcp`) with admin auth
@@ -158,7 +172,7 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 -----
 
-## Phase 11 — Polish & Self-hosting
+## Phase 12 — Polish & Self-hosting
 
 - [ ] `/setup` first-run wizard (admin account + instance name)
 - [ ] Admin settings page (instance name, base URL, feature flags)
