@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from 'drizzle-orm'
+import { and, asc, desc, eq, sql } from 'drizzle-orm'
 import { db } from '#server/utils/db'
 import { optionalAuth } from '#server/utils/session'
 import { assertPlanner, loadEventBySlug } from '#server/utils/permissions'
@@ -77,7 +77,9 @@ export default defineEventHandler(async (e) => {
     .from(media)
     .leftJoin(user, eq(media.uploadedByUserId, user.id))
     .where(and(eq(media.eventId, ev.id), eq(media.status, 'ready')))
-    .orderBy(desc(media.takenAt), asc(media.createdAt))
+    // Sort as a timeline: use takenAt when present, fall back to createdAt so
+    // items without EXIF/metadata don't bubble to the top as NULL-first.
+    .orderBy(desc(sql`coalesce(${media.takenAt}, ${media.createdAt})`), asc(media.createdAt))
 
   const visible = rows.filter((r) => {
     if (r.type !== 'ticket') return true
