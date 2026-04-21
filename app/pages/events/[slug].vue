@@ -378,6 +378,15 @@ const attendeeOptions = computed(() =>
       label: (r.userName || r.guestName || r.userEmail || r.guestEmail || 'Unknown') as string
     }))
 )
+
+// --- Timeline items (for MediaGallery pin dropdown) ---
+interface TimelineItemMinimal { id: string, title: string }
+const { data: timelineData, refresh: refreshTimeline } = await useFetch<{ timeline: TimelineItemMinimal[] }>(
+  `/api/events/${slug}/timeline`,
+  { default: () => ({ timeline: [] }) }
+)
+
+const timelineItemOptions = computed(() => timelineData.value?.timeline ?? [])
 </script>
 
 <template>
@@ -656,7 +665,16 @@ const attendeeOptions = computed(() =>
           <MediaGallery
             :slug="ev.slug"
             :attendees="attendeeOptions"
+            :timeline-items="timelineItemOptions"
             :can-upload="ev.status !== 'cancelled'"
+          />
+
+          <!-- Itinerary timeline -->
+          <EventTimeline
+            :slug="ev.slug"
+            :is-planner="true"
+            :attendees="attendeeOptions"
+            @change="refreshTimeline"
           />
         </div>
         <div class="space-y-6">

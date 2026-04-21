@@ -15,6 +15,8 @@ interface Props {
   rsvpToken?: string
   /** Assignable RSVPs — planner only, for ticket assignment dropdown. */
   attendees?: Array<{ id: string, label: string }>
+  /** Timeline items — planner only, for pinning media to a timeline point. */
+  timelineItems?: Array<{ id: string, title: string }>
   /** Hide the upload button (e.g., when event is cancelled/draft for guests). */
   canUpload?: boolean
 }
@@ -22,6 +24,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   rsvpToken: undefined,
   attendees: () => [],
+  timelineItems: () => [],
   canUpload: true
 })
 
@@ -43,6 +46,7 @@ interface MediaItem {
   uploadedByUserId: string | null
   uploadedByRsvpId: string | null
   assignedRsvpId: string | null
+  timelineItemId: string | null
   createdAt: string
   uploadedByUserName: string | null
   uploadedByUserEmail: string | null
@@ -126,12 +130,14 @@ const editOpen = ref(false)
 const editTarget = ref<MediaItem | null>(null)
 const editCaption = ref('')
 const editAssignedRsvpId = ref<string | null>(null)
+const editTimelineItemId = ref<string | null>(null)
 const editLoading = ref(false)
 
 function openEdit(m: MediaItem) {
   editTarget.value = m
   editCaption.value = m.caption ?? ''
   editAssignedRsvpId.value = m.assignedRsvpId ?? null
+  editTimelineItemId.value = m.timelineItemId ?? null
   editOpen.value = true
 }
 
@@ -142,6 +148,9 @@ async function saveEdit() {
     const body: Record<string, unknown> = { caption: editCaption.value || null }
     if (isPlanner.value && editTarget.value.type === 'ticket') {
       body.assignedRsvpId = editAssignedRsvpId.value
+    }
+    if (isPlanner.value) {
+      body.timelineItemId = editTimelineItemId.value
     }
     if (props.rsvpToken) body.rsvpToken = props.rsvpToken
     await $fetch(`/api/events/${props.slug}/media/${editTarget.value.id}`, {
@@ -197,6 +206,11 @@ function attendeeLabel(rsvpId: string | null): string {
 const ticketAttendeeOptions = computed(() => [
   { label: 'Unassigned', value: null as string | null },
   ...props.attendees.map(a => ({ label: a.label, value: a.id as string | null }))
+])
+
+const timelineItemOptions = computed(() => [
+  { label: 'Not pinned', value: null as string | null },
+  ...props.timelineItems.map(t => ({ label: t.title, value: t.id as string | null }))
 ])
 </script>
 
@@ -465,6 +479,18 @@ const ticketAttendeeOptions = computed(() => [
             <USelectMenu
               v-model="editAssignedRsvpId"
               :items="ticketAttendeeOptions"
+              value-key="value"
+              class="w-full"
+            />
+          </UFormField>
+          <UFormField
+            v-if="isPlanner && timelineItemOptions.length > 1"
+            label="Pin to timeline item"
+            help="Makes this file appear on the itinerary."
+          >
+            <USelectMenu
+              v-model="editTimelineItemId"
+              :items="timelineItemOptions"
               value-key="value"
               class="w-full"
             />

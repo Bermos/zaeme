@@ -3,6 +3,7 @@ import { bigint, index, pgEnum, pgTable, text, timestamp } from 'drizzle-orm/pg-
 import { user } from './auth'
 import { event } from './events'
 import { rsvp } from './rsvp'
+import { timelineItem } from './timeline'
 
 export const mediaTypeEnum = pgEnum('media_type', ['photo', 'video', 'document', 'ticket'])
 export const mediaStatusEnum = pgEnum('media_status', ['pending', 'ready'])
@@ -51,6 +52,9 @@ export const media = pgTable(
     // Tickets only — which attendee this ticket belongs to
     assignedRsvpId: text('assigned_rsvp_id')
       .references(() => rsvp.id, { onDelete: 'set null' }),
+    // Optional pin to a timeline item (set null when the item is deleted)
+    timelineItemId: text('timeline_item_id')
+      .references(() => timelineItem.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
@@ -62,7 +66,8 @@ export const media = pgTable(
     index('media_type_idx').on(table.type),
     index('media_status_idx').on(table.status),
     index('media_takenAt_idx').on(table.takenAt),
-    index('media_assignedRsvpId_idx').on(table.assignedRsvpId)
+    index('media_assignedRsvpId_idx').on(table.assignedRsvpId),
+    index('media_timelineItemId_idx').on(table.timelineItemId)
   ]
 )
 
@@ -84,5 +89,9 @@ export const mediaRelations = relations(media, ({ one }) => ({
     fields: [media.assignedRsvpId],
     references: [rsvp.id],
     relationName: 'mediaAssignedRsvp'
+  }),
+  timelineItem: one(timelineItem, {
+    fields: [media.timelineItemId],
+    references: [timelineItem.id]
   })
 }))
