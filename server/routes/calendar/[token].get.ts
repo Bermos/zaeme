@@ -14,7 +14,10 @@ import { event, rsvp } from '#server/database/schema'
  */
 export default defineEventHandler(async (e) => {
   const raw = getRouterParam(e, 'token')!
-  // Strip the `.ics` suffix that lives in the URL but not in our token store.
+  // The public URL is `/calendar/{token}.ics` so that calendar clients
+  // recognise the payload. Nitro's file-based routing matches `[token]`
+  // against the full final segment (including the `.ics` suffix) — strip
+  // the suffix here before looking the token up.
   const token = raw.replace(/\.ics$/, '')
 
   const identity = await resolveIcalToken(token)

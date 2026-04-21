@@ -7,6 +7,11 @@ import { icalToken } from '#server/database/schema'
  * Resolve or create the iCal feed token that identifies a given attendee
  * (either a registered user or a guest email). Idempotent — returns the
  * existing token if one has been issued before.
+ *
+ * Email is always normalised to lowercase so that callers don't have to
+ * coordinate casing. The unique index on `email` is set up on this
+ * invariant; callers that write emails elsewhere (e.g. the RSVP path) also
+ * lowercase before insert.
  */
 export async function getOrCreateIcalToken(identity: { userId: string } | { email: string }): Promise<string> {
   const userId = 'userId' in identity ? identity.userId : null
