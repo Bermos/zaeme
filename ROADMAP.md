@@ -47,22 +47,22 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 ## Phase 3 — Calendar & Email
 
-- [ ] Set up Resend + React Email in `packages/email`
-- [ ] Invite email template
-- [ ] RSVP confirmation email template
-- [ ] Event reminder email template (48h before)
-- [ ] Event cancelled email template
-- [ ] Magic link email template
-- [ ] Set up Inngest + define all job types
-- [ ] `rsvp.confirmed` job — send confirmation email
-- [ ] `event.published` job — send invite emails
-- [ ] `event.reminder` job — scheduled 48h reminder
-- [ ] `event.cancelled` job — cancellation notification
-- [ ] `packages/ics` — iCal generation library wrapper
-- [ ] `.ics` attachment on RSVP confirmation email
-- [ ] Per-attendee iCal feed (`GET /calendar/[token].ics`)
-- [ ] Per-event iCal feed (`GET /events/[slug]/calendar.ics`)
-- [ ] iCal token generation + storage
+- [x] Set up Resend + React Email in `packages/email`
+- [x] Invite email template
+- [x] RSVP confirmation email template
+- [x] Event reminder email template (48h before)
+- [x] Event cancelled email template
+- [x] Magic link email template
+- [x] Set up Inngest + define all job types
+- [x] `rsvp.confirmed` job — send confirmation email
+- [x] `event.published` job — send invite emails
+- [x] `event.reminder` job — scheduled 48h reminder
+- [x] `event.cancelled` job — cancellation notification
+- [x] `packages/ics` — iCal generation library wrapper
+- [x] `.ics` attachment on RSVP confirmation email
+- [x] Per-attendee iCal feed (`GET /calendar/[token].ics`)
+- [x] Per-event iCal feed (`GET /events/[slug]/calendar.ics`)
+- [x] iCal token generation + storage
 
 -----
 
