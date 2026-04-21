@@ -1,8 +1,12 @@
+import * as React from 'react'
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
 import { magicLink } from 'better-auth/plugins'
 // import { passkey } from "@better-auth/passkey"
 import { db } from './db'
+import { sendEmail } from './email'
+import { renderEmail } from '../emails/render'
+import { MagicLinkEmail } from '../emails/magic-link'
 import * as schema from '../database/schema'
 
 /**
@@ -27,11 +31,32 @@ export const auth = betterAuth({
 
   plugins: [
     magicLink({
-      sendMagicLink: async ({ email, token, url, metadata }) => {
-        // Email delivery lands in Phase 3. For now we stash the URL so the
-        // triggering handler can expose it to the client / logs.
+      sendMagicLink: async ({ email, token, url }) => {
+        // Always stash the URL so request handlers can surface it to their
+        // caller (used by the guest RSVP flow so the pending-magic-link
+        // response works even when email delivery is offline).
         pendingMagicLinks.set(email, { url, token })
-        console.log('[magic-link]', { email, url, metadata })
+
+        // Determine the surface area. RSVP links round-trip through the
+        // invite page, which lets us tune the email copy accordingly.
+        const purpose = url.includes('/invite/') ? 'rsvp' : 'sign-in'
+
+        try {
+          const { html, text } = await renderEmail(
+            React.createElement(MagicLinkEmail, { magicLinkUrl: url, purpose })
+          )
+          await sendEmail({
+            to: email,
+            subject: purpose === 'rsvp' ? 'Manage your RSVP' : 'Sign in to zäme',
+            html,
+            text,
+            tag: 'magic-link'
+          })
+        } catch (err) {
+          // Magic-link delivery must never break auth — log and fall through
+          // to the pendingMagicLinks fallback surfaced to the caller.
+          console.error('[magic-link:send]', err)
+        }
       }
     })
     // passkey(),

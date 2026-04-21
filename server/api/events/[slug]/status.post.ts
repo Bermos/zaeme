@@ -2,6 +2,7 @@ import { eq, and } from 'drizzle-orm'
 import { z } from 'zod'
 import { db } from '#server/utils/db'
 import { requireAuth } from '#server/utils/session'
+import { dispatch } from '#server/inngest/client'
 import { event, eventPlanner } from '#server/database/schema'
 
 // Valid status transitions
@@ -42,7 +43,9 @@ export default defineEventHandler(async (e) => {
   }
 
   const schema = z.object({
-    status: z.enum(['draft', 'polling', 'published', 'completed', 'cancelled'])
+    status: z.enum(['draft', 'polling', 'published', 'completed', 'cancelled']),
+    /** Optional reason attached to cancellation notifications. */
+    reason: z.string().max(2000).optional().nullable()
   })
 
   const body = await readValidatedBody(e, schema.parse)
@@ -60,6 +63,14 @@ export default defineEventHandler(async (e) => {
     .set({ status: body.status })
     .where(eq(event.id, row.id))
     .returning()
+
+  // Dispatch background notifications. `dispatch` swallows errors so a
+  // misconfigured Inngest / mail provider does not block the transition.
+  if (body.status === 'published') {
+    await dispatch('event.published', { eventId: row.id })
+  } else if (body.status === 'cancelled') {
+    await dispatch('event.cancelled', { eventId: row.id, reason: body.reason ?? null })
+  }
 
   return updated
 })

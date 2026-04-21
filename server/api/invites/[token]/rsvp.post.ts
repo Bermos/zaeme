@@ -5,6 +5,7 @@ import { db } from '#server/utils/db'
 import { optionalAuth } from '#server/utils/session'
 import { auth, consumePendingMagicLink } from '#server/utils/auth'
 import { bumpInviteUsage, resolveInviteToken } from '#server/utils/invite'
+import { dispatch } from '#server/inngest/client'
 import { rsvp } from '#server/database/schema'
 
 const statusSchema = z.enum(['yes', 'maybe', 'no', 'cheering'])
@@ -96,8 +97,9 @@ export default defineEventHandler(async (e) => {
   }
 
   // For guests, generate a magic link so they can return pre-authenticated
-  // to edit their RSVP. Email delivery lands in Phase 3; for now the URL
-  // is logged server-side and surfaced in the response.
+  // to edit their RSVP. The magic link is emailed by the Better Auth plugin
+  // (`server/utils/auth.ts`). In dev / when `RESEND_API_KEY` is unset the
+  // URL is logged and surfaced in the response for manual testing.
   let magicLinkUrl: string | null = null
   if (!session && guestEmail && isNew) {
     try {
@@ -115,6 +117,15 @@ export default defineEventHandler(async (e) => {
       console.error('[rsvp] magic-link generation failed', err)
     }
   }
+
+  // Fire the confirmation job. `dispatch` swallows errors so a missing
+  // Inngest key doesn't break RSVPs.
+  await dispatch('rsvp.confirmed', {
+    rsvpId: saved.id,
+    eventId: ev.id,
+    userId: saved.userId,
+    guestEmail: saved.guestEmail
+  })
 
   return { rsvp: saved, magicLinkUrl }
 })
