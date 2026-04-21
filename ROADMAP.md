@@ -111,15 +111,15 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 ## Phase 7 — Media & Documents
 
-- [ ] R2 configuration + presigned upload API (`POST /api/media/presign`)
-- [ ] Upload confirmation API (`POST /api/media/confirm`)
-- [ ] Photo / video gallery per event
-- [ ] Document upload (PDFs, booking confirmations)
-- [ ] Ticket upload + assignment to specific attendee
-- [ ] Guest upload (via RSVP token)
-- [ ] Media timeline view (sorted by `takenAt`)
-- [ ] Caption editing
-- [ ] Planner media moderation (delete any item)
+- [x] R2 configuration + presigned upload API (`POST /api/media/presign`)
+- [x] Upload confirmation API (`POST /api/media/confirm`)
+- [x] Photo / video gallery per event
+- [x] Document upload (PDFs, booking confirmations)
+- [x] Ticket upload + assignment to specific attendee
+- [x] Guest upload (via RSVP token)
+- [x] Media timeline view (sorted by `takenAt`)
+- [x] Caption editing
+- [x] Planner media moderation (delete any item)
 
 -----
 
