@@ -314,7 +314,7 @@ const ticketAttendeeOptions = computed(() => [
                 preload="metadata"
               />
             </a>
-            <div class="absolute inset-x-0 bottom-0 p-1.5 bg-gradient-to-t from-black/70 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+            <div class="absolute inset-x-0 bottom-0 p-1.5 bg-gradient-to-t from-black/90 via-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
               <p
                 v-if="m.caption"
                 class="text-xs text-white truncate"
