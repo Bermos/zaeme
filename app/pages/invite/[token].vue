@@ -290,6 +290,18 @@ const formattedEnd = computed(() =>
         </div>
       </UCard>
 
+      <!-- Date poll: shown when the event is still being scheduled.
+           The component fetches its own data and renders nothing if there
+           is no poll for this event. -->
+      <InviteDatePoll
+        v-if="data.event.status === 'polling' || data.event.status === 'draft'"
+        :token="token"
+        :default-name="data.session?.name ?? data.invite.name ?? null"
+        :default-email="data.session?.email ?? data.invite.email ?? null"
+        :hide-identity="!!data.session"
+        class="mb-6"
+      />
+
       <!-- RSVP form -->
       <UCard>
         <template #header>

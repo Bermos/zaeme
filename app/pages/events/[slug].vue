@@ -669,6 +669,16 @@ const timelineItemOptions = computed(() => timelineData.value?.timeline ?? [])
             :can-upload="ev.status !== 'cancelled'"
           />
 
+          <!-- Date poll (only relevant before publication) -->
+          <EventDatePoll
+            v-if="ev.status === 'draft' || ev.status === 'polling' || ev.status === 'cancelled'"
+            :slug="ev.slug"
+            :can-edit="currentPlanner?.role === 'owner' || currentPlanner?.role === 'co_planner'"
+            :event-status="ev.status"
+            @decided="refresh"
+            @status-changed="refresh"
+          />
+
           <!-- Itinerary timeline -->
           <EventTimeline
             :slug="ev.slug"

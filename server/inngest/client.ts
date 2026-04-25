@@ -30,6 +30,31 @@ export const EventCancelledEvent = eventType('event.cancelled', {
   schema: staticSchema<{ eventId: string, reason?: string | null }>()
 })
 
+/**
+ * Auto-close a date poll. Scheduled with a future `ts` matching the
+ * poll's deadline. The handler no-ops if the poll has already been
+ * decided manually.
+ */
+export const DatePollClosedEvent = eventType('datepoll.closed', {
+  schema: staticSchema<{ pollId: string }>()
+})
+
+/**
+ * Fan out the "the date is set" notification with a fresh `.ics`. Fired
+ * by the `/poll/decide` route once the planner picks a slot.
+ */
+export const DatePollDecidedEvent = eventType('datepoll.decided', {
+  schema: staticSchema<{ pollId: string, eventId: string }>()
+})
+
+/**
+ * Send poll-invite emails to every targeted invite on the event. Fired
+ * once the planner publishes the poll.
+ */
+export const DatePollInviteEvent = eventType('datepoll.invite', {
+  schema: staticSchema<{ eventId: string }>()
+})
+
 export const inngest = new Inngest({
   id: 'zaeme',
   eventKey: process.env.INNGEST_EVENT_KEY,
@@ -43,7 +68,7 @@ export const inngest = new Inngest({
  * log and move on.
  */
 export async function dispatch(
-  name: 'rsvp.confirmed' | 'event.published' | 'event.reminder' | 'event.cancelled',
+  name: 'rsvp.confirmed' | 'event.published' | 'event.reminder' | 'event.cancelled' | 'datepoll.closed' | 'datepoll.decided' | 'datepoll.invite',
   data: Record<string, unknown>,
   options?: { ts?: number }
 ): Promise<void> {

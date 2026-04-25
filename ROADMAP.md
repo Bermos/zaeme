@@ -68,16 +68,16 @@ Development is roughly ordered by dependency — each phase builds on the last. 
 
 ## Phase 4 — Date Finder
 
-- [ ] Date poll creation (slots, deadline, question)
-- [ ] Poll invite page — accessible to guests via event invite token
-- [ ] Three-way response: yes / if need be / no
-- [ ] Poll results view — weighted scoring (yes=1, if_need_be=0.5, no=0)
-- [ ] Close poll + decide winning slot
-- [ ] Promote decided slot to `event.startsAt` / `event.endsAt`
-- [ ] Transition event status `polling → published` on decision
-- [ ] `datepoll.closed` Inngest job — auto-close at deadline
-- [ ] Date poll invite email template
-- [ ] Date poll decided email template (with `.ics` attachment)
+- [x] Date poll creation (slots, deadline, question)
+- [x] Poll invite page — accessible to guests via event invite token
+- [x] Three-way response: yes / if need be / no
+- [x] Poll results view — weighted scoring (yes=1, if_need_be=0.5, no=0)
+- [x] Close poll + decide winning slot
+- [x] Promote decided slot to `event.startsAt` / `event.endsAt`
+- [x] Transition event status `polling → published` on decision
+- [x] `datepoll.closed` Inngest job — auto-close at deadline
+- [x] Date poll invite email template
+- [x] Date poll decided email template (with `.ics` attachment)
 
 -----
 

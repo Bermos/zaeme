@@ -43,6 +43,13 @@
       "when": 1776774675268,
       "tag": "0005_blue_jamie_braddock",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1777109754532,
+      "tag": "0006_slimy_machine_man",
+      "breakpoints": true
     }
   ]
 }

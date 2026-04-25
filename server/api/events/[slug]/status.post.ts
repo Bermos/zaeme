@@ -70,6 +70,11 @@ export default defineEventHandler(async (e) => {
     await dispatch('event.published', { eventId: row.id })
   } else if (body.status === 'cancelled') {
     await dispatch('event.cancelled', { eventId: row.id, reason: body.reason ?? null })
+  } else if (body.status === 'polling') {
+    // Fan out "vote on a date" emails to every targeted invite. The job
+    // skips quietly if no poll has been created yet — planners are free
+    // to create the poll either before or after flipping to `polling`.
+    await dispatch('datepoll.invite', { eventId: row.id })
   }
 
   return updated
