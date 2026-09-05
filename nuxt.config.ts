@@ -1,27 +1,45 @@
-// https://nuxt.com/docs/api/configuration/nuxt-config
-export default defineNuxtConfig({
-  modules: [
-    '@nuxt/eslint',
-    '@nuxt/ui'
-  ],
+import { defineNuxtConfig } from 'nuxt/config'
 
-  devtools: {
-    enabled: true
+/**
+ * zäme — the collaborative event planner for friends.
+ *
+ * A single Nuxt package, deliberately: no pnpm workspace, no `packages/*`, no
+ * layers. Kitchen builds this repo with buildpacks (framework `nuxt`), and a
+ * flat package is what makes that boring — there is no workspace member for
+ * Nitro to emit as an external import and then fail to find at boot.
+ *
+ *  - **SSR on** — invite links must render real HTML with Open Graph cards.
+ *  - **Stock Nuxt UI** — default theme, light/dark by system preference.
+ *  - **No global auth guard** — a guest's invite link IS their access; the
+ *    magic-link account gates only /me and /host.
+ *
+ * The port comes from `$PORT` (Nitro's node server reads it directly, ahead of
+ * its own default) — the platform sets it and a buildpacks image has no other
+ * way to be told. Nothing here hard-codes 3000.
+ */
+export default defineNuxtConfig({
+  modules: ['@nuxt/eslint', '@nuxt/ui'],
+
+  ssr: true,
+
+  app: {
+    head: {
+      // The title TEMPLATE is a function, which nuxt.config cannot carry
+      // (everything here has to serialise) — it lives in app/app.vue.
+      title: 'zäme',
+      link: [
+        { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' }
+      ]
+    }
   },
 
   css: ['~/assets/css/main.css'],
 
-  compatibilityDate: '2025-01-15',
-
-  vite: {
-    optimizeDeps: {
-      include: [
-        'zod',
-        'better-auth/vue',
-        'better-auth/client/plugins'
-      ]
-    }
+  runtimeConfig: {
+    public: {}
   },
+
+  compatibilityDate: '2025-01-15',
 
   eslint: {
     config: {
@@ -31,5 +49,4 @@ export default defineNuxtConfig({
       }
     }
   }
-
 })

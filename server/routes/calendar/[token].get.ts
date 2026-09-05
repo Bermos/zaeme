@@ -1,56 +1,39 @@
 import { and, eq, inArray, or } from 'drizzle-orm'
-import { db } from '#server/utils/db'
-import { resolveIcalToken } from '#server/utils/ical'
-import { renderFeedIcs, type IcsEventInput } from '#server/utils/ics'
-import { event, rsvp } from '#server/database/schema'
+import { renderFeedIcs, type IcsEventInput } from '../../utils/ics'
+import { resolveIcalToken, tables, useDb } from '../../domain/index'
 
 /**
- * Per-attendee iCal feed. The bearer of the token receives a live feed of
- * every event they have RSVP'd 'yes' or 'maybe' to. The token is
- * unguessable but must still be treated as a credential — do not return
- * information that the attendee would not already see on the event page.
+ * Per-attendee iCal feed: every event the bearer RSVP'd yes/maybe to. Served
+ * by zäme (guest-facing links belong on this host — ADR-0019); same
+ * implementation the Enterprise app carries, over the shared core. The token
+ * is unguessable but treated as a credential.
  *
  * Route: `GET /calendar/{token}.ics`
  */
 export default defineEventHandler(async (e) => {
   const raw = getRouterParam(e, 'token')!
-  // The public URL is `/calendar/{token}.ics` so that calendar clients
-  // recognise the payload. Nitro's file-based routing matches `[token]`
-  // against the full final segment (including the `.ics` suffix) — strip
-  // the suffix here before looking the token up.
   const token = raw.replace(/\.ics$/, '')
 
   const identity = await resolveIcalToken(token)
-  if (!identity) {
-    throw createError({ statusCode: 404, message: 'Calendar feed not found' })
-  }
+  if (!identity) throw createError({ statusCode: 404, message: 'Calendar feed not found' })
 
-  // Look up all RSVPs for this identity, then load the matching events.
   const attendeeWhere = identity.userId
-    ? eq(rsvp.userId, identity.userId)
-    : eq(rsvp.guestEmail, identity.email!)
+    ? eq(tables.rsvp.userId, identity.userId)
+    : eq(tables.rsvp.guestEmail, identity.email!)
 
-  const rsvps = await db
-    .select({ eventId: rsvp.eventId, status: rsvp.status })
-    .from(rsvp)
-    .where(and(attendeeWhere, or(eq(rsvp.status, 'yes'), eq(rsvp.status, 'maybe'))))
+  const rsvps = await useDb()
+    .select({ eventId: tables.rsvp.eventId })
+    .from(tables.rsvp)
+    .where(and(attendeeWhere, or(eq(tables.rsvp.status, 'yes'), eq(tables.rsvp.status, 'maybe'))))
 
   const eventIds = rsvps.map(r => r.eventId)
   const events: IcsEventInput[] = eventIds.length
-    ? await db
-        .select({
-          id: event.id,
-          slug: event.slug,
-          title: event.title,
-          description: event.description,
-          startsAt: event.startsAt,
-          endsAt: event.endsAt,
-          location: event.location,
-          ticketUrl: event.ticketUrl,
-          updatedAt: event.updatedAt
-        })
-        .from(event)
-        .where(inArray(event.id, eventIds))
+    ? await useDb().select({
+        id: tables.event.id, slug: tables.event.slug, title: tables.event.title,
+        description: tables.event.description, startsAt: tables.event.startsAt,
+        endsAt: tables.event.endsAt, location: tables.event.location,
+        ticketUrl: tables.event.ticketUrl, updatedAt: tables.event.updatedAt
+      }).from(tables.event).where(inArray(tables.event.id, eventIds))
     : []
 
   const body = renderFeedIcs(events)

@@ -1,15 +1,19 @@
 import { Inngest, eventType, staticSchema } from 'inngest'
 
 /**
- * Centralised event definitions. Each `eventType` is used both as the
- * trigger on a function (`inngest.createFunction({ triggers: [{ event: Foo }] }, …)`)
- * and as a type-safe factory for `inngest.send()` calls.
+ * zäme's Inngest client and its event vocabulary — the app's own nervous
+ * system again. While zäme lived in the Enterprise monorepo it only *sent*
+ * these signals and a department layer over there held the handlers; both
+ * halves are back in this repo (see ./functions/).
  *
- * `staticSchema` provides compile-time types without pulling in a runtime
- * validator — we already validate at the API boundary with Zod.
+ * Each `eventType` is used both as the trigger on a function and as a
+ * type-safe factory for `inngest.send()`. `staticSchema` gives compile-time
+ * types without a runtime validator — the API boundary already validates with
+ * Zod. The `events/` prefix is kept from the monorepo era so no persisted
+ * scheduled run (the 48h reminder is sent with a future `ts`) is orphaned.
  */
 
-export const RsvpConfirmedEvent = eventType('rsvp.confirmed', {
+export const RsvpConfirmedEvent = eventType('events/rsvp.confirmed', {
   schema: staticSchema<{
     rsvpId: string
     eventId: string
@@ -18,15 +22,15 @@ export const RsvpConfirmedEvent = eventType('rsvp.confirmed', {
   }>()
 })
 
-export const EventPublishedEvent = eventType('event.published', {
+export const EventPublishedEvent = eventType('events/event.published', {
   schema: staticSchema<{ eventId: string }>()
 })
 
-export const EventReminderEvent = eventType('event.reminder', {
+export const EventReminderEvent = eventType('events/event.reminder', {
   schema: staticSchema<{ eventId: string }>()
 })
 
-export const EventCancelledEvent = eventType('event.cancelled', {
+export const EventCancelledEvent = eventType('events/event.cancelled', {
   schema: staticSchema<{ eventId: string, reason?: string | null }>()
 })
 
@@ -36,20 +40,3 @@ export const inngest = new Inngest({
   // Forces the in-process dev server when no cloud key is configured.
   isDev: !process.env.INNGEST_EVENT_KEY
 })
-
-/**
- * Fire-and-forget wrapper that never throws. Background job delivery must
- * not break the user-visible request flow — if Inngest is unreachable we
- * log and move on.
- */
-export async function dispatch(
-  name: 'rsvp.confirmed' | 'event.published' | 'event.reminder' | 'event.cancelled',
-  data: Record<string, unknown>,
-  options?: { ts?: number }
-): Promise<void> {
-  try {
-    await inngest.send({ name, data, ts: options?.ts })
-  } catch (err) {
-    console.error('[inngest:dispatch]', { name, err })
-  }
-}
