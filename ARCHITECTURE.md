@@ -106,15 +106,30 @@ Attendee
 
 ### Roles
 
-| Role    | Description                                                                    |
-|---------|--------------------------------------------------------------------------------|
-| `admin` | Instance owner. Full access to everything. Set via `ADMIN_EMAIL` on first run. |
-| `user`  | Invited friend. Can be added as co-planner on specific events.                 |
-| Guest   | No account. Identified by email + RSVP token. Can RSVP, chat, upload media.    |
+| Role             | Description                                                                                  |
+|------------------|----------------------------------------------------------------------------------------------|
+| Instance owner   | The FIRST account registered (`server/utils/instance.ts`). The only one that reaches `/admin`. |
+| Account          | Any other magic-link account. Can host events and be a co-planner on others'.                  |
+| Guest            | No account. Identified by their lowercased email + an invite link. RSVPs, chats, uploads.      |
+
+Ownership is not a column and not an env var: it is "the first row in
+`zaeme_user` by `created_at`". There is nothing to set, nothing to keep in sync,
+and no second place it could disagree with itself.
+
+Within one event the planner roles are separate and unchanged: `owner`,
+`co_planner`, `logistics` on `events_event_planner`. Planning an event and
+administering the instance are different powers — a co-planner has the first and
+never the second.
 
 ### First-run
 
-On first server start with an empty database, zäme checks for the existence of the admin user. If absent, it redirects all traffic to `/setup` where the admin account is created. `ADMIN_EMAIL` is locked in at this point.
+On first server start with an empty database nobody has claimed the instance, so
+`server/middleware/setup.ts` redirects every surface that needs an account to
+`/setup`, where the first account is created. The guest capability URLs, the
+public pages, the calendar feeds and `/api/v1` are exempt — a guest holding an
+invite link must never be bounced into an admin flow, and no HTTP client can act
+on a redirect to a browser bootstrap page. `/api/admin` is deliberately NOT
+exempt: an unclaimed instance has no owner, so it has no admin.
 
 -----
 
@@ -290,7 +305,15 @@ another:
 |---|---|
 | `/api/invites/**` | the invite capability URL — the link IS the credential |
 | `/api/host/**`, `/api/me/**` | the magic-link better-auth session cookie |
+| `/api/admin/**` | that same session, AND being the instance owner |
 | `/api/v1/**` | `ZAEME_SERVICE_TOKEN`, one caller (Enterprise), no cookies |
+
+The admin surface adds no fourth credential — it is the host session plus one
+question (`server/utils/admin.ts`) — but it is a fourth WALL: Enterprise's
+service token must not reach it. The machine API is a peer of the admin surface,
+not a way into it; a service token that reached `/api/admin` would hand the XO
+the instance's accounts, every live invite link, and the audit of its own
+behaviour.
 
 The service token authenticates the *system*; the `x-mcp-user` header says which
 Enterprise owner the call acts for, and it must equal `ZAEME_ENTERPRISE_OWNER_ID`
@@ -301,9 +324,11 @@ wrong token and an unconfigured instance all take one code path and answer one
 `401`.
 
 Enterprise also stamps four provenance headers — `x-mcp-user`, `x-mcp-thread`,
-`x-mcp-model`, `x-mcp-basis`. zäme accepts and carries them. It records nothing
-from them yet; the point is that the option to start recording "which
-conversation caused this write" stays open.
+`x-mcp-model`, `x-mcp-basis`. zäme accepts and carries them, and since the admin
+surface landed it also RECORDS them: every machine-surface write writes a
+`zaeme_audit_log` row carrying the thread, the model and the basis message ids.
+That is the act, not the diff — linking a specific written row back to the
+sentence that caused it is issue #12, and wants its own table.
 
 ### How it is kept honest
 
@@ -318,6 +343,69 @@ conversation caused this write" stays open.
 - `scripts/api-smoke.sh` (`pnpm smoke:api`) exercises the whole surface against a
   running server with a real database — including both directions of the
   boundary with a genuine magic-link session and a genuine service token.
+
+-----
+
+## The admin surface (owner-only)
+
+`/admin` is where the instance is administered, and where the questions that
+span events are answered. It exists because the split from the Enterprise
+monorepo (ADR-0036) left zäme standing on its own: the owner's cross-event views
+used to be an Events department in a shell that could query the whole table, and
+the operator concerns — accounts, tokens, storage, an audit — had no home at all
+while somebody else was the operator.
+
+**Who.** The instance owner, and nobody else. `server/utils/admin.ts` resolves
+the session (the same magic-link cookie the host surface uses) and then asks
+whether that account is the first one registered. A co-planner gets `403`, not
+`404` — they are real, they are simply not the owner.
+
+**What.**
+
+| Page | Answers |
+|---|---|
+| `/admin` | upcoming / total / drafts, plus the gatherings quietly failing to happen |
+| `/admin/events` | every event with its counts, filtered; filters live in the URL |
+| `/admin/calendar` | a month grid across every event |
+| `/admin/series` | every series and its occurrences |
+| `/admin/people` | everybody the instance knows, keyed by the email that IS guest identity |
+| `/admin/invites` | every capability link, with revoke and restore |
+| `/admin/media` | the media library and what it costs to store |
+| `/admin/accounts` | who can sign in; sign-out-everywhere; deletion that keeps their answers |
+| `/admin/integration` | the Enterprise link: credential fingerprint, mapping, whether it is calling |
+| `/admin/audit` | who did what, including what was refused |
+
+**Reads live in `server/domain/admin.ts`** and are instance-scoped rather than
+planner-scoped — the rest of the domain is user-scoped and stays that way. These
+are the views with real volume, so counts are scalar sub-selects or grouped
+aggregates inside the same statement; there is no query-per-row anywhere. Note
+the warning at the top of that file about drizzle rendering an interpolated
+column unqualified inside a `sql` template: it produced a sub-select that
+silently counted zero, and it had already shipped once.
+
+### The audit log
+
+`zaeme_audit_log` records one row per mutating request on a credentialled
+surface: who, which surface, which event, and the response status — so a REFUSED
+attempt is as visible as a successful write, which is most of what an audit is
+for. Reads are not recorded; Enterprise fetches the snapshot on every XO turn
+and a log of that would bury everything else.
+
+Two writers, and the split between them is the boundary again:
+
+- `server/middleware/audit.ts` records the human surfaces at the edge, which is
+  what makes the log complete — a handler-by-handler convention is one forgotten
+  call away from a hole. It returns immediately for `/api/v1` and `/api/auth`:
+  no cookie may be read near the machine surface, and magic-link tokens travel
+  in those auth URLs.
+- `defineServiceHandler` records the machine surface from its own credential,
+  with the provenance headers attached.
+
+Writing never throws — a row is a record of something that already happened, and
+failing the request because the record failed would trade a completed action for
+a lost one. Retention is a button on `/admin/audit`, not a policy: on a personal
+instance the log is small, and something that quietly deletes evidence is worse
+than something that says what it removed.
 
 -----
 

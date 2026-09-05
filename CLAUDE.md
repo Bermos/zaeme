@@ -30,3 +30,14 @@ shell, with the opposite design discipline:
   and the Enterprise service token (`/api/v1/**`). No `/api/v1` handler may read
   a cookie, and no guest/host handler may read the service token —
   `test/api-boundary.test.ts` enforces both.
+- **`/admin` and `/api/admin/**` are the INSTANCE OWNER's**, and add no fourth
+  credential: the host session plus `requireOwner` (`server/utils/admin.ts`),
+  where the owner is the first account registered. Every admin route calls that
+  gate; a service token must never reach one, and the gate must not be imported
+  anywhere but `server/api/admin/**` — the boundary test asserts all of it.
+  Cross-event reads go in `server/domain/admin.ts` (instance-scoped; watch the
+  N+1 note at the top of that file), never in a route handler.
+- **Mutations are audited.** `server/middleware/audit.ts` records the human
+  surfaces at the edge and `defineServiceHandler` records the machine one; a new
+  route needs no audit code of its own, and the middleware must keep returning
+  early for `/api/v1` (no cookie near that surface) and `/api/auth`.
