@@ -1,6 +1,6 @@
-import { listEvents } from '../../../domain/index'
-import { defineServiceHandler } from '../../../utils/service-auth'
-import { eventSummary } from '../../../utils/v1-shapes'
+import { listEvents } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { eventSummary } from '#server/utils/v1-shapes'
 
 /** `listEvents` — the user's events, newest first. */
 export default defineServiceHandler(async (_event, caller) => {

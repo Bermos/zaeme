@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { buildSnapshot } from '../../domain/index'
-import { defineServiceHandler } from '../../utils/service-auth'
+import { buildSnapshot } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
 
 /**
  * `getEventsSnapshot` — THE HOT PATH. Enterprise fetches this on every XO turn,

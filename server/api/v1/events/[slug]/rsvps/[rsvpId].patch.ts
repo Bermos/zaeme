@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { updateRsvp } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { rsvp } from '../../../../../utils/v1-shapes'
+import { updateRsvp } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { rsvp } from '#server/utils/v1-shapes'
 
 /** `updateRsvp` — one attendee's answer, +1 and notes. */
 const bodySchema = z.object({

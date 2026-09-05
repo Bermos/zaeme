@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { addContributionAsPlanner } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { contribution } from '../../../../../utils/v1-shapes'
+import { addContributionAsPlanner } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { contribution } from '#server/utils/v1-shapes'
 
 /** `addPotluckItem` — something for attendees to claim. */
 const bodySchema = z.object({

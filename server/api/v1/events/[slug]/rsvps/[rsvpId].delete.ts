@@ -1,6 +1,6 @@
-import { deleteRsvp } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { REMOVED } from '../../../../../utils/v1-shapes'
+import { deleteRsvp } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { REMOVED } from '#server/utils/v1-shapes'
 
 /** `removeRsvp` — sparingly, and only when the user asks. */
 export default defineServiceHandler(async (event, caller) => {

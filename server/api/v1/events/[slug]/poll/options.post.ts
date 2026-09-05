@@ -1,13 +1,13 @@
 import { z } from 'zod'
-import { addDateOption, loadEventBySlug, loadPollForPlanner } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { asInvalidTransition } from '../../../../../utils/api-v1'
-import { pollOption } from '../../../../../utils/v1-shapes'
+import { addDateOption, loadEventBySlug, loadPollForPlanner } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { asInvalidTransition } from '#server/utils/api-v1'
+import { pollOption } from '#server/utils/v1-shapes'
 
 /** `proposeDateOption` — one candidate date; call once per date. */
 const bodySchema = z.object({
-  startsAt: z.string().datetime({ offset: true }),
-  endsAt: z.string().datetime({ offset: true }).optional(),
+  startsAt: z.iso.datetime({ offset: true }),
+  endsAt: z.iso.datetime({ offset: true }).optional(),
   note: z.string().max(500).optional()
 }).strict()
 

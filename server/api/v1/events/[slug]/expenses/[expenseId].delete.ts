@@ -1,6 +1,6 @@
-import { removeExpenseAsPlanner } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { REMOVED } from '../../../../../utils/v1-shapes'
+import { removeExpenseAsPlanner } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { REMOVED } from '#server/utils/v1-shapes'
 
 /** `removeTripExpense` — the expense and its shares. */
 export default defineServiceHandler(async (event, caller) => {

@@ -1,7 +1,7 @@
-import { isSha256Hex, posterObjectKey } from '../../../../domain/index'
-import { defineServiceHandler } from '../../../../utils/service-auth'
-import { apiError } from '../../../../utils/api-v1'
-import { createObjectStore, isStorageConfigured } from '../../../../utils/storage'
+import { isSha256Hex, posterObjectKey } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { apiError } from '#server/utils/api-v1'
+import { createObjectStore, isStorageConfigured } from '#server/utils/storage'
 
 /**
  * `headPoster` — "do you already hold these bytes?"

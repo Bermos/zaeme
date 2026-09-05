@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { publishConcert } from '../../../domain/index'
-import { defineServiceHandler } from '../../../utils/service-auth'
+import { publishConcert } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
 
 /**
  * `publishConcert` — create or patch the public event that announces a concert.
@@ -13,10 +13,10 @@ const bodySchema = z.object({
   eventId: z.string().optional(),
   title: z.string().min(1).max(200),
   description: z.string().max(5000).nullable().optional(),
-  startsAt: z.string().datetime({ offset: true }),
-  endsAt: z.string().datetime({ offset: true }).optional(),
+  startsAt: z.iso.datetime({ offset: true }),
+  endsAt: z.iso.datetime({ offset: true }).optional(),
   location: z.string().max(500).nullable().optional(),
-  ticketUrl: z.string().url().nullable().optional(),
+  ticketUrl: z.url().nullable().optional(),
   performerNote: z.string().max(1000).nullable().optional(),
   posterUrl: z.string().nullable().optional()
 }).strict()

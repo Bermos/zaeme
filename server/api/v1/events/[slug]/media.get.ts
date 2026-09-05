@@ -1,6 +1,6 @@
-import { listMedia } from '../../../../domain/index'
-import { defineServiceHandler } from '../../../../utils/service-auth'
-import { mediaItem } from '../../../../utils/v1-shapes'
+import { listMedia } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { mediaItem } from '#server/utils/v1-shapes'
 
 /**
  * `listMedia` — metadata only. No download URLs cross the boundary: the bytes

@@ -1,9 +1,9 @@
 import { z } from 'zod'
-import { loadEventBySlug, setEventStatus } from '../../../../domain/index'
-import { defineServiceHandler } from '../../../../utils/service-auth'
-import { asInvalidTransition } from '../../../../utils/api-v1'
-import { dispatchEvent } from '../../../../utils/dispatch'
-import { eventSummary } from '../../../../utils/v1-shapes'
+import { loadEventBySlug, setEventStatus } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { asInvalidTransition } from '#server/utils/api-v1'
+import { dispatchEvent } from '#server/utils/dispatch'
+import { eventSummary } from '#server/utils/v1-shapes'
 
 /**
  * `setEventStatus` — the lifecycle move. Publishing sends invite emails and

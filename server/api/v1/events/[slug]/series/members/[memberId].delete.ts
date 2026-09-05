@@ -1,6 +1,6 @@
-import { removeSeriesMemberOne } from '../../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../../utils/service-auth'
-import { REMOVED } from '../../../../../../utils/v1-shapes'
+import { removeSeriesMemberOne } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { REMOVED } from '#server/utils/v1-shapes'
 
 /** `removeSeriesMember` — they keep invites to already-scheduled showings. */
 export default defineServiceHandler(async (event, caller) => {

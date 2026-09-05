@@ -14,7 +14,19 @@ shell, with the opposite design discipline:
 - **No global auth guard.** Guest access is the invite capability URL; the
   zäme better-auth instance (magic-link, `zaeme_*` tables — NOT the owner's
   single-account instance) gates only `/me` and `/host`.
-- **Domain logic lives in `@enterprise/events-core`** — add operations there
-  (shared with the Enterprise Events department), keep route handlers thin.
-- New workspace member? Remember BOTH Dockerfiles' deps-stage `COPY` lists and
-  the root `CLAUDE.md` smoke-test rule (`pnpm smoke:site` before pushing).
+- **Domain logic lives in `server/domain/`** — add operations there, keep route
+  handlers thin. (This was `@enterprise/events-core` while zäme lived inside the
+  Enterprise monorepo; it came home with the 2026-09 transplant. zäme is a single
+  flat package now: no workspace, no `packages/*`, no layers, no Dockerfile —
+  Kitchen builds it with buildpacks.)
+- **Enterprise reaches zäme only over HTTP** (ADR-0036). The contract is
+  `docs/zaeme-api.openapi.yaml` — **this repo's copy is the source of truth**,
+  served at `GET /api/openapi.yaml`; Enterprise's committed copy is a vendored
+  snapshot it generates its MCP tools from. Touching `/api/v1` or the spec means
+  running `pnpm test` (the contract test asserts a bijection between them, in
+  both directions) and ideally `pnpm smoke:api` against a running server.
+- **Three credentials, never interchangeable**: the invite capability URL
+  (`/api/invites/**`), the magic-link host session (`/api/host/**`, `/api/me/**`)
+  and the Enterprise service token (`/api/v1/**`). No `/api/v1` handler may read
+  a cookie, and no guest/host handler may read the service token —
+  `test/api-boundary.test.ts` enforces both.

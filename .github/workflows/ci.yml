@@ -32,3 +32,11 @@ jobs:
 
       - name: Typecheck
         run: pnpm run typecheck
+
+      # The contract test (`test/api-contract.test.ts`) asserts, in both
+      # directions, that the `/api/v1` route tree and
+      # `docs/zaeme-api.openapi.yaml` describe the same surface. Enterprise
+      # GENERATES its MCP tool surface from that document, so drift here breaks
+      # a system that is not in this repository — it has to be caught on push.
+      - name: Test
+        run: pnpm run test
