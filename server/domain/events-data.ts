@@ -151,7 +151,11 @@ export async function listInvites(userId: string, slug: string) {
       expiresAt: tables.invite.expiresAt,
       revokedAt: tables.invite.revokedAt,
       createdAt: tables.invite.createdAt,
-      rsvpCount: sql<number>`(select count(*)::int from ${tables.rsvp} where ${tables.rsvp.inviteId} = ${tables.invite.id})`
+      // The outer column is spelled out: drizzle renders an interpolated column
+      // unqualified inside a `sql` template, so `${tables.invite.id}` became a
+      // bare `"id"` that Postgres resolved against events_rsvp — every invite
+      // reported 0 responses. See the note at the top of ./admin.ts.
+      rsvpCount: sql<number>`(select count(*)::int from events_rsvp r where r.invite_id = events_invite.id)`
     })
     .from(tables.invite)
     .where(eq(tables.invite.eventId, ev.id))

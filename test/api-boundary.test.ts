@@ -3,7 +3,9 @@ import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { tokensMatch } from '../server/utils/service-auth'
+import { serviceCredentialStatus } from '../server/utils/enterprise-link'
 import { ApiError, apiError, toErrorBody } from '../server/utils/api-v1'
+import { eventSlugFromPath } from '../server/domain/audit'
 
 /**
  * The two surfaces must not be able to reach each other.
@@ -45,6 +47,7 @@ const rel = (f: string) => relative(ROOT, f).split(sep).join('/')
 const machineHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/v1/'))
 const guestHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/invites/'))
 const hostHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/host/'))
+const adminHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/admin/'))
 
 describe('the machine surface never touches the guest or host authenticator', () => {
   it('found the surfaces it is meant to be checking', () => {
@@ -106,6 +109,117 @@ describe('the machine surface never touches the guest or host authenticator', ()
     // browser bootstrap page, which no HTTP client can act on.
     const src = readFileSync(join(ROOT, 'server', 'middleware', 'setup.ts'), 'utf8')
     expect(src).toContain('\'/api/v1/\'')
+  })
+})
+
+/**
+ * The ADMIN surface is the fourth thing that can be reached over HTTP, and it
+ * deliberately introduces no fourth credential: it is the host session plus one
+ * question — is this account the one that claimed the instance
+ * (`server/utils/admin.ts`). Which makes two directions worth asserting.
+ *
+ * INWARD: nothing but the owner gets in. Not a guest holding a capability URL,
+ * not a co-planner's session, and above all not Enterprise's service token —
+ * the machine API is a PEER of this surface, not a way into it. A service token
+ * that reached `/api/admin` would hand the XO the instance's accounts, every
+ * live invite link and the audit of its own behaviour.
+ *
+ * OUTWARD: the owner gate stays out of everything else. If `/api/v1` could
+ * import it, the machine surface would acquire an owner-scoped mode nobody
+ * declared in the contract; if the host surface used it, planning would quietly
+ * become owner-only.
+ *
+ * The runtime half of this is executed in `scripts/api-smoke.sh`, which signs
+ * in as two real accounts and checks the owner is let in and the other is not.
+ */
+describe('the admin surface is the owner\'s, and only the owner\'s', () => {
+  it('found the admin routes it is meant to be checking', () => {
+    expect(adminHandlers.length).toBeGreaterThan(10)
+  })
+
+  it('every /api/admin handler goes through the owner gate', () => {
+    const offenders = adminHandlers.filter(f => !/requireOwner\(/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('no /api/admin handler accepts the service token', () => {
+    const offenders = adminHandlers.filter(f =>
+      /service-auth|requireServiceCaller|authenticateService|ZAEME_SERVICE_TOKEN|authorization/i.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('no /api/admin handler accepts a capability token', () => {
+    // A guest's invite URL is a bearer credential for ONE event. It is not an
+    // identity, and nothing on this surface may treat it as one.
+    const offenders = adminHandlers.filter(f => /getRouterParam\(\s*e[^)]*,\s*'token'\s*\)/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('no /api/v1 handler imports the owner gate', () => {
+    const offenders = machineHandlers.filter(f => /utils\/admin|requireOwner/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('the owner gate is used by the admin surface and nowhere else', () => {
+    const offenders = allHandlers
+      .filter(f => !rel(f).startsWith('server/api/admin/'))
+      .filter(f => /requireOwner/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('does NOT exempt /api/admin from the first-run setup redirect', () => {
+    // The inverse of the /api/v1 rule above, and for the opposite reason: an
+    // instance nobody has claimed has no owner, so its admin surface must not
+    // be reachable at all — it bounces to /setup like every other page.
+    const src = readFileSync(join(ROOT, 'server', 'middleware', 'setup.ts'), 'utf8')
+    expect(src).not.toMatch(/'\/api\/admin/)
+  })
+
+  it('never puts the Enterprise service token on an admin page', () => {
+    // The integration page reports whether the credential is configured and a
+    // fingerprint of it. Not the credential.
+    process.env.ZAEME_SERVICE_TOKEN = 'hunter2-the-actual-secret'
+    process.env.ZAEME_ENTERPRISE_OWNER_ID = 'ent_owner'
+    const status = serviceCredentialStatus()
+    expect(status.configured).toBe(true)
+    expect(status.enterpriseOwnerId).toBe('ent_owner')
+    expect(JSON.stringify(status)).not.toContain('hunter2')
+    expect(status.fingerprint).toMatch(/^[0-9a-f]{12}$/)
+
+    delete process.env.ZAEME_SERVICE_TOKEN
+    expect(serviceCredentialStatus()).toMatchObject({ configured: false, fingerprint: null })
+  })
+})
+
+describe('the audit records every surface, and reads no cookie near /api/v1', () => {
+  const middleware = readFileSync(join(ROOT, 'server', 'middleware', 'audit.ts'), 'utf8')
+
+  it('bails out of the machine surface before it resolves a session', () => {
+    // The edge recorder is the ONE place that may resolve a session for a
+    // mutating request; if it did so for /api/v1 it would put a cookie read on
+    // the machine surface's path, which is exactly what the boundary forbids.
+    const guard = middleware.indexOf('path.startsWith(\'/api/v1\')')
+    const session = middleware.indexOf('getGuestSession(event)')
+    expect(guard).toBeGreaterThan(-1)
+    expect(session).toBeGreaterThan(guard)
+  })
+
+  it('never records the auth routes, where magic-link tokens travel', () => {
+    expect(middleware).toMatch(/\/api\/auth/)
+  })
+
+  it('the machine surface audits itself, from its own credential', () => {
+    const src = readFileSync(join(ROOT, 'server', 'utils', 'service-auth.ts'), 'utf8')
+    expect(src).toMatch(/recordAudit/)
+    // …and still without ever looking at a session or a cookie.
+    expect(src).not.toMatch(/getCookie|parseCookies|auth\.api|getGuestSession/)
+  })
+
+  it('pins an action to the event it touched', () => {
+    expect(eventSlugFromPath('/api/host/events/movie-night/status')).toBe('movie-night')
+    expect(eventSlugFromPath('/api/v1/events/lugano-weekend/invites')).toBe('lugano-weekend')
+    expect(eventSlugFromPath('/api/admin/invites/abc/revoke')).toBeNull()
+    expect(eventSlugFromPath('/api/me/invites')).toBeNull()
   })
 })
 

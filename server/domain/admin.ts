@@ -26,6 +26,19 @@ import { guestSession, guestUser } from '../database/schema/auth'
  * statement, and a list never triggers a query per item.
  */
 
+/**
+ * ⚠️ CORRELATED SUB-SELECTS ARE WRITTEN WITH THE OUTER COLUMN SPELLED OUT
+ * (`events_event.id`, not `${tables.event.id}`).
+ *
+ * Drizzle renders an interpolated column UNQUALIFIED inside a `sql` template —
+ * `${tables.event.id}` becomes `"id"` — and Postgres then resolves that name
+ * against the INNERMOST table that happens to have it. `where r.event_id = "id"`
+ * silently means `r.event_id = r.id`, which is never true, so the count comes
+ * back 0 for every row and nothing errors. (`listInvites` in events-data.ts had
+ * exactly this bug: every invite reported 0 responses.) Spelling the outer table
+ * out is unambiguous, and the tables are never aliased in these queries.
+ */
+
 /* --------------------------------- overview -------------------------------- */
 
 export interface InstanceOverview {
@@ -179,12 +192,12 @@ export async function listAllEvents(filter: AdminEventFilter = {}) {
       externalRef: e.externalRef,
       createdAt: e.createdAt,
       updatedAt: e.updatedAt,
-      parentTitle: sql<string | null>`(select p.title from events_event p where p.id = ${e.parentId})`,
-      yesCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = ${e.id} and r.status in ('yes', 'cheering'))`,
-      rsvpCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = ${e.id})`,
-      inviteCount: sql<number>`(select count(*)::int from events_invite i where i.event_id = ${e.id} and i.revoked_at is null)`,
-      mediaCount: sql<number>`(select count(*)::int from events_media m where m.event_id = ${e.id} and m.status = 'ready')`,
-      plannerCount: sql<number>`(select count(*)::int from events_event_planner p where p.event_id = ${e.id})`
+      parentTitle: sql<string | null>`(select p.title from events_event p where p.id = events_event.parent_id)`,
+      yesCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = events_event.id and r.status in ('yes', 'cheering'))`,
+      rsvpCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = events_event.id)`,
+      inviteCount: sql<number>`(select count(*)::int from events_invite i where i.event_id = events_event.id and i.revoked_at is null)`,
+      mediaCount: sql<number>`(select count(*)::int from events_media m where m.event_id = events_event.id and m.status = 'ready')`,
+      plannerCount: sql<number>`(select count(*)::int from events_event_planner p where p.event_id = events_event.id)`
     })
     .from(e)
     .where(where.length ? and(...where) : undefined)
@@ -220,7 +233,7 @@ export async function seriesOverview() {
       cadence: e.cadence,
       isPublic: e.isPublic,
       createdAt: e.createdAt,
-      memberCount: sql<number>`(select count(*)::int from events_series_member m where m.series_id = ${e.id})`
+      memberCount: sql<number>`(select count(*)::int from events_series_member m where m.series_id = events_event.id)`
     })
     .from(e)
     .where(eq(e.type, 'series'))
@@ -237,7 +250,7 @@ export async function seriesOverview() {
       status: e.status,
       startsAt: e.startsAt,
       posterUrl: e.posterUrl,
-      yesCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = ${e.id} and r.status in ('yes', 'cheering'))`
+      yesCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = events_event.id and r.status in ('yes', 'cheering'))`
     })
     .from(e)
     .where(inArray(e.parentId, containers.map(c => c.id)))
@@ -275,7 +288,7 @@ export async function calendarWindow(from: Date, to: Date) {
       endsAt: e.endsAt,
       location: e.location,
       isPublic: e.isPublic,
-      yesCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = ${e.id} and r.status in ('yes', 'cheering'))`
+      yesCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = events_event.id and r.status in ('yes', 'cheering'))`
     })
     .from(e)
     .where(and(gte(e.startsAt, from), lte(e.startsAt, to)))
@@ -606,7 +619,7 @@ export async function listAllInvites(filter: AdminInviteFilter = {}) {
       eventSlug: e.slug,
       eventTitle: e.title,
       eventStatus: e.status,
-      rsvpCount: sql<number>`(select count(*)::int from events_rsvp r where r.invite_id = ${i.id})`
+      rsvpCount: sql<number>`(select count(*)::int from events_rsvp r where r.invite_id = events_invite.id)`
     })
     .from(i)
     .innerJoin(e, eq(i.eventId, e.id))
@@ -657,9 +670,9 @@ export async function listAccounts(ownerId: string | null) {
       email: u.email,
       emailVerified: u.emailVerified,
       createdAt: u.createdAt,
-      plannerOf: sql<number>`(select count(*)::int from events_event_planner p where p.user_id = ${u.id})`,
-      activeSessions: sql<number>`(select count(*)::int from zaeme_session s where s.user_id = ${u.id} and s.expires_at > now())`,
-      rsvpCount: sql<number>`(select count(*)::int from events_rsvp r where lower(r.guest_email) = lower(${u.email}))`
+      plannerOf: sql<number>`(select count(*)::int from events_event_planner p where p.user_id = zaeme_user.id)`,
+      activeSessions: sql<number>`(select count(*)::int from zaeme_session s where s.user_id = zaeme_user.id and s.expires_at > now())`,
+      rsvpCount: sql<number>`(select count(*)::int from events_rsvp r where lower(r.guest_email) = lower(zaeme_user.email))`
     })
     .from(u)
     .orderBy(asc(u.createdAt))

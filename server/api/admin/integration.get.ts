@@ -1,5 +1,6 @@
 import { machineActivity } from '../../domain/index'
-import { requireOwner, serviceCredentialStatus } from '../../utils/admin'
+import { requireOwner } from '../../utils/admin'
+import { serviceCredentialStatus } from '../../utils/enterprise-link'
 import { resolveInstancePlanner } from '../../utils/instance'
 
 /**
