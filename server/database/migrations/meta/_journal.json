@@ -15,6 +15,13 @@
       "when": 1788614834904,
       "tag": "0001_concert_external_ref",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788617632431,
+      "tag": "0002_audit_log",
+      "breakpoints": true
     }
   ]
 }

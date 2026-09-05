@@ -1,7 +1,8 @@
 import { timingSafeEqual, createHash } from 'node:crypto'
-import { getRequestHeader, type H3Event } from 'h3'
-import { apiError, defineV1Handler } from './api-v1'
+import { getRequestHeader, getRequestURL, type H3Event } from 'h3'
+import { apiError, defineV1Handler, toErrorBody } from './api-v1'
 import { resolveInstancePlanner, type InstancePlanner } from './instance'
+import { eventSlugFromPath, recordAudit } from '../domain/audit'
 
 /**
  * Authentication for the machine surface (`/api/v1`), and nothing else.
@@ -149,6 +150,53 @@ export async function requireServiceCaller(event: H3Event): Promise<ServiceCalle
  * authentication resolved before the handler body runs. Every operation in the
  * spec uses this except `getHealth`, which the contract marks `security: []`.
  */
+/**
+ * Record a machine-surface WRITE in the instance audit log.
+ *
+ * The human surfaces are audited at the edge (`server/middleware/audit.ts`);
+ * `/api/v1` is deliberately excluded there, because that middleware resolves a
+ * session and no cookie may be read anywhere near this surface. So the machine
+ * surface audits itself, from the credential it actually authenticated with —
+ * and carries the provenance headers Enterprise stamped, which is the only
+ * place the XO thread behind a write survives at all (issue #12).
+ *
+ * Reads are not recorded: Enterprise fetches the snapshot on every XO turn, and
+ * a log of that is a traffic log the real entries would drown in.
+ */
+function auditMachineCall(event: H3Event, status: number, provenance: McpProvenance | null): void {
+  const path = getRequestURL(event).pathname
+  void recordAudit({
+    actorKind: 'service',
+    actorId: provenance?.user ?? getRequestHeader(event, 'x-mcp-user') ?? null,
+    actorLabel: 'Enterprise',
+    surface: 'machine',
+    method: event.method,
+    path,
+    eventSlug: eventSlugFromPath(path),
+    status,
+    meta: provenance
+      ? { thread: provenance.thread, model: provenance.model, basis: provenance.basis }
+      : { unauthenticated: true }
+  })
+}
+
 export function defineServiceHandler<T>(handler: (event: H3Event, caller: ServiceCaller) => Promise<T>) {
-  return defineV1Handler(async (event: H3Event) => handler(event, await requireServiceCaller(event)))
+  return defineV1Handler(async (event: H3Event) => {
+    const auditable = event.method !== 'GET' && event.method !== 'HEAD'
+    let provenance: McpProvenance | null = null
+    try {
+      const caller = await requireServiceCaller(event)
+      provenance = caller.provenance
+      const result = await handler(event, caller)
+      // The handler may have set its own success status (201 on the creates,
+      // 204 on the poster head); read it back rather than assuming 200.
+      if (auditable) auditMachineCall(event, event.node.res.statusCode || 200, provenance)
+      return result
+    } catch (err) {
+      // `toErrorBody` is the same mapping the envelope uses, so the audited
+      // status is the status the caller actually saw.
+      if (auditable) auditMachineCall(event, toErrorBody(err, 'audit').status, provenance)
+      throw err
+    }
+  })
 }
