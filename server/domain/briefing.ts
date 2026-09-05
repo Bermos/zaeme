@@ -104,6 +104,15 @@ function shapeSnapshot(row: SnapshotRow, degraded: boolean): EventsSnapshot {
 }
 
 /**
+ * A valid snapshot for a zäme that could not read anything at all — not even
+ * far enough to know who the planner is. The XO's brief is not the place to
+ * fail, so this is what a completely cold instance answers with a 200.
+ */
+export function degradedSnapshot(): EventsSnapshot {
+  return shapeSnapshot({ draft_count: 0, needs_attention_count: 0, upcoming: [] }, true)
+}
+
+/**
  * The whole snapshot in ONE statement.
  *
  * `mine` is the planner's events; everything else is a scalar sub-select over
@@ -169,7 +178,7 @@ export async function buildSnapshot(
   } catch (err) {
     // A cold or unreachable database is still answered with a usable snapshot.
     console.error('[zaeme:snapshot] degraded', err)
-    return shapeSnapshot({ draft_count: 0, needs_attention_count: 0, upcoming: [] }, true)
+    return degradedSnapshot()
   }
 }
 

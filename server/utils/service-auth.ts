@@ -96,11 +96,20 @@ function readProvenance(event: H3Event, user: string): McpProvenance {
 }
 
 /**
- * Authenticate the Enterprise service caller and resolve the planner it acts
- * as. Throws the contract's 401 for a bad/absent credential and 403 for a good
- * token acting for an owner this instance does not know.
+ * The credential half of the check, and DELIBERATELY DATABASE-FREE: the token
+ * comparison and the owner-id mapping are both env lookups.
+ *
+ * It is split out because the snapshot is on Enterprise's hot path and the
+ * contract forbids it to 5xx — "a cold, empty or unhealthy zäme returns 200
+ * with `degraded: true`, never 5xx". Answering 500 there is felt in every
+ * conversation. Authentication must still be decided honestly when the database
+ * is down, so the part that can be decided without one is separated from the
+ * part that cannot.
+ *
+ * Throws the contract's 401 for a bad or absent credential, and 403 for a good
+ * token acting for an owner this instance is not configured for.
  */
-export async function requireServiceCaller(event: H3Event): Promise<ServiceCaller> {
+export function authenticateService(event: H3Event): McpProvenance {
   if (!tokensMatch(bearerToken(event), process.env[SERVICE_TOKEN_ENV])) {
     unauthenticated()
   }
@@ -115,12 +124,24 @@ export async function requireServiceCaller(event: H3Event): Promise<ServiceCalle
     throw apiError(403, 'forbidden', 'This owner is not linked to a planner on this zäme instance.')
   }
 
+  return readProvenance(event, user)
+}
+
+/**
+ * Authenticate the Enterprise service caller and resolve the planner it acts
+ * as. The second step needs the database; every operation except the snapshot
+ * has nothing useful to say without one, so a failure here surfaces as an
+ * ordinary error.
+ */
+export async function requireServiceCaller(event: H3Event): Promise<ServiceCaller> {
+  const provenance = authenticateService(event)
+
   const planner = await resolveInstancePlanner()
   if (!planner) {
     throw apiError(403, 'forbidden', 'This zäme instance has no owner account yet; complete first-run setup.')
   }
 
-  return { planner, provenance: readProvenance(event, user) }
+  return { planner, provenance }
 }
 
 /**

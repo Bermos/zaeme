@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
-import { buildSnapshot } from '#server/domain/index'
-import { defineServiceHandler } from '#server/utils/service-auth'
+import { buildSnapshot, degradedSnapshot } from '#server/domain/index'
+import { defineV1Handler } from '#server/utils/api-v1'
+import { authenticateService } from '#server/utils/service-auth'
+import { resolveInstancePlanner } from '#server/utils/instance'
 
 /**
  * `getEventsSnapshot` — THE HOT PATH. Enterprise fetches this on every XO turn,
@@ -11,20 +13,31 @@ import { defineServiceHandler } from '#server/utils/service-auth'
  *  2. CACHEABLE — a strong `ETag` over the payload plus
  *     `private, max-age=60, stale-while-revalidate=600`, so the shim's
  *     `If-None-Match` revalidation settles into a 304 in the steady state.
- *  3. IT DEGRADES, IT DOES NOT FAIL — a cold or unreadable database still
- *     answers 200 with `degraded: true`. Routing must never break on a cold
- *     database, and a 5xx here would be felt in every conversation.
+ *  3. IT DEGRADES, IT DOES NOT FAIL — the contract declares no 5xx here at all.
+ *
+ * (3) is why this is the one operation that does not use `defineServiceHandler`.
+ * That wrapper resolves the planner from the database as part of authenticating,
+ * and an unreachable database would therefore answer 500 — in every
+ * conversation, before the XO has said a word. So the CREDENTIAL is checked
+ * first, which needs no database and so still answers 401/403 honestly, and only
+ * then is the planner looked up; if that fails, or the snapshot query fails, the
+ * answer is a valid snapshot with `degraded: true` and a 200.
  *
  * The ETag is computed over the payload MINUS `generatedAt`, which changes on
- * every call by construction: including it would make every validator unique
- * and the 304 unreachable.
+ * every call by construction: including it would make every validator unique and
+ * the 304 unreachable.
  */
-export default defineServiceHandler(async (event, caller) => {
-  const query = getQuery(event)
-  const requested = Number(query.upcomingLimit)
-  const snapshot = await buildSnapshot(caller.planner.id, {
-    upcomingLimit: Number.isFinite(requested) ? requested : undefined
+export default defineV1Handler(async (event) => {
+  authenticateService(event)
+
+  const requested = Number(getQuery(event).upcomingLimit)
+  const planner = await resolveInstancePlanner().catch((err) => {
+    console.error('[zaeme:snapshot] could not resolve the planner', err)
+    return null
   })
+  const snapshot = planner
+    ? await buildSnapshot(planner.id, { upcomingLimit: Number.isFinite(requested) ? requested : undefined })
+    : degradedSnapshot()
 
   const { generatedAt: _generatedAt, ...stable } = snapshot
   const etag = `"${createHash('sha256').update(JSON.stringify(stable)).digest('hex').slice(0, 32)}"`

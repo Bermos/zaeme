@@ -211,6 +211,10 @@ contains "sets the documented Cache-Control"     "$(tr -d '\r' < "$HDR")" 'priva
 ETAG=$(tr -d '\r' < "$HDR" | sed -n 's/^[Ee][Tt]ag: //p')
 check "revalidates to 304 with If-None-Match"    304 "${AUTH[@]}" -H "If-None-Match: $ETAG" "$API/snapshot"
 check "honours upcomingLimit"                    200 "${AUTH[@]}" "$API/snapshot?upcomingLimit=1"
+# The contract declares NO 5xx for this operation. Whatever else is wrong, an
+# authenticated caller gets a usable snapshot; an unauthenticated one still does
+# not. Run this against a stopped Postgres to see `degraded: true` instead.
+check "an unauthenticated snapshot is still refused" 401 "$API/snapshot"
 rm -f "$HDR"
 
 echo
