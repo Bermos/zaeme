@@ -66,14 +66,28 @@ describe('the machine surface never touches the guest or host authenticator', ()
     expect(offenders.map(rel)).toEqual([])
   })
 
-  it('every /api/v1 handler goes through the service-token wrapper', () => {
+  it('every /api/v1 handler checks the service token', () => {
     const offenders = machineHandlers.filter((f) => {
       const src = readFileSync(f, 'utf8')
       // `getHealth` is the ONE operation the contract marks `security: []`.
       if (rel(f) === 'server/api/v1/health.get.ts') return !/defineV1Handler/.test(src)
+      // `getEventsSnapshot` cannot use the wrapper: that resolves the planner
+      // from the database as part of authenticating, and the contract forbids
+      // this operation to 5xx on a cold one. It checks the CREDENTIAL — which
+      // needs no database — and degrades only the data.
+      if (rel(f) === 'server/api/v1/snapshot.get.ts') return !/authenticateService\(event\)/.test(src)
       return !/defineServiceHandler/.test(src)
     })
     expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('the snapshot still answers 401/403 when the database is down', () => {
+    // The credential half must be decidable without a database, or an outage
+    // would turn every unauthenticated probe into a 200.
+    const src = readFileSync(join(ROOT, 'server', 'utils', 'service-auth.ts'), 'utf8')
+    const credentialHalf = src.slice(src.indexOf('export function authenticateService'), src.indexOf('export async function requireServiceCaller'))
+    expect(credentialHalf).toMatch(/tokensMatch/)
+    expect(credentialHalf).not.toMatch(/resolveInstancePlanner|useDb|await/)
   })
 
   it('no guest or host handler imports the service token', () => {
