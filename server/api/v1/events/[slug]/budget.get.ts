@@ -1,6 +1,6 @@
-import { loadBudgetForPlanner } from '../../../../domain/index'
-import { defineServiceHandler } from '../../../../utils/service-auth'
-import { budget } from '../../../../utils/v1-shapes'
+import { loadBudgetForPlanner } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { budget } from '#server/utils/v1-shapes'
 
 /** `getTripBudget` — expenses, per-person balances and the settlement plan, in cents. */
 export default defineServiceHandler(async (event, caller) => {

@@ -1,6 +1,6 @@
-import { revokeInvite } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { invite } from '../../../../../utils/v1-shapes'
+import { revokeInvite } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { invite } from '#server/utils/v1-shapes'
 
 /** `revokeInvite` — its holders see "no longer active". */
 export default defineServiceHandler(async (event, caller) => {

@@ -1,15 +1,15 @@
 import { z } from 'zod'
-import { createInvite } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { invite } from '../../../../../utils/v1-shapes'
+import { createInvite } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { invite } from '#server/utils/v1-shapes'
 
 /** `createInvite` — a shareable link, or a targeted personal invite when `email` is set. */
 const bodySchema = z.object({
   label: z.string().max(120).optional(),
-  email: z.string().email().optional(),
+  email: z.email().optional(),
   name: z.string().max(120).optional(),
   maxUses: z.number().int().min(1).max(10000).optional(),
-  expiresAt: z.string().datetime({ offset: true }).optional()
+  expiresAt: z.iso.datetime({ offset: true }).optional()
 }).strict()
 
 export default defineServiceHandler(async (event, caller) => {

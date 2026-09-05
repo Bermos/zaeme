@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { addExpenseAsPlanner } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { expense } from '../../../../../utils/v1-shapes'
+import { addExpenseAsPlanner } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { expense } from '#server/utils/v1-shapes'
 
 /**
  * `addTripExpense` — participants without an explicit `amountCents` split the
@@ -14,10 +14,10 @@ const bodySchema = z.object({
   currency: z.string().min(3).max(3).optional(),
   note: z.string().max(500).optional(),
   paidByName: z.string().min(1).max(200),
-  paidByEmail: z.string().email(),
+  paidByEmail: z.email(),
   participants: z.array(z.object({
     name: z.string().min(1).max(200),
-    email: z.string().email(),
+    email: z.email(),
     amountCents: z.number().int().min(0).optional()
   }).strict()).min(1).max(50)
 }).strict()

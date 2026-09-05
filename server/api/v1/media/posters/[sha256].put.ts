@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
-import { isSha256Hex, posterObjectKey, publicPosterUrl } from '../../../../domain/index'
-import { defineServiceHandler } from '../../../../utils/service-auth'
-import { apiError } from '../../../../utils/api-v1'
-import { publicUrl } from '../../../../utils/public-url'
-import { createObjectStore, isStorageConfigured } from '../../../../utils/storage'
+import { isSha256Hex, posterObjectKey, publicPosterUrl } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { apiError } from '#server/utils/api-v1'
+import { publicUrl } from '#server/utils/public-url'
+import { createObjectStore, isStorageConfigured } from '#server/utils/storage'
 
 /**
  * `uploadPoster` — store poster bytes in zäme's own object store and hand back

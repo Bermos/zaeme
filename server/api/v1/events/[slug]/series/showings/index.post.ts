@@ -1,8 +1,8 @@
 import { z } from 'zod'
-import { scheduleSeriesShowing } from '../../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../../utils/service-auth'
-import { dispatchEvent } from '../../../../../../utils/dispatch'
-import { showing } from '../../../../../../utils/v1-shapes'
+import { scheduleSeriesShowing } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { dispatchEvent } from '#server/utils/dispatch'
+import { showing } from '#server/utils/v1-shapes'
 
 /**
  * `scheduleSeriesShowing` — the movie-night path. Creates a published child
@@ -12,9 +12,9 @@ import { showing } from '../../../../../../utils/v1-shapes'
 const bodySchema = z.object({
   title: z.string().min(1).max(200),
   description: z.string().max(5000).optional(),
-  posterUrl: z.string().url().optional(),
-  startsAt: z.string().datetime({ offset: true }),
-  endsAt: z.string().datetime({ offset: true }).optional(),
+  posterUrl: z.url().optional(),
+  startsAt: z.iso.datetime({ offset: true }),
+  endsAt: z.iso.datetime({ offset: true }).optional(),
   location: z.string().max(500).optional()
 }).strict()
 

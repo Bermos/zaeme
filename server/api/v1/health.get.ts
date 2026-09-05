@@ -1,4 +1,4 @@
-import { defineV1Handler } from '../../utils/api-v1'
+import { defineV1Handler } from '#server/utils/api-v1'
 
 /**
  * `getHealth` — the ONE unauthenticated operation in the contract

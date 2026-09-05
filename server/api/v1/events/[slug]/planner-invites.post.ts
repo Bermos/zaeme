@@ -1,8 +1,8 @@
 import { z } from 'zod'
-import { createPlannerInvite } from '../../../../domain/index'
-import { defineServiceHandler } from '../../../../utils/service-auth'
-import { publicUrl } from '../../../../utils/public-url'
-import { plannerInvite } from '../../../../utils/v1-shapes'
+import { createPlannerInvite } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { publicUrl } from '#server/utils/public-url'
+import { plannerInvite } from '#server/utils/v1-shapes'
 
 /**
  * `inviteCoOrganizer` — whoever opens the link and signs in to zäme becomes a
@@ -10,7 +10,7 @@ import { plannerInvite } from '../../../../utils/v1-shapes'
  * route shape.
  */
 const bodySchema = z.object({
-  email: z.string().email().optional(),
+  email: z.email().optional(),
   role: z.enum(['co_planner', 'logistics']).optional()
 }).strict()
 

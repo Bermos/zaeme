@@ -1,6 +1,6 @@
-import { listSeriesShowings } from '../../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../../utils/service-auth'
-import { showing } from '../../../../../../utils/v1-shapes'
+import { listSeriesShowings } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { showing } from '#server/utils/v1-shapes'
 
 /** `listSeriesShowings` — the scheduled occurrences with their sign-up counts. */
 export default defineServiceHandler(async (event, caller) => {

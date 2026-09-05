@@ -44,12 +44,26 @@ export interface InstancePlanner {
  * for the message it writes, and the contract is explicit that the host's name
  * on a zäme message is zäme's own fact about its planner — Enterprise no
  * longer supplies one.
+ *
+ * Memoised for a minute because EVERY `/api/v1` call resolves it, including the
+ * snapshot Enterprise fetches on every XO turn — and without the cache that hot
+ * path costs two round trips where the work is one. Only a HIT is cached: a
+ * fresh instance with no owner yet must keep asking, or first-run setup would
+ * not take effect for a minute. The TTL exists so a renamed owner does not stay
+ * stale forever.
  */
+const PLANNER_TTL_MS = 60_000
+let _planner: { value: InstancePlanner, at: number } | null = null
+
 export async function resolveInstancePlanner(): Promise<InstancePlanner | null> {
+  if (_planner && Date.now() - _planner.at < PLANNER_TTL_MS) {
+    return _planner.value
+  }
   const [row] = await useDb()
     .select({ id: guestUser.id, name: guestUser.name, email: guestUser.email })
     .from(guestUser)
     .orderBy(asc(guestUser.createdAt))
     .limit(1)
+  if (row) _planner = { value: row, at: Date.now() }
   return row ?? null
 }

@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { addSeriesMemberOne } from '../../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../../utils/service-auth'
-import { seriesMember } from '../../../../../../utils/v1-shapes'
+import { addSeriesMemberOne } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { seriesMember } from '#server/utils/v1-shapes'
 
 /**
  * `addSeriesMember` — idempotent by email, so a repeat is a 200 with the same
@@ -9,7 +9,7 @@ import { seriesMember } from '../../../../../../utils/v1-shapes'
  */
 const bodySchema = z.object({
   name: z.string().min(1).max(200),
-  email: z.string().email()
+  email: z.email()
 }).strict()
 
 export default defineServiceHandler(async (event, caller) => {

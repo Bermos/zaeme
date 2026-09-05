@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { createParty, listInvites, loadPollForPlanner, getEventSummaryForPlanner } from '../../../domain/index'
-import { defineServiceHandler } from '../../../utils/service-auth'
-import { eventSummary, invite, pollOption } from '../../../utils/v1-shapes'
+import { createParty, listInvites, loadPollForPlanner, getEventSummaryForPlanner } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { eventSummary, invite, pollOption } from '#server/utils/v1-shapes'
 
 /**
  * `createPartyPlan` — a party's whole first stage in one call: create it, seed
@@ -14,11 +14,11 @@ const bodySchema = z.object({
   location: z.string().max(500).optional(),
   coreInvites: z.array(z.object({
     name: z.string().min(1).max(200),
-    email: z.string().email().optional()
+    email: z.email().optional()
   }).strict()).min(1).max(20),
   dateOptions: z.array(z.object({
-    startsAt: z.string().datetime({ offset: true }),
-    endsAt: z.string().datetime({ offset: true }).optional(),
+    startsAt: z.iso.datetime({ offset: true }),
+    endsAt: z.iso.datetime({ offset: true }).optional(),
     note: z.string().max(500).optional()
   }).strict()).min(1).max(10)
 }).strict()

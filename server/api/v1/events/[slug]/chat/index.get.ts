@@ -1,6 +1,6 @@
-import { listMessagesForPlanner } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { chatMessage } from '../../../../../utils/v1-shapes'
+import { listMessagesForPlanner } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { chatMessage } from '#server/utils/v1-shapes'
 
 /** `readEventChat` — oldest first; `afterId` is the incremental read. */
 export default defineServiceHandler(async (event, caller) => {

@@ -1,6 +1,6 @@
-import { listTimeline } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { timelineItem } from '../../../../../utils/v1-shapes'
+import { listTimeline } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { timelineItem } from '#server/utils/v1-shapes'
 
 /** `listTimeline` — the itinerary in display order. */
 export default defineServiceHandler(async (event, caller) => {

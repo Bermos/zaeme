@@ -1,5 +1,5 @@
-import { findAttention } from '../../domain/index'
-import { defineServiceHandler } from '../../utils/service-auth'
+import { findAttention } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
 
 /**
  * `getEventsAttention` — the facts half of the daily check-in.

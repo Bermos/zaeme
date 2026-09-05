@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { postMessageAsPlanner } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { chatMessage } from '../../../../../utils/v1-shapes'
+import { postMessageAsPlanner } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { chatMessage } from '#server/utils/v1-shapes'
 
 /**
  * `postEventChatMessage` — posts as the host.

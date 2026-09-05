@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { unpublishConcert } from '../../../domain/index'
-import { defineServiceHandler } from '../../../utils/service-auth'
+import { unpublishConcert } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
 
 /**
  * `unpublishConcert` — the announcement stops being public, so it leaves the

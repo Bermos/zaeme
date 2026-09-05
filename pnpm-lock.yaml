@@ -35,6 +35,9 @@ importers:
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0)
+      h3:
+        specifier: ^1.15.11
+        version: 1.15.11
       ics:
         specifier: ^3.11.0
         version: 3.12.0

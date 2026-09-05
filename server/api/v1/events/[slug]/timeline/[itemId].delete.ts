@@ -1,6 +1,6 @@
-import { deleteTimelineItem } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { REMOVED } from '../../../../../utils/v1-shapes'
+import { deleteTimelineItem } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { REMOVED } from '#server/utils/v1-shapes'
 
 /** `removeTimelineItem`. */
 export default defineServiceHandler(async (event, caller) => {

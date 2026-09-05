@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import { addTimelineItem } from '../../../../../domain/index'
-import { defineServiceHandler } from '../../../../../utils/service-auth'
-import { timelineItem } from '../../../../../utils/v1-shapes'
+import { addTimelineItem } from '#server/domain/index'
+import { defineServiceHandler } from '#server/utils/service-auth'
+import { timelineItem } from '#server/utils/v1-shapes'
 
 /**
  * `addTimelineItem` — appended after the existing items unless `sortOrder` says
@@ -14,8 +14,8 @@ import { timelineItem } from '../../../../../utils/v1-shapes'
 const bodySchema = z.object({
   title: z.string().min(1).max(300),
   description: z.string().max(5000).optional(),
-  startsAt: z.string().datetime({ offset: true }).optional(),
-  endsAt: z.string().datetime({ offset: true }).optional(),
+  startsAt: z.iso.datetime({ offset: true }).optional(),
+  endsAt: z.iso.datetime({ offset: true }).optional(),
   location: z.string().max(500).optional(),
   type: z.enum(['transport', 'activity', 'accommodation', 'meal', 'other']).optional(),
   sortOrder: z.number().int().min(0).max(100000).optional()
