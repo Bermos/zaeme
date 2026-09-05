@@ -1,68 +1,78 @@
-import * as React from 'react'
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
 import { magicLink } from 'better-auth/plugins'
-// import { passkey } from "@better-auth/passkey"
-import { db } from './db'
-import { sendEmail } from './email'
-import { renderEmail } from '../emails/render'
-import { MagicLinkEmail } from '../emails/magic-link'
-import * as schema from '../database/schema'
+import { useDb } from './db'
+import { renderMagicLinkEmail, sendEmail } from '../emails/index'
+import { getRequestHeaders, type H3Event } from 'h3'
+import { guestAuthSchema } from '../database/schema/auth'
 
 /**
- * In-process capture for magic links generated during a request. The
- * `magicLink` plugin only surfaces the target URL through `sendMagicLink`;
- * we stash it here keyed by email so the handler that just triggered
- * `signInMagicLink` can read it back synchronously. Entries are single-use.
+ * zäme's better-auth instance — multi-user, magic-link sign-in, over the
+ * `zaeme_*` tables.
+ *
+ * Accounts are optional. First touch is always the invite capability URL; an
+ * account adds the cross-event "all my invites" view (`/me`) — the one scope
+ * where a durable bearer link would be a real risk, so it is session-gated —
+ * and the host surface.
  */
-export const pendingMagicLinks = new Map<string, { url: string, token: string }>()
 
-export function consumePendingMagicLink(email: string) {
-  const entry = pendingMagicLinks.get(email)
-  if (entry) pendingMagicLinks.delete(email)
-  return entry ?? null
-}
+// KITCHEN_URL last: on a preview environment it is the only thing that knows
+// the hostname the pull request was published on.
+const baseURL = process.env.BETTER_AUTH_URL
+  || process.env.BASE_URL
+  || process.env.KITCHEN_URL
+  || undefined
 
 export const auth = betterAuth({
-  database: drizzleAdapter(db, {
-    provider: 'pg',
-    schema
-  }),
+  baseURL,
+  secret: process.env.BETTER_AUTH_SECRET,
+  database: drizzleAdapter(useDb(), { provider: 'pg', schema: guestAuthSchema }),
 
   plugins: [
     magicLink({
-      sendMagicLink: async ({ email, token, url }) => {
-        // Always stash the URL so request handlers can surface it to their
-        // caller (used by the guest RSVP flow so the pending-magic-link
-        // response works even when email delivery is offline).
-        pendingMagicLinks.set(email, { url, token })
-
-        // Determine the surface area. RSVP links round-trip through the
-        // invite page, which lets us tune the email copy accordingly.
-        const purpose = url.includes('/invite/') ? 'rsvp' : 'sign-in'
-
-        try {
-          const { html, text } = await renderEmail(
-            React.createElement(MagicLinkEmail, { magicLinkUrl: url, purpose })
-          )
-          await sendEmail({
-            to: email,
-            subject: purpose === 'rsvp' ? 'Manage your RSVP' : 'Sign in to zäme',
-            html,
-            text,
-            tag: 'magic-link'
-          })
-        } catch (err) {
-          // Magic-link delivery must never break auth — log and fall through
-          // to the pendingMagicLinks fallback surfaced to the caller.
-          console.error('[magic-link:send]', err)
-        }
+      // Sign-in link via the shared email seam (the zäme-branded templates).
+      sendMagicLink: async ({ email, url }) => {
+        const { html, text } = await renderMagicLinkEmail({
+          magicLinkUrl: url,
+          purpose: 'sign-in'
+        })
+        await sendEmail({ to: email, subject: 'Sign in to zäme', html, text })
       }
     })
-    // passkey(),
-  ],
-
-  emailAndPassword: {
-    enabled: true
-  }
+  ]
 })
+
+export type GuestSession = Awaited<ReturnType<typeof auth.api.getSession>>
+
+/** Build a web `Headers` from the H3 request (better-auth reads cookies here). */
+function requestHeaders(event: H3Event): Headers {
+  const headers = new Headers()
+  for (const [key, value] of Object.entries(getRequestHeaders(event))) {
+    if (typeof value === 'string') {
+      headers.set(key, value)
+    }
+  }
+  return headers
+}
+
+/** Resolve (and memoise per-request) the zäme session for an H3 event. */
+export async function getGuestSession(event: H3Event): Promise<GuestSession> {
+  const ctx = event.context as { __zaemeSession?: GuestSession }
+  if (ctx.__zaemeSession !== undefined) {
+    return ctx.__zaemeSession
+  }
+  const session = await auth.api
+    .getSession({ headers: requestHeaders(event) })
+    .catch(() => null)
+  ctx.__zaemeSession = session
+  return session
+}
+
+/** The signed-in zäme user, or a 401. Gates /me and /host APIs. */
+export async function requireGuestUser(event: H3Event): Promise<{ id: string, email: string, name: string }> {
+  const session = await getGuestSession(event)
+  if (!session?.user) {
+    throw createError({ statusCode: 401, statusMessage: 'Sign-in required' })
+  }
+  return { id: session.user.id, email: session.user.email, name: session.user.name }
+}

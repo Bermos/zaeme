@@ -1,15 +1,13 @@
-import * as React from 'react'
 import { eq } from 'drizzle-orm'
 import { inngest, EventReminderEvent } from '../client'
-import { db } from '#server/utils/db'
-import { sendEmail } from '#server/utils/email'
-import { renderEmail } from '#server/emails/render'
-import { EventReminderEmail } from '#server/emails/event-reminder'
-import { event, rsvp, user, invite } from '#server/database/schema'
+import { tables, useDb } from '../../domain/db'
+import { guestUser } from '../../database/schema/auth'
+import { renderEventReminderEmail, sendEmail } from '../../emails/index'
 
 /**
- * Fan out the 48h reminder email to every attendee that has RSVPed 'yes'
- * or 'maybe'. Scheduled by the `event.published` function.
+ * Fan the 48h reminder out to every attendee who said yes or maybe. Scheduled
+ * by `event.published`, so it can arrive long after the host walked away — it
+ * re-checks that the event is still published and still has a start time.
  */
 export const eventReminder = inngest.createFunction(
   {
@@ -21,26 +19,21 @@ export const eventReminder = inngest.createFunction(
     const { eventId } = evt.data
 
     const ev = await step.run('load-event', async () => {
-      const [row] = await db.select().from(event).where(eq(event.id, eventId)).limit(1)
+      const [row] = await useDb().select().from(tables.event).where(eq(tables.event.id, eventId)).limit(1)
       return row ?? null
     })
-
     if (!ev) return { skipped: 'event-not-found' }
     if (ev.status !== 'published') return { skipped: `status-${ev.status}` }
     if (!ev.startsAt) return { skipped: 'no-start' }
 
     const recipients = await step.run('load-recipients', async () => {
-      return db
-        .select({
-          rsvp,
-          user,
-          invite
-        })
-        .from(rsvp)
-        .leftJoin(user, eq(rsvp.userId, user.id))
-        .leftJoin(invite, eq(rsvp.inviteId, invite.id))
-        .where(eq(rsvp.eventId, ev.id))
-        .then(rows => rows.filter(r => r.rsvp.status === 'yes' || r.rsvp.status === 'maybe'))
+      const rows = await useDb()
+        .select({ rsvp: tables.rsvp, user: guestUser, invite: tables.invite })
+        .from(tables.rsvp)
+        .leftJoin(guestUser, eq(tables.rsvp.userId, guestUser.id))
+        .leftJoin(tables.invite, eq(tables.rsvp.inviteId, tables.invite.id))
+        .where(eq(tables.rsvp.eventId, ev.id))
+      return rows.filter(r => r.rsvp.status === 'yes' || r.rsvp.status === 'maybe')
     })
 
     let sent = 0
@@ -48,24 +41,16 @@ export const eventReminder = inngest.createFunction(
       const to = r.user?.email ?? r.rsvp.guestEmail
       if (!to) continue
       await step.run(`send-${r.rsvp.id}`, async () => {
-        const { html, text } = await renderEmail(
-          React.createElement(EventReminderEmail, {
-            recipientName: r.user?.name ?? r.rsvp.guestName ?? null,
-            eventTitle: ev.title,
-            eventSlug: ev.slug,
-            startsAt: ev.startsAt!,
-            endsAt: ev.endsAt,
-            location: ev.location,
-            inviteToken: r.invite?.token ?? null
-          })
-        )
-        await sendEmail({
-          to,
-          subject: `${ev.title} is in 48 hours`,
-          html,
-          text,
-          tag: 'event-reminder'
+        const { html, text } = await renderEventReminderEmail({
+          recipientName: r.user?.name ?? r.rsvp.guestName ?? null,
+          eventTitle: ev.title,
+          eventSlug: ev.slug,
+          startsAt: ev.startsAt!,
+          endsAt: ev.endsAt,
+          location: ev.location,
+          inviteToken: r.invite?.token ?? null
         })
+        await sendEmail({ to, subject: `${ev.title} is in 48 hours`, html, text, tag: 'event-reminder' })
       })
       sent += 1
     }

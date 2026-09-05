@@ -1,156 +1,119 @@
 <script setup lang="ts">
-import { z } from 'zod'
+/**
+ * First run. A fresh self-hosted zäme has an empty database and no way in, so
+ * this page claims the instance: the first account created becomes the owner
+ * (`server/utils/instance.ts`). Sign-in is magic-link like everywhere else —
+ * there is no password anywhere in this app — so "setup" is really just the
+ * first sign-in, done deliberately and once.
+ */
+useSeoMeta({ title: 'Set up zäme' })
 
-useSeoMeta({ title: 'zäme — Setup' })
-
-// If setup is not required, redirect home
 const { data } = await useFetch<{ setupRequired: boolean }>('/api/setup/status')
 if (!data.value?.setupRequired) {
   await navigateTo('/')
 }
 
-const schema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  email: z.email('Please enter a valid email address'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  passwordConfirm: z.string()
-}).refine(data => data.password === data.passwordConfirm, {
-  message: 'Passwords do not match',
-  path: ['passwordConfirm']
-})
+const name = ref('')
+const email = ref('')
+const sent = ref(false)
+const sending = ref(false)
+const errorMsg = ref<string | null>(null)
 
-type Schema = z.output<typeof schema>
-
-const state = reactive<Partial<Schema>>({
-  name: undefined,
-  email: undefined,
-  password: undefined,
-  passwordConfirm: undefined
-})
-
-const loading = ref(false)
-const error = ref<string | null>(null)
-const toast = useToast()
-
-async function onSubmit() {
-  if (!state.name || !state.email || !state.password) return
-  loading.value = true
-  error.value = null
-
-  const { error: authError } = await authClient.signUp.email({
-    name: state.name,
-    email: state.email,
-    password: state.password
-  })
-
-  loading.value = false
-
-  if (authError) {
-    error.value = authError.message ?? 'Setup failed. Please try again.'
-    return
+async function claim() {
+  if (!name.value || !email.value) return
+  sending.value = true
+  errorMsg.value = null
+  try {
+    const { error } = await authClient.signIn.magicLink({
+      email: email.value,
+      name: name.value,
+      callbackURL: '/host'
+    })
+    if (error) {
+      errorMsg.value = error.message ?? 'Setup failed — try again.'
+    } else {
+      sent.value = true
+    }
+  } finally {
+    sending.value = false
   }
-
-  toast.add({
-    title: 'Welcome to zäme!',
-    description: 'Your admin account has been created.',
-    color: 'success'
-  })
-  await navigateTo('/dashboard')
 }
 </script>
 
 <template>
-  <div class="min-h-screen flex items-center justify-center p-4">
-    <div class="w-full max-w-sm">
-      <div class="text-center mb-8">
-        <NuxtLink
-          to="/"
-          class="text-3xl font-bold text-primary"
-        >
-          zäme
-        </NuxtLink>
-        <h1 class="text-xl font-semibold mt-4">
-          Welcome! Let's set up your instance.
-        </h1>
-        <p class="text-muted text-sm mt-2">
-          Create the admin account to get started. This page is only shown once.
+  <div class="max-w-md mx-auto px-4 py-16">
+    <div class="text-center mb-8">
+      <p class="text-3xl font-bold tracking-tight">
+        zäme
+      </p>
+      <h1 class="text-xl font-semibold mt-4">
+        Let's set up your instance.
+      </h1>
+      <p class="text-muted text-sm mt-2">
+        Create the first account — it owns this instance. You'll only see this page once.
+      </p>
+    </div>
+
+    <UCard>
+      <div
+        v-if="sent"
+        class="flex flex-col gap-2"
+      >
+        <p class="font-medium">
+          📬 Check your inbox
+        </p>
+        <p class="text-sm text-muted">
+          We sent a sign-in link to <span class="font-medium">{{ email }}</span>.
+          Open it to finish setting up.
         </p>
       </div>
 
-      <UCard>
-        <UForm
-          :schema="schema"
-          :state="state"
-          class="space-y-4"
-          @submit="onSubmit"
+      <form
+        v-else
+        class="flex flex-col gap-3"
+        @submit.prevent="claim"
+      >
+        <UFormField
+          label="Your name"
+          name="name"
         >
-          <UFormField
-            label="Your name"
-            name="name"
-          >
-            <UInput
-              v-model="state.name"
-              placeholder="Ada Lovelace"
-              autocomplete="name"
-              class="w-full"
-            />
-          </UFormField>
-
-          <UFormField
-            label="Email"
-            name="email"
-          >
-            <UInput
-              v-model="state.email"
-              type="email"
-              placeholder="you@example.com"
-              autocomplete="email"
-              class="w-full"
-            />
-          </UFormField>
-
-          <UFormField
-            label="Password"
-            name="password"
-          >
-            <UInput
-              v-model="state.password"
-              type="password"
-              placeholder="Min. 8 characters"
-              autocomplete="new-password"
-              class="w-full"
-            />
-          </UFormField>
-
-          <UFormField
-            label="Confirm password"
-            name="passwordConfirm"
-          >
-            <UInput
-              v-model="state.passwordConfirm"
-              type="password"
-              placeholder="Repeat your password"
-              autocomplete="new-password"
-              class="w-full"
-            />
-          </UFormField>
-
-          <UAlert
-            v-if="error"
-            color="error"
-            variant="subtle"
-            :description="error"
-            icon="i-lucide-alert-circle"
+          <UInput
+            v-model="name"
+            placeholder="Ada Lovelace"
+            autocomplete="name"
+            class="w-full"
+            required
           />
-
-          <UButton
-            type="submit"
-            label="Create admin account"
-            :loading="loading"
-            block
+        </UFormField>
+        <UFormField
+          label="Email"
+          name="email"
+        >
+          <UInput
+            v-model="email"
+            type="email"
+            placeholder="you@example.com"
+            autocomplete="email"
+            class="w-full"
+            required
           />
-        </UForm>
-      </UCard>
-    </div>
+        </UFormField>
+        <UAlert
+          v-if="errorMsg"
+          color="error"
+          variant="subtle"
+          :description="errorMsg"
+        />
+        <UButton
+          type="submit"
+          :loading="sending"
+          :disabled="!name || !email"
+          block
+          size="lg"
+        >
+          Claim this instance
+        </UButton>
+      </form>
+    </UCard>
   </div>
 </template>

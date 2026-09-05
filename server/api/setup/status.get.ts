@@ -1,11 +1,6 @@
-import { db } from '#server/utils/db'
-import { user } from '#server/database/schema'
+import { isSetupRequired } from '../../utils/instance'
 
+/** Has anybody claimed this instance yet? Drives `/setup`. Deliberately open. */
 export default defineEventHandler(async () => {
-  const adminUsers = await db
-    .select({ id: user.id })
-    .from(user)
-    .limit(1)
-
-  return { setupRequired: adminUsers.length === 0 }
+  return { setupRequired: await isSetupRequired() }
 })

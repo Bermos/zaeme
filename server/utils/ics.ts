@@ -2,12 +2,12 @@ import * as icsLib from 'ics'
 import type { EventAttributes, DateArray } from 'ics'
 
 /**
- * Thin wrapper around the `ics` package that encapsulates the repeated
- * chore of converting a DB event row into a VEVENT payload and rendering
- * it to a valid `.ics` document.
+ * Calendar/ICS generation: a thin wrapper around the `ics` package that turns
+ * an event into a VEVENT payload and renders a valid `.ics` document.
  *
- * Lives in `server/utils/` rather than `packages/ics/` because this is a
- * single-root Nuxt 4 app.
+ * Deliberately domain-light — it speaks `IcsEventInput`, not the `events_*`
+ * schema — so the routes and the confirmation-email job both map onto it
+ * rather than this file reaching into the database.
  */
 
 export interface IcsEventInput {
@@ -32,8 +32,14 @@ function toDateArray(d: Date): DateArray {
   ]
 }
 
+/**
+ * Public base URL for event links embedded in the calendar entry. Only an
+ * absolute http(s) URL is used — the `ics` library rejects relative URLs, and
+ * some bundlers set `BASE_URL` to a path like "/", which must be ignored.
+ */
 function baseUrl(): string {
-  return process.env.BASE_URL || process.env.BETTER_AUTH_URL || ''
+  const candidate = process.env.BASE_URL || process.env.BETTER_AUTH_URL || process.env.KITCHEN_URL || ''
+  return /^https?:\/\//.test(candidate) ? candidate : ''
 }
 
 /**
@@ -48,14 +54,14 @@ export function eventToIcsAttributes(ev: IcsEventInput): EventAttributes | null 
     ? (ev.endsAt instanceof Date ? ev.endsAt : new Date(ev.endsAt))
     : new Date(start.getTime() + 2 * 60 * 60 * 1000) // default 2h
 
-  const descriptionLines = []
+  const descriptionLines: string[] = []
   if (ev.description) descriptionLines.push(ev.description)
   if (ev.ticketUrl) descriptionLines.push(`Tickets: ${ev.ticketUrl}`)
-  const url = baseUrl() ? `${baseUrl().replace(/\/$/, '')}/events/${ev.slug}` : undefined
+  const url = baseUrl() ? `${baseUrl().replace(/\/$/, '')}/e/${ev.slug}` : undefined
   if (url) descriptionLines.push(url)
 
   return {
-    uid: `${ev.id}@zaeme`,
+    uid: `${ev.id}@zame`,
     title: ev.title,
     description: descriptionLines.join('\n\n') || undefined,
     location: ev.location ?? undefined,
@@ -64,7 +70,7 @@ export function eventToIcsAttributes(ev: IcsEventInput): EventAttributes | null 
     end: toDateArray(end),
     endInputType: 'utc',
     url,
-    productId: 'zaeme/ics',
+    productId: 'zame/ics',
     calName: 'zäme',
     lastModified: ev.updatedAt
       ? toDateArray(ev.updatedAt instanceof Date ? ev.updatedAt : new Date(ev.updatedAt))
@@ -73,9 +79,8 @@ export function eventToIcsAttributes(ev: IcsEventInput): EventAttributes | null 
 }
 
 /**
- * Render a single event to a standalone `.ics` document. Used as the
- * attachment on RSVP confirmation emails and as the body of the per-event
- * feed (`/events/[slug]/calendar.ics`).
+ * Render a single event to a standalone `.ics` document. Used as the attachment
+ * on RSVP confirmation emails and as the body of the per-event feed.
  */
 export function renderEventIcs(ev: IcsEventInput): string {
   const attrs = eventToIcsAttributes(ev)
@@ -90,8 +95,8 @@ export function renderEventIcs(ev: IcsEventInput): string {
 }
 
 /**
- * Render a multi-event `.ics` feed (used by `/calendar/[token].ics`).
- * Silently skips events that lack `startsAt`.
+ * Render a multi-event `.ics` feed (used by the attendee calendar feed). Silently
+ * skips events that lack `startsAt`.
  */
 export function renderFeedIcs(events: IcsEventInput[]): string {
   const attrsList = events
