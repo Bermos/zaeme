@@ -28,6 +28,15 @@ export interface ObjectStore {
   presignUpload(key: string, contentType: string, sizeBytes: number): Promise<PresignedUpload>
   presignDownload(key: string): Promise<string>
   delete(key: string): Promise<void>
+  /**
+   * Server-side upload. The guest media flow presigns and lets the browser PUT
+   * directly, but the machine API's poster upload arrives as bytes on zäme's
+   * own request (`PUT /api/v1/media/posters/{sha256}`), so zäme is the one that
+   * writes the object.
+   */
+  put(key: string, body: Uint8Array, contentType: string): Promise<void>
+  /** Does this key already hold an object? The `headPoster` short-circuit. */
+  exists(key: string): Promise<boolean>
 }
 
 export interface StorageConfig {
@@ -132,6 +141,28 @@ export class S3CompatibleStore implements ObjectStore {
     return signed.url
   }
 
+  /** Write an object directly from the server (the machine API's poster upload). */
+  async put(key: string, body: Uint8Array, contentType: string): Promise<void> {
+    const res = await this.client.fetch(this.objectUrl(key), {
+      method: 'PUT',
+      body: body as unknown as BodyInit,
+      headers: { 'content-type': contentType, 'content-length': String(body.byteLength) }
+    })
+    if (!res.ok) {
+      throw new Error(`Failed to store object (${res.status})`)
+    }
+  }
+
+  /** Cheap existence probe — one HEAD, no bytes transferred. */
+  async exists(key: string): Promise<boolean> {
+    const res = await this.client.fetch(this.objectUrl(key), { method: 'HEAD' })
+    if (res.status === 404) return false
+    if (!res.ok) {
+      throw new Error(`Failed to probe object (${res.status})`)
+    }
+    return true
+  }
+
   /** Delete an object. Best-effort — 404s are ignored. */
   async delete(key: string): Promise<void> {
     const res = await this.client.fetch(this.objectUrl(key), { method: 'DELETE' })
@@ -161,6 +192,8 @@ function unconfiguredStore(): ObjectStore {
   return {
     presignUpload: async () => fail(),
     presignDownload: async () => fail(),
-    delete: async () => fail()
+    delete: async () => fail(),
+    put: async () => fail(),
+    exists: async () => fail()
   }
 }

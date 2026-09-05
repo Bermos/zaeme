@@ -22,6 +22,7 @@ export interface ContributionView {
   claimedByName: string | null
   /** Set only when the viewer's email matches — lets the UI offer "release". */
   claimedByEmail: string | null
+  claimedAt: Date | null
 }
 
 /** Public-safe contribution list for an event (emails hidden). */
@@ -39,7 +40,8 @@ export async function listContributions(eventId: string): Promise<ContributionVi
     note: r.note,
     claimed: !!r.claimedByEmail,
     claimedByName: r.claimedByName,
-    claimedByEmail: r.claimedByEmail
+    claimedByEmail: r.claimedByEmail,
+    claimedAt: r.claimedAt
   }))
 }
 
@@ -146,4 +148,20 @@ export async function deleteContribution(userId: string, slug: string, contribut
   await useDb()
     .delete(tables.contribution)
     .where(and(eq(tables.contribution.id, contributionId), eq(tables.contribution.eventId, ev.id)))
+}
+
+/* --------------------------- planner-scoped shape --------------------------- */
+
+/** The bring-list for a planner of the event — the `(userId, slug)` shape. */
+export async function listContributionsForPlanner(userId: string, slug: string): Promise<ContributionView[]> {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId)
+  return listContributions(ev.id)
+}
+
+/** Add a bring-list item as a planner (owner/co-planner only). */
+export async function addContributionAsPlanner(userId: string, slug: string, input: AddContributionInput) {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+  return addContribution(ev.id, input, { userId })
 }

@@ -2,6 +2,7 @@ import { and, desc, eq, sql } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
+import { guestUser } from '../database/schema/auth'
 import { assertPlanner, loadEventBySlug } from './permissions'
 import { generateUniqueSlug } from './slugify'
 
@@ -446,4 +447,33 @@ export async function deleteTimelineItem(userId: string, slug: string, itemId: s
   await useDb()
     .delete(tables.timelineItem)
     .where(and(eq(tables.timelineItem.id, itemId), eq(tables.timelineItem.eventId, ev.id)))
+}
+
+/**
+ * One event with its planning team resolved to people — the contract's
+ * `EventDetail`. `getEventForPlanner` above answers ids and roles, which is all
+ * the host UI needs; the machine API promises a name and an email per planner,
+ * so the join lives here rather than in the route handler.
+ */
+export async function getEventDetailForPlanner(userId: string, slug: string) {
+  const ev = await loadEventBySlug(slug)
+  const plannerRole = await assertPlanner(ev.id, userId)
+  const planners = await useDb()
+    .select({
+      userId: tables.eventPlanner.userId,
+      role: tables.eventPlanner.role,
+      name: guestUser.name,
+      email: guestUser.email
+    })
+    .from(tables.eventPlanner)
+    .leftJoin(guestUser, eq(tables.eventPlanner.userId, guestUser.id))
+    .where(eq(tables.eventPlanner.eventId, ev.id))
+  return { ...ev, plannerRole, planners }
+}
+
+/** An event's own row plus the caller's role on it — the `EventSummary` source. */
+export async function getEventSummaryForPlanner(userId: string, slug: string) {
+  const ev = await loadEventBySlug(slug)
+  const plannerRole = await assertPlanner(ev.id, userId)
+  return { ...ev, plannerRole }
 }

@@ -19,12 +19,21 @@ export interface PollOptionView {
   startsAt: Date
   endsAt: Date | null
   note: string | null
-  votes: Array<{ name: string, answer: PollAnswer }>
+  /**
+   * Who answered what. `email` is HOST-ONLY and present only when the caller
+   * asked for it (`loadPoll(id, { includeEmails: true })`): the guest invite
+   * page embeds this whole structure, and a shared link must not become a way
+   * to harvest the other guests' addresses.
+   */
+  votes: Array<{ name: string, email?: string, answer: PollAnswer }>
   tally: { yes: number, ifneedbe: number, no: number }
 }
 
 /** Options + votes + tallies for an event, ordered as proposed. */
-export async function loadPoll(eventId: string): Promise<PollOptionView[]> {
+export async function loadPoll(
+  eventId: string,
+  opts: { includeEmails?: boolean } = {}
+): Promise<PollOptionView[]> {
   const db = useDb()
   const options = await db
     .select()
@@ -37,6 +46,7 @@ export async function loadPoll(eventId: string): Promise<PollOptionView[]> {
     .select({
       optionId: tables.dateVote.optionId,
       name: tables.dateVote.guestName,
+      email: tables.dateVote.guestEmail,
       answer: tables.dateVote.answer
     })
     .from(tables.dateVote)
@@ -51,7 +61,11 @@ export async function loadPoll(eventId: string): Promise<PollOptionView[]> {
       startsAt: o.startsAt,
       endsAt: o.endsAt,
       note: o.note,
-      votes: forOption.map(v => ({ name: v.name, answer: v.answer as PollAnswer })),
+      votes: forOption.map(v => ({
+        name: v.name,
+        ...(opts.includeEmails ? { email: v.email } : {}),
+        answer: v.answer as PollAnswer
+      })),
       tally
     }
   })
@@ -135,4 +149,15 @@ export async function lockDate(
     await opts.dispatch('events/event.published', { eventId: ev.id })
   }
   return updated
+}
+
+/**
+ * The poll for a planner of the event, with voter emails — the host surface and
+ * the machine API (`GET /api/v1/events/{slug}/poll`) both need to say WHO
+ * answered, and the contract's `PollOption.votes[].email` is host-side data.
+ */
+export async function loadPollForPlanner(userId: string, slug: string): Promise<PollOptionView[]> {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId)
+  return loadPoll(ev.id, { includeEmails: true })
 }

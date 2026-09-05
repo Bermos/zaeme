@@ -30,3 +30,26 @@ export async function resolveInstanceOwnerId(): Promise<string | null> {
 export async function isSetupRequired(): Promise<boolean> {
   return (await resolveInstanceOwnerId()) === null
 }
+
+/** The instance owner as a planner identity — id, name and email. */
+export interface InstancePlanner {
+  id: string
+  name: string
+  email: string
+}
+
+/**
+ * The planner the Enterprise service token acts as: this instance's owner
+ * account, in full. `postEventChatMessage` needs a display name and an email
+ * for the message it writes, and the contract is explicit that the host's name
+ * on a zäme message is zäme's own fact about its planner — Enterprise no
+ * longer supplies one.
+ */
+export async function resolveInstancePlanner(): Promise<InstancePlanner | null> {
+  const [row] = await useDb()
+    .select({ id: guestUser.id, name: guestUser.name, email: guestUser.email })
+    .from(guestUser)
+    .orderBy(asc(guestUser.createdAt))
+    .limit(1)
+  return row ?? null
+}

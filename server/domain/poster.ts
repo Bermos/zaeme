@@ -63,3 +63,46 @@ export async function isPublicPosterKey(storageKey: string): Promise<boolean> {
     .limit(1)
   return rows.length > 0
 }
+
+/* ----------------------- content-addressed poster art ---------------------- */
+
+/**
+ * Posters uploaded THROUGH the machine API (`PUT /api/v1/media/posters/{sha256}`)
+ * are content-addressed: the object key is the SHA-256 of the bytes, so
+ * re-publishing an unchanged concert re-derives the same key, finds it already
+ * stored, and costs nothing. A poster nothing references is zäme's to collect.
+ *
+ * The authorisation gate above is unchanged and still the whole story: the bytes
+ * are inert until some public, published event's `posterUrl` points at them.
+ */
+export const POSTER_OBJECT_PREFIX = 'posters/'
+
+/** The object-store key for a set of poster bytes, from their digest. */
+export function posterObjectKey(sha256: string): string {
+  return `${POSTER_OBJECT_PREFIX}${sha256}`
+}
+
+/** Lowercase-hex SHA-256, the only shape the content address may take. */
+export function isSha256Hex(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value)
+}
+
+/**
+ * Reduce a poster URL to the relative form zäme persists on `event.posterUrl`.
+ *
+ * `uploadPoster` hands Enterprise an ABSOLUTE URL (the contract promises one it
+ * can store and serve), but the row keeps the relative path — that is what the
+ * `isPublicPosterKey` gate compares against and what `<img src>` and the OG card
+ * want. Anything that is not one of ours passes through untouched: a movie
+ * poster pasted from the web is still a perfectly good `posterUrl`.
+ */
+export function normalisePosterUrl(url: string | null | undefined): string | null {
+  if (!url) return null
+  if (url.startsWith(PUBLIC_POSTER_PREFIX)) return url
+  const at = url.indexOf(PUBLIC_POSTER_PREFIX)
+  // Only strip a leading origin, never a prefix found mid-path.
+  if (at > 0 && /^https?:\/\/[^/]+$/.test(url.slice(0, at))) {
+    return url.slice(at)
+  }
+  return url
+}

@@ -16,6 +16,10 @@ const EXEMPT_PREFIXES = [
   '/api/auth',
   '/api/inngest',
   '/api/health',
+  // The machine surface authenticates itself and must never be redirected into
+  // a browser bootstrap flow; nor must the contract it publishes.
+  '/api/v1/',
+  '/api/openapi.yaml',
   '/api/public/',
   '/api/invites/',
   '/i/',

@@ -266,7 +266,10 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
     })))
   })
 
-  return loadBudget(eventId)
+  // The recorded expense's id rides along with the budget: the caller that
+  // needs the budget ignores it, and the machine API — whose contract answers
+  // the ONE expense just recorded — can find it without guessing at ordering.
+  return { ...await loadBudget(eventId), expenseId }
 }
 
 /**

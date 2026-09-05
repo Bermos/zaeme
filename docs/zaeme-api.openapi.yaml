@@ -1,0 +1,2322 @@
+# yaml-language-server: $schema=https://spec.openapis.org/oas/3.1/schema/2022-10-07
+#
+# The zäme HTTP contract (ADR-0036).
+#
+# ★ THIS FILE, IN THIS REPOSITORY, IS THE SOURCE OF TRUTH. ★
+#
+# It lives with the system that implements it. zäme serves this exact file at
+# `GET /api/openapi.yaml`, and `test/api-contract.test.ts` asserts in BOTH
+# directions that the `/api/v1` route tree and this document describe the same
+# surface — a route the spec omits fails the build just as loudly as an
+# operation with no route.
+#
+# The copy at `Bermos/Enterprise:docs/architecture/zaeme-api.openapi.yaml` is a
+# VENDORED SNAPSHOT, kept only so Enterprise's build can generate its MCP tool
+# surface without a network fetch. It is downstream. Change this file, then
+# re-vendor there — never the other way round.
+#
+# THIS FILE IS THE KEYSTONE OF THE TWO-REPO SEPARATION. It is not documentation
+# of an implementation — it is the implementation's brief, in both directions:
+#
+#   • zäme (Bermos/zaeme, deployed on the Kitchen PaaS) IMPLEMENTS it.
+#   • Enterprise (Bermos/Enterprise) GENERATES from it — `layers/events` becomes a
+#     thin client shim whose MCP tool surface is emitted from these operations at
+#     build time (see Enterprise's `docs/architecture/zaeme-integration.md`).
+#
+# Because the surface is generated, three things in here are load-bearing and must
+# not be edited casually:
+#
+#   1. `operationId` — the MCP tool name. The XO addresses today's tools as
+#      `mcp__events__<name>`; every operation that replaces an existing tool keeps
+#      that exact name. Renaming one changes the XO's vocabulary.
+#   2. `description` on operations and parameters — these become the tool and
+#      argument descriptions the MODEL reads. They carry the operating know-how
+#      (when to call, when not to, what the units are), ported verbatim from
+#      `layers/events/server/utils/tools.ts`. They are prompt, not prose.
+#   3. `x-mcp-expose` — whether an operation becomes a tool at all. The snapshot,
+#      the attention read, the concert projection and the poster upload are
+#      Enterprise↔zäme plumbing, not things the model should call.
+
+openapi: 3.1.0
+
+info:
+  title: zäme API
+  version: 1.0.0
+  summary: The events, invites and social-coordination domain zäme owns, as consumed by Enterprise.
+  description: |-
+    zäme owns the social domain outright after the split (ADR-0036): its own
+    Postgres, its own guest identity, its own object store. Enterprise keeps no
+    `events_*` schema, no migrations and no domain logic — `layers/events`
+    survives only as a `Department` shim that turns every call into an HTTP
+    request against this API.
+
+    ## Where this document lives
+
+    The canonical copy is `docs/zaeme-api.openapi.yaml` in **Bermos/zaeme**, the
+    repository that implements it, and zäme serves it verbatim at
+    `GET /api/openapi.yaml` (unauthenticated, `application/yaml`) so Enterprise
+    can fetch the contract rather than guess at it.
+
+    The copy committed at `docs/architecture/zaeme-api.openapi.yaml` in
+    **Bermos/Enterprise** is an explicitly-labelled **vendored snapshot**. It
+    exists so Enterprise's build can emit its MCP tool surface offline and
+    reproducibly. It is downstream of this file: edit here, then re-vendor there.
+    If the two ever disagree, this one is right.
+
+    ## Who calls this
+
+    One caller: the Enterprise pod, with a service token. There are no other
+    clients and no public consumers — zäme's own guest-facing surface talks to
+    its domain functions in-process, not through here. So this is deliberately a
+    *host-side* API: every route acts as the owner-planner, and nothing in it is
+    reachable by a guest.
+
+    ## Identity
+
+    The service token authenticates **Enterprise**, the system. The `x-mcp-user`
+    header identifies **which Enterprise owner** the call acts for, and zäme
+    resolves it to the planner account linked to that owner. Today that is a
+    single-owner mapping (one Enterprise instance, one zäme planner); an
+    unrecognised id is a `403 forbidden`, never a silent fallback to "the owner".
+
+    ## Provenance headers
+
+    Enterprise's MCP worker already stamps four headers on every tool call
+    (`packages/orchestrator/src/xo/worker.ts`, `mcpServerFor`), and the shim
+    forwards them here unchanged:
+
+    | Header | Meaning |
+    |---|---|
+    | `x-mcp-user` | the Enterprise owner the call acts for (**required**) |
+    | `x-mcp-thread` | `xo_thread.id` — the conversation that reasoned the write |
+    | `x-mcp-model` | the model id producing the turn |
+    | `x-mcp-basis` | comma-separated user message ids — the traceable basis |
+
+    They are **transport, not tool inputs**: they are declared once in
+    `components.parameters` and are deliberately NOT listed on each operation, so
+    the MCP generator does not mint four bogus arguments on every tool. Every
+    operation accepts them; the generator ignores them; the shim always sends them.
+
+    Note honestly what this buys: the events layer records **no provenance today**
+    — `syncAttendance` and the RSVP flow write without an assertion trail. Carrying
+    the headers across the boundary therefore preserves an *option* (zäme can start
+    recording "which conversation caused this" whenever it wants) rather than
+    keeping a live behaviour alive. It costs nothing on the Enterprise side because
+    `mcpServerFor` already builds arbitrary headers.
+
+    ## What is deliberately NOT here
+
+    Three of the events department's 36 tools have no route and never will,
+    because they touch nothing zäme owns. They stay in `layers/events` as
+    in-process tools on the shim:
+
+    | Tool | Why it stays |
+    |---|---|
+    | `proposeMovieNight` | pure shaping — validates a plan and hands back an `xo-card` for the owner to confirm. It writes nothing. |
+    | `updateGoalProgress` | writes the goals faculty's progress note, in Enterprise's database. |
+    | `saveMemory` | writes the flat XO long-term memory pool, in Enterprise's database. |
+
+    The other 33 are one-for-one with the 33 `x-mcp-expose` operations below, under
+    exactly their current names.
+
+    ## A YAML trap, since this file is machine-read
+
+    RSVP statuses and poll answers include the literals `yes` and `no`. In YAML 1.1
+    (PyYAML, and anything using it to lint or generate from this spec) an unquoted
+    `yes`/`no` parses as a **boolean**, silently turning the enum into
+    `[True, 'maybe', False, 'cheering']`. Every such literal in this file is quoted
+    for that reason. Do not unquote them.
+
+    ## Errors
+
+    Every non-2xx response is a `Error` envelope with a stable machine `code`.
+    The shim maps codes onto what the model sees: `not_found` and
+    `validation_failed` are surfaced as tool results the model can recover from;
+    `unauthenticated`, `forbidden` and `internal` throw.
+
+    ## Idempotency
+
+    Reads are safe. Writes are not idempotent unless a schema says so
+    (`addSeriesMember` is idempotent by email; `publishConcert` is idempotent by
+    `sourceId`; `uploadPoster` is idempotent by content digest). Enterprise does
+    not retry writes — only connects (see the bounded connect-retry in
+    `packages/orchestrator/src/agents/turn-client.ts`, the house pattern this
+    client follows).
+  x-owner: Bermos/zaeme
+  x-consumer: Bermos/Enterprise
+  x-adr: docs/architecture/adr/0036-zaeme-owns-the-social-domain-behind-an-http-contract.md
+  x-mcp-scope: events
+  x-mcp-tool-name-template: 'mcp__events__{operationId}'
+  x-request-headers:
+    - x-mcp-user
+    - x-mcp-thread
+    - x-mcp-model
+    - x-mcp-basis
+
+servers:
+  - url: https://zaeme.example.com/api/v1
+    description: A deployed zäme instance. The real origin is configuration (BASE_URL), never this file.
+  - url: http://localhost:3001/api/v1
+    description: Local zäme dev server.
+
+security:
+  - serviceToken: []
+
+tags:
+  - name: events
+    description: The event record itself — list, read, create, update, lifecycle.
+  - name: invites
+    description: Invite links (shareable and personal) and their revocation.
+  - name: rsvps
+    description: Who is coming, with +1s, dietary and accessibility notes.
+  - name: timeline
+    description: The itinerary — transport, activities, meals, accommodation.
+  - name: media
+    description: Photos, videos, documents and tickets attached to an event.
+  - name: poll
+    description: The date poll — propose candidate dates, read the tally, lock the winner.
+  - name: contributions
+    description: The bring-list (potluck) items guests claim.
+  - name: budget
+    description: Trip expenses, per-person balances and the settlement plan.
+  - name: series
+    description: Recurring series — the standing member group and its showings.
+  - name: party
+    description: The two-stage party flow — core group fixes the date, then it opens up.
+  - name: chat
+    description: The event group chat.
+  - name: planners
+    description: Co-organizers — other people who can plan this event.
+  - name: briefing
+    description: Enterprise plumbing — the hot-path snapshot and the check-in attention read. Not model-facing.
+  - name: concerts
+    description: Enterprise plumbing — the Music department's public concert projection. Not model-facing.
+  - name: ops
+    description: Liveness. Not model-facing.
+
+paths:
+
+  # ------------------------------------------------------------------ events --
+
+  /events:
+    get:
+      operationId: listEvents
+      tags: [events]
+      summary: List the user's events.
+      description: >-
+        List the events the user is a planner of (most recent first), with status,
+        dates and the user's role on each.
+      responses:
+        '200':
+          description: The user's events, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/EventSummary' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: createEvent
+      tags: [events]
+      summary: Create an event.
+      description: >-
+        Create a new event. It starts as a draft (not yet published, no invites
+        sent). Returns the new event id and slug. Types: hosted (default), concert
+        (public, "I go"/cheering), series (a recurring container like movie nights
+        — schedule showings with scheduleSeriesShowing), trip (multi-day, itinerary
+        + budget), party (two-stage; prefer createPartyPlan for the full flow).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEventInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventRef' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: getEvent
+      tags: [events]
+      summary: Read one event.
+      description: 'Get one event by its slug, including its planners. Use the slug from listEvents.'
+      responses:
+        '200':
+          description: The event and its planner team.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventDetail' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+    patch:
+      operationId: updateEvent
+      tags: [events]
+      summary: Update an event's details.
+      description: >-
+        Update an existing event's details (title, description, times, location,
+        visibility). Only the fields you pass are changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEventInput' }
+      responses:
+        '200':
+          description: The updated event.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventSummary' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/status:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    post:
+      operationId: setEventStatus
+      tags: [events]
+      summary: Move an event through its lifecycle.
+      description: >-
+        Move an event through its lifecycle: draft → polling/published →
+        completed, or cancel it. Publishing sends invite emails; cancelling
+        notifies attendees. Only call this when the user clearly asks to publish,
+        complete or cancel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [draft, polling, published, completed, cancelled]
+                  description: The lifecycle state to move to.
+                reason:
+                  type: string
+                  maxLength: 2000
+                  description: Optional note included in cancellation emails.
+      responses:
+        '200':
+          description: The event in its new status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventSummary' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            The transition is not allowed from the event's current status
+            (`invalid_transition`). The current status is in `error.details.from`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ----------------------------------------------------------------- invites --
+
+  /events/{slug}/invites:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: listInvites
+      tags: [invites]
+      summary: List an event's invite links.
+      description: >-
+        List the invite links for an event, with how many times each has been used
+        and how many RSVPs it produced.
+      responses:
+        '200':
+          description: The event's invites, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Invite' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: createInvite
+      tags: [invites]
+      summary: Create an invite link.
+      description: >-
+        Create an invite link for an event. Leave email empty for a shareable link,
+        or set it to send a targeted invite when the event is published.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                label:
+                  type: string
+                  maxLength: 120
+                  description: A human label for this link, e.g. "Work friends".
+                email:
+                  type: string
+                  format: email
+                  description: >-
+                    Set to make this a targeted personal invite — the address the
+                    invite email goes to when the event is published. Leave empty
+                    for a shareable multi-use link.
+                name:
+                  type: string
+                  maxLength: 120
+                  description: The invitee's name, for the greeting in the invite email.
+                maxUses:
+                  type: integer
+                  minimum: 1
+                  maximum: 10000
+                  description: Cap on how many times a shareable link may be used.
+                expiresAt:
+                  $ref: '#/components/schemas/IsoDateTime'
+      responses:
+        '201':
+          description: The created invite, including its token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invite' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/invites/{inviteId}:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+      - name: inviteId
+        in: path
+        required: true
+        description: 'The invite id from listInvites.'
+        schema: { type: string, minLength: 1 }
+    delete:
+      operationId: revokeInvite
+      tags: [invites]
+      summary: Revoke an invite link.
+      description: >-
+        Revoke an invite link so its holders can no longer use it (they see "no
+        longer active"). Use listInvites to find the invite id first.
+      responses:
+        '200':
+          description: The revoked invite.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invite' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ------------------------------------------------------------------- rsvps --
+
+  /events/{slug}/rsvps:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: listRsvps
+      tags: [rsvps]
+      summary: List an event's RSVPs.
+      description: >-
+        List the RSVPs for an event with a summary (counts per status and total
+        headcount including +1s). Use this to answer who is coming.
+      responses:
+        '200':
+          description: The RSVP rows and their summary.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rsvps, summary]
+                properties:
+                  rsvps:
+                    type: array
+                    items: { $ref: '#/components/schemas/Rsvp' }
+                  summary: { $ref: '#/components/schemas/RsvpSummary' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/rsvps/{rsvpId}:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+      - name: rsvpId
+        in: path
+        required: true
+        description: 'The RSVP id from listRsvps.'
+        schema: { type: string, minLength: 1 }
+    patch:
+      operationId: updateRsvp
+      tags: [rsvps]
+      summary: Update one attendee's RSVP.
+      description: >-
+        Update one attendee's RSVP on an event (status, +1, dietary or
+        accessibility notes).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                status:
+                  type: string
+                  enum: ['yes', 'maybe', 'no', 'cheering']
+                  description: '"cheering" is the concert-style "I''m rooting for you" answer — it is not attendance.'
+                plusOne:
+                  type: boolean
+                  description: Whether this attendee is bringing someone.
+                plusOneName:
+                  type: [string, 'null']
+                  maxLength: 200
+                dietary:
+                  type: [string, 'null']
+                  maxLength: 500
+                accessibility:
+                  type: [string, 'null']
+                  maxLength: 500
+                notes:
+                  type: [string, 'null']
+                  maxLength: 2000
+      responses:
+        '200':
+          description: The updated RSVP.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rsvp' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+    delete:
+      operationId: removeRsvp
+      tags: [rsvps]
+      summary: Remove an attendee's RSVP.
+      description: >-
+        Remove an attendee's RSVP from an event. Use sparingly and only when the
+        user asks.
+      responses:
+        '200':
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [removed]
+                properties:
+                  removed: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ---------------------------------------------------------------- timeline --
+
+  # KNOWN GAP, carried across the boundary unchanged: there is no PATCH here.
+  # `layers/events` can add a timeline item and remove one, but never edit one in
+  # place — a typo means remove + re-add, which loses the item's id and any media
+  # attached to it. The operationId `updateTimelineItem` is RESERVED for the fix so
+  # that whoever closes the gap mints the tool under the obvious name rather than
+  # inventing a second one. Do not use that name for anything else.
+  /events/{slug}/timeline:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: listTimeline
+      tags: [timeline]
+      summary: List an event's itinerary.
+      description: >-
+        List an event's itinerary/timeline items in display order (transport,
+        activities, meals, accommodation).
+      responses:
+        '200':
+          description: The itinerary in display order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TimelineItem' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: addTimelineItem
+      tags: [timeline]
+      summary: Add an itinerary item.
+      description: >-
+        Add an item to an event's itinerary/timeline. It is appended after existing
+        items unless you set sortOrder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 300 }
+                description: { type: string, maxLength: 5000 }
+                startsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                endsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                location: { type: string, maxLength: 500 }
+                type:
+                  type: string
+                  enum: [transport, activity, accommodation, meal, other]
+                  description: What kind of itinerary entry this is.
+                sortOrder:
+                  type: integer
+                  minimum: 0
+                  maximum: 100000
+                  description: Explicit display position; omit to append after the existing items.
+      responses:
+        '201':
+          description: The created itinerary item.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TimelineItem' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/timeline/{itemId}:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+      - name: itemId
+        in: path
+        required: true
+        description: 'The timeline item id from listTimeline.'
+        schema: { type: string, minLength: 1 }
+    delete:
+      operationId: removeTimelineItem
+      tags: [timeline]
+      summary: Remove an itinerary item.
+      description: "Remove an item from an event's itinerary/timeline."
+      responses:
+        '200':
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [removed]
+                properties:
+                  removed: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ------------------------------------------------------------------- media --
+
+  /events/{slug}/media:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: listMedia
+      tags: [media]
+      summary: List an event's attached media.
+      description: >-
+        List the photos, videos, documents and tickets attached to an event
+        (metadata only — no download URLs; the bytes live in zäme and are served
+        to guests there).
+      responses:
+        '200':
+          description: Ready media metadata, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MediaItem' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # -------------------------------------------------------------- date  poll --
+
+  /events/{slug}/poll:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: listDatePoll
+      tags: [poll]
+      summary: Read an event's date poll.
+      description: >-
+        Get an event's date poll: the proposed date/time options with each
+        participant's vote and the running tally (yes/ifneedbe/no). Use this before
+        reporting which date is winning.
+      responses:
+        '200':
+          description: The poll options with their votes and tallies.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PollOption' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/poll/options:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    post:
+      operationId: proposeDateOption
+      tags: [poll]
+      summary: Propose one candidate date.
+      description: >-
+        Propose one candidate date/time on an event's date poll, for people to vote
+        on. The event must be in draft or polling status. Call once per candidate
+        date.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [startsAt]
+              properties:
+                startsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                endsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                note:
+                  type: string
+                  maxLength: 500
+                  description: A short qualifier shown next to the option, e.g. "after the match".
+      responses:
+        '201':
+          description: The created date option.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PollOption' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'The event is past the polling stage (`invalid_transition`).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/poll/lock:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    post:
+      operationId: lockEventDate
+      tags: [poll]
+      summary: Lock in the winning date.
+      description: >-
+        Lock in the winning date option from the poll: stamps the event's start/end
+        time and publishes it, which sends invite emails. Only call this once the
+        user has picked (or explicitly asked you to pick) a date.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [optionId]
+              properties:
+                optionId:
+                  type: string
+                  minLength: 1
+                  description: 'The winning option''s id, from listDatePoll.'
+      responses:
+        '200':
+          description: The event, now dated and published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventSummary' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'The event cannot be published from its current status (`invalid_transition`).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ----------------------------------------------------------- contributions --
+
+  /events/{slug}/contributions:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: listPotluck
+      tags: [contributions]
+      summary: Read the bring-list.
+      description: >-
+        List an event's bring-list (potluck) items with their category and who, if
+        anyone, has claimed each one.
+      responses:
+        '200':
+          description: The bring-list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Contribution' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: addPotluckItem
+      tags: [contributions]
+      summary: Add a bring-list item.
+      description: >-
+        Add a bring-list (potluck) item to an event for attendees to claim, e.g.
+        "Main dish", "Drinks", "Napkins & plates".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 200 }
+                category:
+                  type: string
+                  enum: [food, drink, other]
+                quantity:
+                  type: string
+                  maxLength: 100
+                  description: 'How much is wanted, in words, e.g. "for 8 people".'
+                note: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: The created bring-list item.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Contribution' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ------------------------------------------------------------------ budget --
+
+  /events/{slug}/budget:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: getTripBudget
+      tags: [budget]
+      summary: Read a trip's budget.
+      description: >-
+        Get a trip/event's budget: every expense with its shares, per-person
+        balances (paid vs owed), and the suggested "who pays whom" settlement plan.
+        Amounts are integer cents.
+      responses:
+        '200':
+          description: Expenses, balances and the settlement plan.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Budget' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/expenses:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    post:
+      operationId: addTripExpense
+      tags: [budget]
+      summary: Record an expense.
+      description: >-
+        Record an expense on a trip/event: who paid, the total in cents, and who it
+        is split across. Participants without an explicit amountCents split the
+        remainder evenly. Use the attendees' names and emails from listRsvps.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [title, amountCents, paidByName, paidByEmail, participants]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 200 }
+                category:
+                  type: string
+                  enum: [travel, accommodation, food, tickets, other]
+                amountCents:
+                  type: integer
+                  minimum: 1
+                  description: 'Total in cents, e.g. 12550 for CHF 125.50.'
+                currency:
+                  type: string
+                  minLength: 3
+                  maxLength: 3
+                  description: Defaults to CHF.
+                note: { type: string, maxLength: 500 }
+                paidByName: { type: string, minLength: 1, maxLength: 200 }
+                paidByEmail: { type: string, format: email }
+                participants:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  description: >-
+                    Everyone the expense is split across. Anyone without an explicit
+                    amountCents splits the remainder evenly.
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [name, email]
+                    properties:
+                      name: { type: string, minLength: 1, maxLength: 200 }
+                      email: { type: string, format: email }
+                      amountCents: { type: integer, minimum: 0 }
+      responses:
+        '201':
+          description: The recorded expense with its resolved shares.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Expense' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/expenses/{expenseId}:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+      - name: expenseId
+        in: path
+        required: true
+        description: 'The expense id from getTripBudget.'
+        schema: { type: string, minLength: 1 }
+    delete:
+      operationId: removeTripExpense
+      tags: [budget]
+      summary: Remove an expense.
+      description: "Remove a recorded expense (and its shares) from a trip/event's budget."
+      responses:
+        '200':
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [removed]
+                properties:
+                  removed: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ------------------------------------------------------------------ series --
+
+  /events/{slug}/series/members:
+    parameters:
+      - $ref: '#/components/parameters/SeriesSlug'
+    get:
+      operationId: listSeriesMembers
+      tags: [series]
+      summary: List a series' standing member group.
+      description: >-
+        List the standing member group of a recurring series (e.g. the movie-night
+        crew) — everyone who gets an invite each time a showing is scheduled.
+      responses:
+        '200':
+          description: The standing group.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SeriesMember' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: addSeriesMember
+      tags: [series]
+      summary: Add someone to the standing group.
+      description: >-
+        Add a friend to a series' standing group (idempotent by email). They will
+        be invited to every future showing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, email]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: >-
+            The member. Returned for both a fresh add and a repeat of an existing
+            email — the operation is idempotent by email, so a repeat is a 200,
+            never a 409.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SeriesMember' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/series/members/{memberId}:
+    parameters:
+      - $ref: '#/components/parameters/SeriesSlug'
+      - name: memberId
+        in: path
+        required: true
+        description: 'The member id from listSeriesMembers.'
+        schema: { type: string, minLength: 1 }
+    delete:
+      operationId: removeSeriesMember
+      tags: [series]
+      summary: Remove someone from the standing group.
+      description: >-
+        Remove a member from a series' standing group (they keep invites to
+        already-scheduled showings).
+      responses:
+        '200':
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [removed]
+                properties:
+                  removed: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/series/showings:
+    parameters:
+      - $ref: '#/components/parameters/SeriesSlug'
+    get:
+      operationId: listSeriesShowings
+      tags: [series]
+      summary: List a series' showings.
+      description: >-
+        List a series' scheduled showings (occurrences) with their status, date and
+        sign-up count.
+      responses:
+        '200':
+          description: The showings, soonest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Showing' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: scheduleSeriesShowing
+      tags: [series]
+      summary: Schedule the next showing.
+      description: >-
+        Schedule the next showing of a series (e.g. the next movie night): creates
+        a published child event and emails a personal invite to every standing
+        member, who then sign up. No date poll — the date you set IS the date. Only
+        call when the user has settled on the film/date.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [title, startsAt]
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  description: 'The showing''s title, e.g. "Movie night: Heat (1995)".'
+                description: { type: string, maxLength: 5000 }
+                posterUrl:
+                  type: string
+                  format: uri
+                  description: >-
+                    Poster art for the showing — for a movie night this is normally
+                    a public poster URL pasted from the web. Art the owner uploaded
+                    themselves must go through uploadPoster first; see that
+                    operation.
+                startsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                endsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                location:
+                  type: string
+                  maxLength: 500
+                  description: "Defaults to the series' location."
+      responses:
+        '201':
+          description: The created showing, already published and invited.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Showing' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ------------------------------------------------------------------- party --
+
+  /parties:
+    post:
+      operationId: createPartyPlan
+      tags: [party]
+      summary: Set up a party's whole first stage.
+      description: >-
+        Set up a party's whole first stage in one call: creates the party, seeds
+        the candidate dates, invites the small CORE group (personal links) and
+        opens the date poll. Once the core group votes and the user locks a date
+        (lockEventDate), call openUpParty to mint the open link for everyone else.
+        Only call after the user confirms the plan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [title, coreInvites, dateOptions]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 200 }
+                description: { type: string, maxLength: 5000 }
+                location: { type: string, maxLength: 500 }
+                coreInvites:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  description: The core group who fix the date.
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [name]
+                    properties:
+                      name: { type: string, minLength: 1, maxLength: 200 }
+                      email:
+                        type: string
+                        format: email
+                        description: >-
+                          Without an email the person gets a personal link but no
+                          invite email — the user hands it over themselves.
+                dateOptions:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  description: The candidate dates the core group votes on.
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [startsAt]
+                    properties:
+                      startsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                      endsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                      note: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: The party, its seeded date options and the core group's personal invites.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event, options, invites]
+                properties:
+                  event: { $ref: '#/components/schemas/EventSummary' }
+                  options:
+                    type: array
+                    items: { $ref: '#/components/schemas/PollOption' }
+                  invites:
+                    type: array
+                    items: { $ref: '#/components/schemas/Invite' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events/{slug}/open-up:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    post:
+      operationId: openUpParty
+      tags: [party]
+      summary: Open a party to the wider circle.
+      description: >-
+        Stage 2 of a party (after the date is locked/published): mint the shareable
+        open-invitation link for the wider circle. Returns the invite whose token
+        completes the link.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                label: { type: string, maxLength: 200 }
+                maxUses: { type: integer, minimum: 1, maximum: 10000 }
+      responses:
+        '201':
+          description: The open invite, with the shareable URL already assembled.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Invite'
+                  - type: object
+                    properties:
+                      url:
+                        type: string
+                        format: uri
+                        description: The absolute link to share, on zäme's public origin.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 'The party has no locked date yet (`invalid_transition`).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # -------------------------------------------------------------------- chat --
+
+  /events/{slug}/chat:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    get:
+      operationId: readEventChat
+      tags: [chat]
+      summary: Read an event's group chat.
+      description: >-
+        Read an event's group chat — what attendees are coordinating (rides,
+        timing, who brings what). Most recent messages last.
+      parameters:
+        - name: afterId
+          in: query
+          required: false
+          description: Return only messages after this message id — the incremental read.
+          schema: { type: string }
+      responses:
+        '200':
+          description: The messages, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChatMessage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: postEventChatMessage
+      tags: [chat]
+      summary: Post to an event's group chat as the host.
+      description: >-
+        Post a message to an event's group chat as the host. Only when the user
+        asks you to tell the group something; keep it short and in the user's
+        voice.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [body]
+              properties:
+                body: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '201':
+          description: The posted message.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatMessage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ---------------------------------------------------------------- planners --
+
+  # The author identity for postEventChatMessage is resolved by zäme from the
+  # planner the service token + `x-mcp-user` map to. Enterprise no longer reads its
+  # own `user` row to supply a display name (as `getOwnerIdentity` does today) —
+  # the host's name on a zäme message is zäme's fact about its own planner.
+
+  /events/{slug}/planner-invites:
+    parameters:
+      - $ref: '#/components/parameters/Slug'
+    post:
+      operationId: inviteCoOrganizer
+      tags: [planners]
+      summary: Mint a co-organizer link.
+      description: >-
+        Mint a co-organizer link for an event: whoever opens it and signs in to
+        zäme becomes a co-planner (they can edit the event, run the poll, manage
+        invites). Share the returned link with the friend who is helping plan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: Restrict acceptance to this email.
+                role:
+                  type: string
+                  enum: [co_planner, logistics]
+                  description: >-
+                    co_planner can do everything the host can except delete the
+                    event; logistics is scoped to the itinerary and bring-list.
+      responses:
+        '201':
+          description: The planner invite and the link to hand over.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlannerInvite' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ---------------------------------------------------------------- briefing --
+
+  # THE HOT PATH. `snapshot()` is called on EVERY XO turn, before any tool call, to
+  # assemble the one-line events brief in the system prompt (`worker.ts`,
+  # `assembleTurnConfig`). Under a monolith that was one indexed query; across the
+  # boundary it is a network hop on the critical path of every conversation. Three
+  # properties are therefore contractual, not aspirational:
+  #
+  #   1. ONE GET, no fan-out. Everything the brief and the Bridge widget need is in
+  #      this single response. The shim must never assemble a snapshot from several
+  #      calls.
+  #   2. CACHEABLE. Strong `ETag` + `Cache-Control: private, max-age=60,
+  #      stale-while-revalidate=600`. The shim keeps an in-process cache keyed by
+  #      owner and revalidates with `If-None-Match`, so the steady state is a 304.
+  #   3. IT DEGRADES, IT DOES NOT FAIL. A cold, empty or unhealthy zäme returns 200
+  #      with `degraded: true` and a still-usable snapshot — never 5xx. This mirrors
+  #      `buildEventsSnapshot`'s existing `.catch(() => [])` stance: routing must
+  #      never fail on a cold database. The shim's own last resort (zäme entirely
+  #      unreachable) is the stale cache, then a hard-coded empty snapshot; see
+  #      ../zaeme-integration.md.
+  /snapshot:
+    get:
+      operationId: getEventsSnapshot
+      x-mcp-expose: false
+      tags: [briefing]
+      summary: The cheap, cacheable events brief for the XO's every turn.
+      description: >-
+        The compact, read-only snapshot the XO consumes when routing/synthesising:
+        a short summary of the user's social week plus highlights (next event,
+        drafts, pending responses), and the headline figures the Bridge widget
+        renders. One query's worth of work — never a fan-out — and safe to serve
+        from cache.
+      parameters:
+        - name: upcomingLimit
+          in: query
+          required: false
+          description: How many upcoming events to include in `data.upcoming` (default 5).
+          schema: { type: integer, minimum: 1, maximum: 20, default: 5 }
+        - name: If-None-Match
+          in: header
+          required: false
+          description: The `ETag` from a previous snapshot; a match answers 304.
+          schema: { type: string }
+      responses:
+        '200':
+          description: The snapshot. Always 200 when zäme is up, even with no data and even when degraded.
+          headers:
+            ETag:
+              description: Strong validator over the snapshot payload.
+              schema: { type: string }
+            Cache-Control:
+              description: 'Always `private, max-age=60, stale-while-revalidate=600`.'
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Snapshot' }
+        '304':
+          description: Unchanged since the `If-None-Match` ETag. No body.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # The daily check-in, split across the boundary. Today `runEventsCheckIn` joins
+  # zäme-owned data (the next published event, its RSVP summary) with
+  # Enterprise-owned thread state (the unread guard, the once-a-day throttle) and
+  # then calls `escalate()`. After the split the halves separate cleanly:
+  #
+  #   zäme answers ONLY "what needs attention" — a pure, side-effect-free read of
+  #   its own domain, with no notion of threads, throttles or whether anything was
+  #   said yesterday. It is safe to call as often as Enterprise likes.
+  #
+  #   Enterprise keeps the throttle: `getOrCreateDefaultThread`, the `hasUnread`
+  #   guard, the `dateKey(lastCheckInAt) === dateKey(now)` once-a-day rule, and
+  #   `escalate()` into `xo_thread`. It calls this AFTER its guards pass, so a
+  #   throttled day makes no request at all.
+  #
+  # The findings come back pre-shaped for `DeptFinding` (kind/summary/detail/
+  # urgency/data) so the shim can escalate one without re-templating — but the raw
+  # facts ride along in `data` so Enterprise can re-word if it ever wants to.
+  /attention:
+    get:
+      operationId: getEventsAttention
+      x-mcp-expose: false
+      tags: [briefing]
+      summary: What in the social calendar needs the owner's attention.
+      description: >-
+        A pure read: the upcoming events inside the horizon that have something
+        outstanding — people who have not answered, people still on the fence, a
+        poll with no votes, a draft that was never published. Returns an empty
+        `findings` array (200, not 404) when nothing warrants raising. Stateless and
+        side-effect free; the caller owns the throttling.
+      parameters:
+        - name: horizonDays
+          in: query
+          required: false
+          description: >-
+            How far ahead to look, in days. Mirrors `EVENTS_REMINDER_HORIZON_DAYS`
+            on the Enterprise side; default 14.
+          schema: { type: integer, minimum: 1, maximum: 365, default: 14 }
+        - name: limit
+          in: query
+          required: false
+          description: >-
+            Maximum findings to return, most urgent first. The check-in raises one
+            finding a day, so it asks for 1; default 3.
+          schema: { type: integer, minimum: 1, maximum: 20, default: 3 }
+      responses:
+        '200':
+          description: Zero or more findings, most urgent first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [findings, generatedAt]
+                properties:
+                  findings:
+                    type: array
+                    items: { $ref: '#/components/schemas/AttentionFinding' }
+                  generatedAt: { $ref: '#/components/schemas/IsoDateTime' }
+                  degraded:
+                    type: boolean
+                    description: >-
+                      True when zäme could not read everything it wanted. The
+                      caller should treat the findings as incomplete rather than
+                      as "nothing to raise".
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # ---------------------------------------------------------------- concerts --
+
+  # The Music department's public projection (ADR-0033 §4), and the ONLY functional
+  # dependency on events outside the four units of the split. Today
+  # `layers/music/server/utils/publish.ts` reaches straight into `events_event`
+  # through `@enterprise/events-core` — `createEvent`, `updateEvent`,
+  # `setEventStatus`, and a raw Drizzle `update` to unpublish. All four collapse
+  # into the two calls below.
+  #
+  # The projection stays a projection: Music keeps the concert as the record of
+  # truth (twelve years of history, private by default) and zäme holds only the
+  # announcement.
+  #
+  # IDEMPOTENCY BY `sourceId`, NOT BY `publicEventId`. zäme stores the Enterprise
+  # concert id as the event's external ref and resolves republishes against it. That
+  # is what makes `music_concert.public_event_id` advisory rather than load-bearing:
+  # if it ever goes stale — the event deleted in zäme, the column lost in a restore —
+  # the next publish still patches the right announcement instead of minting a
+  # duplicate. Enterprise should keep storing the returned `eventId` (it is what the
+  # Music room links to), but must not treat it as the key.
+  /concerts/publish:
+    post:
+      operationId: publishConcert
+      x-mcp-expose: false
+      tags: [concerts]
+      summary: Announce a concert on zäme, or refresh an announcement.
+      description: >-
+        Create or patch the public event that announces a concert. Idempotent by
+        `sourceId`: calling it again patches the same announcement rather than
+        minting a second one. The event is created public and published, which is
+        what puts it on zäme's `/concerts` listing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourceId, title, startsAt]
+              properties:
+                sourceId:
+                  type: string
+                  minLength: 1
+                  description: >-
+                    The Enterprise `music_concert.id`. The idempotency key and the
+                    external ref zäme stores on the event.
+                eventId:
+                  type: string
+                  description: >-
+                    Optional hint — the `publicEventId` Enterprise remembers.
+                    Consulted only if the external ref does not resolve; never
+                    authoritative.
+                title: { type: string, minLength: 1, maxLength: 200 }
+                description:
+                  type: [string, 'null']
+                  maxLength: 5000
+                  description: The programme as the public listing reads it.
+                startsAt:
+                  allOf:
+                    - $ref: '#/components/schemas/IsoDateTime'
+                  description: >-
+                    Required. zäme's public listing is ordered by start time, so a
+                    concert without a date cannot be announced — Enterprise refuses
+                    before it gets here, and zäme refuses again.
+                endsAt: { $ref: '#/components/schemas/IsoDateTime' }
+                location: { type: [string, 'null'], maxLength: 500 }
+                ticketUrl: { type: [string, 'null'], format: uri }
+                performerNote:
+                  type: [string, 'null']
+                  maxLength: 1000
+                  description: 'Who the owner is on this stage, e.g. "1. Posaune · Berner Symphonieorchester".'
+                posterUrl:
+                  type: [string, 'null']
+                  description: >-
+                    A poster URL previously returned by uploadPoster, or null. Do
+                    not send an Enterprise object-store key or a presigned URL —
+                    see uploadPoster for why.
+      responses:
+        '200':
+          description: The announcement, created or patched.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConcertPublishResult' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /concerts/unpublish:
+    post:
+      operationId: unpublishConcert
+      x-mcp-expose: false
+      tags: [concerts]
+      summary: Take a concert announcement down.
+      description: >-
+        Take the public announcement down (the event stops being public, so it
+        leaves the listing and its poster stops resolving). The Music history is
+        untouched. Idempotent: unpublishing something already down is a 200.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourceId]
+              properties:
+                sourceId:
+                  type: string
+                  minLength: 1
+                  description: The Enterprise `music_concert.id` that was announced.
+      responses:
+        '200':
+          description: Down, or already down.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  eventId: { type: [string, 'null'] }
+                  alreadyDown: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: 'No announcement was ever made for this `sourceId`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # THE POSTER PROBLEM, SOLVED BY MOVING THE BYTES.
+  #
+  # Today a concert's poster is the FLYER the owner uploaded, living in Enterprise's
+  # object store under `music/<userId>/…`. `publicPosterUrl()` mints
+  # `/api/public/poster/<key>`, zäme serves it, and zäme authorises the read by
+  # asking its own database "is some public, published event pointing at this key?"
+  # (`packages/events-core/src/poster.ts`). That gate is good — take the concert
+  # down and the poster stops resolving, with no second place to revoke.
+  #
+  # What the split breaks is NOT the gate; it is the bytes. The gate lives with
+  # `events_event`, which is entirely zäme's after the split, so it survives intact.
+  # The bytes live in Enterprise's bucket under an Enterprise key layout. Serving
+  # them from zäme would mean handing zäme Enterprise's object-store credentials and
+  # teaching it the `music/<userId>/…` convention — re-creating, in the storage
+  # tier, exactly the shared-substrate coupling this ADR removes from the database
+  # tier. The two obvious shortcuts are already dead for the reasons the existing
+  # code records: a presigned URL expires within the hour and `posterUrl` is
+  # persisted, and Enterprise's own download route is owner-gated while zäme's
+  # audience is by definition not the owner.
+  #
+  # So: PUBLISHING UPLOADS THE POSTER. Enterprise sends the image bytes to zäme
+  # once, zäme stores them in its own object store and returns a stable URL on its
+  # own origin, and `publishConcert` carries that URL. `publicPosterUrl()` and
+  # `posterKeyFromUrl()` are deleted from Enterprise along with the rest of
+  # `events-core`; zäme keeps the "only while a public event points at it" gate,
+  # now expressed entirely against data it owns. The flyer in Enterprise's store
+  # stays the record of truth; the zäme copy is a projection of it, exactly as the
+  # announcement is a projection of the concert.
+  #
+  # The upload is CONTENT-ADDRESSED so that re-publishing an unchanged concert
+  # costs nothing: Enterprise digests the bytes, asks HEAD, and skips the PUT if
+  # zäme already has them. A poster nothing references is zäme's to collect.
+  /media/posters/{sha256}:
+    parameters:
+      - name: sha256
+        in: path
+        required: true
+        description: Lowercase hex SHA-256 of the image bytes. The content address, and the idempotency key.
+        schema:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+    head:
+      operationId: headPoster
+      x-mcp-expose: false
+      tags: [concerts]
+      summary: Does zäme already hold these poster bytes?
+      description: >-
+        Cheap existence check by content digest, so a republish of an unchanged
+        concert skips the upload entirely.
+      responses:
+        '204':
+          description: Already stored. Use the URL form documented on uploadPoster.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Not stored — upload it.
+    put:
+      operationId: uploadPoster
+      x-mcp-expose: false
+      tags: [concerts]
+      summary: Upload poster art to zäme.
+      description: >-
+        Store image bytes in zäme's object store and get back the stable, public,
+        non-expiring URL to hand to publishConcert. Idempotent by content digest —
+        re-uploading identical bytes is a 200 with the same URL, not a duplicate.
+        The bytes are inert until some public, published event points at the
+        returned URL; zäme's poster route re-derives that authorisation on every
+        read, so unpublishing takes the image down with the announcement.
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema: { type: string, format: binary }
+          image/png:
+            schema: { type: string, format: binary }
+          image/webp:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Stored (or already present).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [posterUrl, sha256, bytes, contentType]
+                properties:
+                  posterUrl:
+                    type: string
+                    format: uri
+                    description: >-
+                      Absolute, stable URL on zäme's public origin. Pass this
+                      verbatim as publishConcert's `posterUrl`; do not re-derive it.
+                  sha256: { type: string }
+                  bytes: { type: integer }
+                  contentType: { type: string }
+                  alreadyPresent: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413':
+          description: The image exceeds zäme's poster size limit.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '415':
+          description: Unsupported image type.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: 'The bytes do not hash to the `sha256` in the path (`validation_failed`).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  # -------------------------------------------------------------------- ops --
+
+  /health:
+    get:
+      operationId: getHealth
+      x-mcp-expose: false
+      tags: [ops]
+      security: []
+      summary: Liveness.
+      description: >-
+        Unauthenticated liveness probe. The shim uses it for its circuit breaker,
+        not for correctness — a healthy answer is never a precondition for a call.
+      responses:
+        '200':
+          description: Alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean, const: true }
+                  version: { type: string }
+
+components:
+
+  securitySchemes:
+    serviceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: >-
+        The Enterprise→zäme service token (`ZAEME_SERVICE_TOKEN` on the Enterprise
+        side). It authenticates the *system*, not a person; `x-mcp-user` says which
+        owner the call acts for. One token, rotatable by replacing it on both sides
+        — there is no token exchange and no refresh.
+
+  parameters:
+
+    # ---- transport headers, documented once ----
+    #
+    # These are NOT listed on individual operations, deliberately: the MCP
+    # generator turns an operation's parameters into tool arguments, and four
+    # provenance headers on every tool would be four pieces of noise the model has
+    # to ignore. The shim sends them on every request; zäme accepts them
+    # everywhere; the generator never sees them. They live here so an implementer
+    # can $ref them and so the contract records their names and meanings.
+
+    McpUser:
+      name: x-mcp-user
+      in: header
+      required: true
+      description: >-
+        The Enterprise owner this call acts for (`user.id`). zäme resolves it to
+        the linked planner account. Unknown ids are 403, never a fallback.
+      schema: { type: string, minLength: 1 }
+
+    McpThread:
+      name: x-mcp-thread
+      in: header
+      required: false
+      description: >-
+        The conversation that reasoned this call (`xo_thread.id`). Provenance only;
+        zäme may record it or ignore it.
+      schema: { type: string }
+
+    McpModel:
+      name: x-mcp-model
+      in: header
+      required: false
+      description: The model id producing the turn. Provenance only.
+      schema: { type: string }
+
+    McpBasis:
+      name: x-mcp-basis
+      in: header
+      required: false
+      description: >-
+        Comma-separated user message ids — the owner's actual words that prompted
+        this call. Provenance only. This is the link that keeps a write traceable
+        back to something the owner said, rather than to "the events layer".
+      schema: { type: string }
+
+    Slug:
+      name: slug
+      in: path
+      required: true
+      description: 'The event''s slug, from listEvents.'
+      schema: { type: string, minLength: 1 }
+
+    SeriesSlug:
+      name: slug
+      in: path
+      required: true
+      description: "The series event's slug."
+      schema: { type: string, minLength: 1 }
+
+  responses:
+
+    Unauthenticated:
+      description: Missing or bad service token, or missing `x-mcp-user`.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    Forbidden:
+      description: >-
+        The token is good but this owner may not act here — an unknown
+        `x-mcp-user`, or an event the resolved planner does not plan.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    NotFound:
+      description: No such event, or no such child row on it.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    ValidationFailed:
+      description: The request body failed validation; `error.details` names the fields.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    Internal:
+      description: zäme failed. The shim surfaces this as a thrown tool error, not as an empty result.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+
+    Error:
+      type: object
+      description: >-
+        The one error envelope. `code` is the stable machine contract; `message` is
+        for the owner and for the model, so write it as a sentence a person could
+        act on.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - unauthenticated
+                - forbidden
+                - not_found
+                - validation_failed
+                - invalid_transition
+                - conflict
+                - payload_too_large
+                - unsupported_media_type
+                - rate_limited
+                - internal
+            message: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+              description: Field-level detail for `validation_failed`, or `{ from, to }` for `invalid_transition`.
+        requestId:
+          type: string
+          description: zäme's request id, for correlating a failure across the two systems' logs.
+
+    IsoDateTime:
+      type: string
+      format: date-time
+      description: 'ISO 8601 datetime with offset, e.g. 2026-07-01T18:00:00+02:00.'
+
+    EventRef:
+      type: object
+      required: [id, slug]
+      properties:
+        id: { type: string }
+        slug: { type: string }
+
+    EventSummary:
+      type: object
+      required: [id, slug, title, type, status]
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        title: { type: string }
+        type:
+          type: string
+          enum: [hosted, concert, series, trip, party]
+        status:
+          type: string
+          enum: [draft, polling, published, completed, cancelled]
+        startsAt: { type: [string, 'null'], format: date-time }
+        endsAt: { type: [string, 'null'], format: date-time }
+        location: { type: [string, 'null'] }
+        isPublic: { type: boolean }
+        parentId:
+          type: [string, 'null']
+          description: The series this event is a showing of, when it is one.
+        plannerRole:
+          type: [string, 'null']
+          description: 'The user''s role on this event: owner, co_planner or logistics.'
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    EventDetail:
+      allOf:
+        - $ref: '#/components/schemas/EventSummary'
+        - type: object
+          properties:
+            description: { type: [string, 'null'] }
+            venueStation:
+              type: [string, 'null']
+              description: The public-transport stop the venue is reached from.
+            ticketUrl: { type: [string, 'null'] }
+            performerNote: { type: [string, 'null'] }
+            posterUrl: { type: [string, 'null'] }
+            cadence:
+              type: [string, 'null']
+              description: 'For a series: the human cadence note, e.g. "every second Friday".'
+            planners:
+              type: array
+              items:
+                type: object
+                required: [role]
+                properties:
+                  userId:
+                    type: [string, 'null']
+                    description: zäme's planner id. Not an Enterprise user id.
+                  name: { type: [string, 'null'] }
+                  email: { type: [string, 'null'] }
+                  role: { type: string, enum: [owner, co_planner, logistics] }
+
+    CreateEventInput:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        type:
+          type: string
+          enum: [hosted, concert, series, trip, party]
+          description: Defaults to hosted; concert events are public.
+        description: { type: string, maxLength: 5000 }
+        startsAt: { $ref: '#/components/schemas/IsoDateTime' }
+        endsAt: { $ref: '#/components/schemas/IsoDateTime' }
+        location: { type: string, maxLength: 500 }
+        venueStation: { type: string, maxLength: 200 }
+        ticketUrl: { type: string, format: uri }
+        performerNote: { type: string, maxLength: 1000 }
+        cadence:
+          type: string
+          maxLength: 200
+          description: 'For series: the human cadence note, e.g. "every second Friday".'
+
+    UpdateEventInput:
+      type: object
+      additionalProperties: false
+      description: Only the fields you pass are changed; an explicit null clears one.
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 5000 }
+        startsAt: { type: [string, 'null'], format: date-time }
+        endsAt: { type: [string, 'null'], format: date-time }
+        location: { type: [string, 'null'], maxLength: 500 }
+        venueStation: { type: [string, 'null'], maxLength: 200 }
+        ticketUrl: { type: [string, 'null'], format: uri }
+        performerNote: { type: [string, 'null'], maxLength: 1000 }
+        isPublic: { type: boolean }
+
+    Invite:
+      type: object
+      required: [id, token]
+      properties:
+        id: { type: string }
+        token:
+          type: string
+          description: The bearer token that completes the invite URL.
+        label: { type: [string, 'null'] }
+        email: { type: [string, 'null'] }
+        name: { type: [string, 'null'] }
+        tier:
+          type: [string, 'null']
+          description: 'Which access axis this link is: public, friends_plus or friends (ADR-0019 §3).'
+        maxUses: { type: [integer, 'null'] }
+        usedCount: { type: integer }
+        rsvpCount:
+          type: integer
+          description: How many RSVPs this link has produced.
+        expiresAt: { type: [string, 'null'], format: date-time }
+        revokedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    RsvpSummary:
+      type: object
+      required: ['yes', 'maybe', 'no', 'cheering', total, headcount]
+      properties:
+        'yes': { type: integer }
+        maybe: { type: integer }
+        'no': { type: integer }
+        cheering: { type: integer }
+        total: { type: integer }
+        headcount:
+          type: integer
+          description: Attending heads, counting +1s on yes/cheering.
+
+    Rsvp:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: ['yes', 'maybe', 'no', 'cheering'] }
+        plusOne: { type: boolean }
+        plusOneName: { type: [string, 'null'] }
+        dietary: { type: [string, 'null'] }
+        accessibility: { type: [string, 'null'] }
+        notes: { type: [string, 'null'] }
+        guestName: { type: [string, 'null'] }
+        guestEmail: { type: [string, 'null'] }
+        inviteId: { type: [string, 'null'] }
+        inviteLabel: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+      # NOTE, deliberately: there is no `personId` here. Guest identity is zäme's
+      # after the split (ADR-0036 §Consequences) — Enterprise stops resolving RSVPs
+      # into `ontology_person` and the `attended` edge is dropped. Re-adding a
+      # person id to this payload would quietly re-open that seam; if the owner ever
+      # wants Person enrichment back, it has to be designed as a deliberate
+      # cross-system identity sync, not smuggled in on the RSVP row.
+
+    TimelineItem:
+      type: object
+      required: [id, title]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        description: { type: [string, 'null'] }
+        startsAt: { type: [string, 'null'], format: date-time }
+        endsAt: { type: [string, 'null'], format: date-time }
+        location: { type: [string, 'null'] }
+        type: { type: string, enum: [transport, activity, accommodation, meal, other] }
+        sortOrder: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    MediaItem:
+      type: object
+      required: [id, type]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [photo, video, document, ticket] }
+        fileName: { type: [string, 'null'] }
+        caption: { type: [string, 'null'] }
+        takenAt: { type: [string, 'null'], format: date-time }
+        assignedRsvpId:
+          type: [string, 'null']
+          description: For a ticket, the attendee it belongs to.
+        timelineItemId: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+
+    PollOption:
+      type: object
+      required: [id, startsAt, votes, tally]
+      properties:
+        id: { type: string }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: [string, 'null'], format: date-time }
+        note: { type: [string, 'null'] }
+        votes:
+          type: array
+          items:
+            type: object
+            required: [answer]
+            properties:
+              name: { type: [string, 'null'] }
+              email: { type: [string, 'null'] }
+              answer: { type: string, enum: ['yes', 'ifneedbe', 'no'] }
+        tally:
+          type: object
+          required: ['yes', 'ifneedbe', 'no']
+          properties:
+            'yes': { type: integer }
+            ifneedbe: { type: integer }
+            'no': { type: integer }
+
+    Contribution:
+      type: object
+      required: [id, title]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        category: { type: string, enum: [food, drink, other] }
+        quantity: { type: [string, 'null'] }
+        note: { type: [string, 'null'] }
+        claimedByName: { type: [string, 'null'] }
+        claimedByEmail: { type: [string, 'null'] }
+        claimedAt: { type: [string, 'null'], format: date-time }
+
+    Expense:
+      type: object
+      required: [id, title, amountCents, currency, shares]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        category: { type: string, enum: [travel, accommodation, food, tickets, other] }
+        amountCents: { type: integer }
+        currency: { type: string }
+        note: { type: [string, 'null'] }
+        paidByName: { type: string }
+        paidByEmail: { type: string }
+        createdAt: { type: string, format: date-time }
+        shares:
+          type: array
+          items:
+            type: object
+            required: [name, email, amountCents]
+            properties:
+              name: { type: string }
+              email: { type: string }
+              amountCents: { type: integer }
+
+    Budget:
+      type: object
+      required: [expenses, balances, settlements, currency]
+      description: All amounts are integer cents; there is no floating point anywhere in this payload.
+      properties:
+        currency: { type: string }
+        totalCents: { type: integer }
+        expenses:
+          type: array
+          items: { $ref: '#/components/schemas/Expense' }
+        balances:
+          type: array
+          description: Per person, what they paid and what they owe.
+          items:
+            type: object
+            required: [name, email, paidCents, owedCents, netCents]
+            properties:
+              name: { type: string }
+              email: { type: string }
+              paidCents: { type: integer }
+              owedCents: { type: integer }
+              netCents:
+                type: integer
+                description: Positive means they are owed money; negative means they owe.
+        settlements:
+          type: array
+          description: The suggested "who pays whom" plan that clears the balances.
+          items:
+            type: object
+            required: [fromEmail, toEmail, amountCents]
+            properties:
+              fromName: { type: string }
+              fromEmail: { type: string }
+              toName: { type: string }
+              toEmail: { type: string }
+              amountCents: { type: integer }
+
+    SeriesMember:
+      type: object
+      required: [id, name, email]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    Showing:
+      allOf:
+        - $ref: '#/components/schemas/EventSummary'
+        - type: object
+          properties:
+            signUpCount:
+              type: integer
+              description: How many standing members have signed up for this showing.
+
+    ChatMessage:
+      type: object
+      required: [id, body, createdAt]
+      properties:
+        id: { type: string }
+        body: { type: string }
+        authorName: { type: [string, 'null'] }
+        authorEmail: { type: [string, 'null'] }
+        isHost: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    PlannerInvite:
+      type: object
+      required: [id, token, url, role]
+      properties:
+        id: { type: string }
+        token: { type: string }
+        url:
+          type: string
+          format: uri
+          description: The absolute co-organizer link to hand over.
+        email: { type: [string, 'null'] }
+        role: { type: string, enum: [co_planner, logistics] }
+        expiresAt: { type: [string, 'null'], format: date-time }
+
+    Snapshot:
+      type: object
+      description: >-
+        Shaped to drop straight into Enterprise's `DeptSnapshot` — the shim adds
+        `departmentId: 'events'` and passes the rest through. Keep the field names
+        aligned with `buildEventsSnapshot`'s current return so the Bridge widget
+        and the XO's domain brief need no translation layer.
+      required: [summary, highlights, stats, data, generatedAt]
+      properties:
+        summary:
+          type: string
+          description: >-
+            The one line that lands in the XO's system prompt on every turn, e.g.
+            'The user has 3 upcoming events; the next is "Movie night".' Always a
+            complete sentence, even when there is nothing — an empty social
+            calendar is a fact worth stating, not an empty string.
+        highlights:
+          type: array
+          description: A few short sentences — next event, how many upcoming, how many still in draft.
+          items: { type: string }
+        stats:
+          type: array
+          description: Headline figures for the Bridge widget, derived from the same query as the summary so they never diverge.
+          items:
+            type: object
+            required: [value, label]
+            properties:
+              value: { type: string }
+              label: { type: string }
+        data:
+          type: object
+          required: [upcoming, draftCount]
+          properties:
+            upcoming:
+              type: array
+              items:
+                type: object
+                required: [slug, title, status]
+                properties:
+                  slug: { type: string }
+                  title: { type: string }
+                  status: { type: string }
+                  startsAt: { type: [string, 'null'], format: date-time }
+            draftCount: { type: integer }
+            needsAttentionCount:
+              type: integer
+              description: >-
+                How many upcoming events have something outstanding. A cheap count
+                only — the actual findings come from getEventsAttention, so the hot
+                path never pays for them.
+        generatedAt: { $ref: '#/components/schemas/IsoDateTime' }
+        degraded:
+          type: boolean
+          description: >-
+            zäme served this snapshot without being able to read everything. Still
+            a valid snapshot; the numbers may be low. The XO's brief is not the
+            place to fail.
+
+    AttentionFinding:
+      type: object
+      description: >-
+        Pre-shaped for Enterprise's `DeptFinding` so the shim can hand one to
+        `escalate()` unchanged, with the raw facts alongside for any re-wording.
+      required: [kind, summary, detail, urgency, data]
+      properties:
+        kind:
+          type: string
+          description: 'The finding class, e.g. `events-upcoming`. Stable; Enterprise may key behaviour off it.'
+        summary:
+          type: string
+          description: 'One line, e.g. ''"Sunday roast" is in 3 days (12 Oct).'''
+        detail:
+          type: string
+          description: 'The follow-up line, e.g. "6 coming, 2 still maybe. You may want to nudge the people who haven''t confirmed."'
+        urgency: { type: string, enum: [low, normal, high] }
+        url:
+          type: string
+          description: >-
+            A relative path on zäme's public origin for the deep link. Note this
+            changes what the check-in's push notification points at: today it opens
+            Enterprise's `/events/<slug>` room, which stops existing — Enterprise's
+            UI keeps only the Bridge widget.
+        data:
+          type: object
+          description: The raw facts behind the finding, so Enterprise can re-template rather than re-query.
+          properties:
+            slug: { type: string }
+            eventId: { type: string }
+            title: { type: string }
+            startsAt: { type: [string, 'null'], format: date-time }
+            daysAway: { type: [integer, 'null'] }
+            summary: { $ref: '#/components/schemas/RsvpSummary' }
+
+    ConcertPublishResult:
+      type: object
+      required: [ok, eventId, slug, url, created]
+      properties:
+        ok: { type: boolean }
+        eventId:
+          type: string
+          description: >-
+            zäme's event id. Enterprise stores it as `music_concert.public_event_id`
+            for linking, but `sourceId` is the key that resolves a republish.
+        slug: { type: string }
+        url:
+          type: string
+          description: 'The public path on zäme, e.g. `/e/<slug>`.'
+        created:
+          type: boolean
+          description: True when this call minted the announcement; false when it patched an existing one.

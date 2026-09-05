@@ -41,6 +41,19 @@ export default defineNuxtConfig({
 
   compatibilityDate: '2025-01-15',
 
+  nitro: {
+    /**
+     * The OpenAPI contract travels with the build. `server/api/openapi.yaml.get.ts`
+     * reads it through `useStorage('assets:contract')`, which is what puts the
+     * file inside `.output` — a plain `readFile` would work in dev and 404 in the
+     * built image, where `docs/` does not exist. `dir` is relative to the Nitro
+     * source root (`server/`).
+     */
+    serverAssets: [
+      { baseName: 'contract', dir: '../docs' }
+    ]
+  },
+
   eslint: {
     config: {
       stylistic: {
