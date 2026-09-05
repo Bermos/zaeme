@@ -64,12 +64,24 @@ export const event = pgTable('events_event', {
   parentId: text('parent_id'),
   /** Human cadence note for a series container, e.g. "every second Friday". */
   cadence: text('cadence'),
+  /**
+   * The id this event is a PROJECTION of, in the system that owns the record of
+   * truth — today only Enterprise's `music_concert.id`, arriving through
+   * `POST /api/v1/concerts/publish` (ADR-0036). It is the idempotency key for
+   * that operation: a republish resolves the same announcement through this
+   * column, so the caller's own remembered event id stays advisory and a stale
+   * one cannot mint a duplicate. Unique where present; null for everything
+   * planned in zäme itself.
+   */
+  externalRef: text('external_ref'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
 }, table => [
   index('events_event_slug_idx').on(table.slug),
   index('events_event_status_idx').on(table.status),
-  index('events_event_parent_idx').on(table.parentId)
+  index('events_event_parent_idx').on(table.parentId),
+  index('events_event_starts_at_idx').on(table.startsAt),
+  uniqueIndex('events_event_external_ref_unique').on(table.externalRef)
 ])
 
 export const eventPlanner = pgTable('events_event_planner', {

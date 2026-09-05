@@ -246,3 +246,141 @@ export async function loadSeriesContext(parentId: string, occurrenceId: string):
     pastCount: siblings.filter(s => s.startsAt && s.startsAt.getTime() <= now).length
   }
 }
+
+/* ------------------------ planner-scoped machine views --------------------- */
+
+/**
+ * A showing in the shape the contract's `Showing` promises — an `EventSummary`
+ * plus its sign-up count. `listOccurrences` above answers the guest-facing
+ * cinema strip and carries only what that needs; this is the host/machine view,
+ * so it carries the full event summary the XO's other tools return.
+ */
+export interface ShowingView {
+  id: string
+  slug: string
+  title: string
+  type: string
+  status: string
+  startsAt: Date | null
+  endsAt: Date | null
+  location: string | null
+  isPublic: boolean
+  parentId: string | null
+  createdAt: Date
+  updatedAt: Date
+  signUpCount: number
+}
+
+async function showingsFor(seriesId: string): Promise<ShowingView[]> {
+  const db = useDb()
+  const rows = await db
+    .select()
+    .from(tables.event)
+    .where(eq(tables.event.parentId, seriesId))
+    .orderBy(asc(tables.event.startsAt))
+  if (rows.length === 0) return []
+
+  // One extra query for every showing's sign-ups, not one per showing.
+  const rsvps = await db
+    .select({ eventId: tables.rsvp.eventId, status: tables.rsvp.status })
+    .from(tables.rsvp)
+    .innerJoin(tables.event, eq(tables.rsvp.eventId, tables.event.id))
+    .where(eq(tables.event.parentId, seriesId))
+
+  return rows.map(ev => ({
+    id: ev.id,
+    slug: ev.slug,
+    title: ev.title,
+    type: ev.type,
+    status: ev.status,
+    startsAt: ev.startsAt,
+    endsAt: ev.endsAt,
+    location: ev.location,
+    isPublic: ev.isPublic,
+    parentId: ev.parentId,
+    createdAt: ev.createdAt,
+    updatedAt: ev.updatedAt,
+    signUpCount: rsvps.filter(r => r.eventId === ev.id && (r.status === 'yes' || r.status === 'cheering')).length
+  }))
+}
+
+/** A series' showings, soonest first, for a planner of the series. */
+export async function listSeriesShowings(userId: string, slug: string): Promise<ShowingView[]> {
+  const series = await loadSeriesBySlug(slug)
+  await assertPlanner(series.id, userId)
+  return showingsFor(series.id)
+}
+
+/** The standing group, for a planner of the series. */
+export async function listSeriesMembersForPlanner(userId: string, slug: string): Promise<SeriesMemberView[]> {
+  const series = await loadSeriesBySlug(slug)
+  await assertPlanner(series.id, userId)
+  return listSeriesMembers(series.id)
+}
+
+/**
+ * Schedule the next showing and hand back the showing itself, rather than the
+ * `{ id, slug, invited }` receipt the host UI takes. The machine contract
+ * answers a `Showing`, so the read that shapes one lives here and not in the
+ * route handler.
+ */
+export async function scheduleSeriesShowing(
+  userId: string,
+  seriesSlug: string,
+  input: ScheduleOccurrenceInput,
+  opts: { dispatch?: EventDispatch } = {}
+): Promise<ShowingView> {
+  const { id } = await scheduleOccurrence(userId, seriesSlug, input, opts)
+  const [row] = await useDb().select().from(tables.event).where(eq(tables.event.id, id)).limit(1)
+  return {
+    id: row!.id,
+    slug: row!.slug,
+    title: row!.title,
+    type: row!.type,
+    status: row!.status,
+    startsAt: row!.startsAt,
+    endsAt: row!.endsAt,
+    location: row!.location,
+    isPublic: row!.isPublic,
+    parentId: row!.parentId,
+    createdAt: row!.createdAt,
+    updatedAt: row!.updatedAt,
+    // Freshly scheduled: the standing members have been invited, nobody has
+    // signed up yet.
+    signUpCount: 0
+  }
+}
+
+/**
+ * Add someone to the standing group and return THAT member (the contract's
+ * `SeriesMember`), not the whole group. Idempotent by email, so a repeat is a
+ * 200 with the same row rather than a conflict.
+ */
+export async function addSeriesMemberOne(
+  userId: string,
+  slug: string,
+  input: { name: string, email: string }
+): Promise<SeriesMemberView> {
+  const members = await addSeriesMember(userId, slug, input)
+  const email = input.email.toLowerCase()
+  const member = members.find(m => m.email === email)
+  if (!member) {
+    throw createError({ statusCode: 500, message: 'The member was written but could not be read back' })
+  }
+  return member
+}
+
+/** Remove a member and report whether a row actually went away. */
+export async function removeSeriesMemberOne(userId: string, slug: string, memberId: string): Promise<void> {
+  const series = await loadSeriesBySlug(slug)
+  await assertPlanner(series.id, userId, { roles: ['owner', 'co_planner'] })
+  const [existing] = await useDb()
+    .select({ id: tables.seriesMember.id })
+    .from(tables.seriesMember)
+    .where(and(eq(tables.seriesMember.id, memberId), eq(tables.seriesMember.seriesId, series.id)))
+    .limit(1)
+  if (!existing) {
+    throw createError({ statusCode: 404, message: 'Member not found' })
+  }
+  await removeSeriesMember(userId, slug, memberId)
+}
