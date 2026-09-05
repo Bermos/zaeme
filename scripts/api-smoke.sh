@@ -32,6 +32,21 @@
 #
 # Object storage is optional: set S3_* and the poster checks run against it,
 # otherwise they are skipped and say so.
+#
+# Two session cookies are optional too, and unlock the human-surface halves of
+# the credential boundary — the parts no service token can prove:
+#
+#   ZAEME_TEST_SESSION_COOKIE   the INSTANCE OWNER's magic-link session
+#   ZAEME_TEST_GUEST_COOKIE     any other account's session (a co-planner, say)
+#
+# Get one by signing in, then reading the value better-auth set:
+#
+#   curl -s -X POST "$BASE/api/auth/sign-in/magic-link" -H 'content-type: application/json' \
+#     -d '{"email":"owner@example.com","name":"Owner","callbackURL":"/host"}'
+#   TOKEN=$(psql "$DATABASE_URL" -tAc \
+#     "select identifier from zaeme_verification order by created_at desc limit 1")
+#   curl -s -c owner.jar "$BASE/api/auth/magic-link/verify?token=$TOKEN&callbackURL=/host"
+#   ZAEME_TEST_SESSION_COOKIE="better-auth.session_token=$(awk '/session_token/ {print $7}' owner.jar)"
 set -uo pipefail
 
 BASE="${BASE_URL:-http://127.0.0.1:3111}"
@@ -117,6 +132,45 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE='better-auth.session_token=<value>' to run these"
   echo "        (sign in via the magic link, then copy the Set-Cookie value)"
+fi
+
+echo
+echo "== the boundary: /api/admin is the owner's, and nobody else's =="
+# Owner-only, and NOT a fourth credential — the host session plus one question
+# (`server/utils/admin.ts`). The three ways in that must all fail:
+check "no credential at all"                     401 "$BASE/api/admin/me"
+check "a service token is not an admin session"  401 "${AUTH[@]}" "$BASE/api/admin/overview"
+check "...not even on a write"                   401 "${AUTH[@]}" "${JSON[@]}" -X POST "$BASE/api/admin/audit/prune" -d '{"olderThanDays":1}'
+check "an invite token is not an admin session"  401 -H "Authorization: Bearer $TOKEN" "$BASE/api/admin/invites"
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  OWNER_COOKIE=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  check "the owner reaches the admin surface"    200 "${OWNER_COOKIE[@]}" "$BASE/api/admin/me"
+  check "...and its cross-event reads"           200 "${OWNER_COOKIE[@]}" "$BASE/api/admin/overview"
+  check "...and the instance administration"     200 "${OWNER_COOKIE[@]}" "$BASE/api/admin/accounts"
+  contains "the audit records who did what"      "$(body "${OWNER_COOKIE[@]}" "$BASE/api/admin/audit?limit=5")" '"actorKind"'
+  contains "the Enterprise token is a fingerprint, never itself" \
+    "$(body "${OWNER_COOKIE[@]}" "$BASE/api/admin/integration")" '"fingerprint"'
+  INTEG=$(body "${OWNER_COOKIE[@]}" "$BASE/api/admin/integration")
+  case "$INTEG" in
+    *"$TOKEN"*) FAIL=$((FAIL + 1)); printf '  FAIL %-58s the page leaked the service token\n' "the token itself never appears" ;;
+    *) PASS=$((PASS + 1)); printf '  ok   %-58s\n' "the token itself never appears" ;;
+  esac
+  check "the owner is still refused on /api/v1"  401 "${OWNER_COOKIE[@]}" "$API/events"
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the OWNER's session to run these"
+fi
+
+if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  GUEST_COOKIE=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
+  # 403, not 401: this account is signed in and real — it is simply not the
+  # owner. A planner plans events; administering the instance is not planning.
+  check "another account's session is valid (control)" 200 "${GUEST_COOKIE[@]}" "$BASE/api/host/events"
+  check "...but it is not the owner"             403 "${GUEST_COOKIE[@]}" "$BASE/api/admin/me"
+  check "...on the reads"                        403 "${GUEST_COOKIE[@]}" "$BASE/api/admin/accounts"
+  check "...and on the writes"                   403 "${GUEST_COOKIE[@]}" -X DELETE "$BASE/api/admin/accounts/whoever"
+else
+  echo "  skip  set ZAEME_TEST_GUEST_COOKIE to a NON-owner session to run these"
 fi
 
 echo
