@@ -440,6 +440,69 @@ export async function addTimelineItem(userId: string, slug: string, input: Creat
   return inserted
 }
 
+export interface UpdateTimelineItemInput {
+  title?: string
+  description?: string | null
+  startsAt?: DateInput
+  endsAt?: DateInput
+  location?: string | null
+  type?: 'transport' | 'activity' | 'accommodation' | 'meal' | 'other'
+  icon?: string | null
+  sortOrder?: number
+}
+
+/**
+ * Correct an itinerary item in place (owner/co-planner only).
+ *
+ * This existed in zäme before the 2026-07 absorption into the Enterprise
+ * monorepo and did not survive the trip (issue #8): the host surface could
+ * create and destroy an item but not fix a typo in one, and deleting to re-add
+ * loses its place in the order. `sortOrder` is patchable for the same reason —
+ * it is how an item moves without being rebuilt.
+ *
+ * Deliberately NOT exposed on `/api/v1`: the XO has no `updateTimelineItem`
+ * tool, and minting one as a side effect of restoring a host handler would hand
+ * the model a verb nobody decided to give it.
+ */
+export async function updateTimelineItem(
+  userId: string,
+  slug: string,
+  itemId: string,
+  input: UpdateTimelineItemInput
+) {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+
+  const updates: Record<string, unknown> = {}
+  if (input.title !== undefined) updates.title = input.title
+  if (input.description !== undefined) updates.description = input.description
+  if (input.startsAt !== undefined) updates.startsAt = toDate(input.startsAt)
+  if (input.endsAt !== undefined) updates.endsAt = toDate(input.endsAt)
+  if (input.location !== undefined) updates.location = input.location
+  if (input.type !== undefined) updates.type = input.type
+  if (input.icon !== undefined) updates.icon = input.icon
+  if (input.sortOrder !== undefined) updates.sortOrder = input.sortOrder
+
+  const db = useDb()
+  if (Object.keys(updates).length === 0) {
+    const [row] = await db
+      .select()
+      .from(tables.timelineItem)
+      .where(and(eq(tables.timelineItem.id, itemId), eq(tables.timelineItem.eventId, ev.id)))
+      .limit(1)
+    if (!row) throw createError({ statusCode: 404, message: 'Timeline item not found' })
+    return row
+  }
+
+  const [updated] = await db
+    .update(tables.timelineItem)
+    .set(updates)
+    .where(and(eq(tables.timelineItem.id, itemId), eq(tables.timelineItem.eventId, ev.id)))
+    .returning()
+  if (!updated) throw createError({ statusCode: 404, message: 'Timeline item not found' })
+  return updated
+}
+
 /** Remove an itinerary item (owner/co-planner only). */
 export async function deleteTimelineItem(userId: string, slug: string, itemId: string): Promise<void> {
   const ev = await loadEventBySlug(slug)

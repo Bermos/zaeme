@@ -172,6 +172,47 @@ async function revokeInvite(id: string) {
   await refresh()
 }
 
+/* ---- RSVPs (the host answering for a guest) ---- */
+const RSVP_STATUS_ITEMS = [
+  { label: '✅ in', value: 'yes' },
+  { label: '🤔 maybe', value: 'maybe' },
+  { label: '❌ out', value: 'no' },
+  { label: '📣 cheering', value: 'cheering' }
+]
+const savingRsvp = ref<string | null>(null)
+
+async function setRsvpStatus(id: string, status: string) {
+  savingRsvp.value = id
+  try {
+    await $fetch(`/api/host/events/${slug}/rsvps/${id}`, { method: 'PATCH', body: { status } })
+    await refresh()
+  } catch (e) {
+    toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not update that', color: 'error' })
+  } finally {
+    savingRsvp.value = null
+  }
+}
+
+async function togglePlusOne(id: string, plusOne: boolean) {
+  savingRsvp.value = id
+  try {
+    await $fetch(`/api/host/events/${slug}/rsvps/${id}`, { method: 'PATCH', body: { plusOne } })
+    await refresh()
+  } finally {
+    savingRsvp.value = null
+  }
+}
+
+async function removeRsvp(id: string) {
+  savingRsvp.value = id
+  try {
+    await $fetch(`/api/host/events/${slug}/rsvps/${id}`, { method: 'DELETE' })
+    await refresh()
+  } finally {
+    savingRsvp.value = null
+  }
+}
+
 /* ---- bring list ---- */
 const itemTitle = ref('')
 const itemCategory = ref<'food' | 'drink' | 'other'>('food')
@@ -723,12 +764,17 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
             <p class="font-semibold">
               RSVPs
             </p>
-            <UBadge
-              variant="subtle"
-              color="success"
-            >
-              {{ data.summary.headcount }} going
-            </UBadge>
+            <div class="flex items-center gap-2">
+              <span class="text-sm text-muted hidden sm:inline">
+                {{ data.summary.yes }} in · {{ data.summary.maybe }} maybe · {{ data.summary.no }} out
+              </span>
+              <UBadge
+                variant="subtle"
+                color="success"
+              >
+                {{ data.summary.headcount }} going
+              </UBadge>
+            </div>
           </div>
         </template>
         <div class="flex flex-col gap-1">
@@ -753,12 +799,34 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
                 >💬 {{ r.notes }}</span>
               </p>
             </div>
-            <UBadge
-              :color="r.status === 'yes' ? 'success' : r.status === 'no' ? 'error' : 'warning'"
-              variant="subtle"
-            >
-              {{ r.status }}
-            </UBadge>
+            <div class="flex items-center gap-1 shrink-0">
+              <USelect
+                :model-value="r.status"
+                :items="RSVP_STATUS_ITEMS"
+                :loading="savingRsvp === r.id"
+                size="xs"
+                class="w-32"
+                @update:model-value="(v: string) => setRsvpStatus(r.id, v)"
+              />
+              <UButton
+                size="xs"
+                variant="ghost"
+                color="neutral"
+                :title="r.plusOne ? 'Drop the +1' : 'Add a +1'"
+                @click="togglePlusOne(r.id, !r.plusOne)"
+              >
+                {{ r.plusOne ? '−1' : '+1' }}
+              </UButton>
+              <UButton
+                size="xs"
+                variant="ghost"
+                color="neutral"
+                aria-label="Remove this RSVP"
+                @click="removeRsvp(r.id)"
+              >
+                ✕
+              </UButton>
+            </div>
           </div>
           <p
             v-if="!data.rsvps.length"
