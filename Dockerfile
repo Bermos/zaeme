@@ -61,6 +61,8 @@ COPY --from=build /app/.output ./.output
 # all three have to survive into this stage.
 COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/server/database/migrations ./server/database/migrations
+# The DSN normaliser the task shares with the app (server/utils/dsn.mjs).
+COPY --from=build /app/server/utils/dsn.mjs ./server/utils/dsn.mjs
 COPY --from=prod-deps /app/node_modules ./node_modules
 
 USER node

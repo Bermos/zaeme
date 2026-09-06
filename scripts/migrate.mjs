@@ -22,6 +22,7 @@ import path from 'node:path'
 import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
+import { libpqCompatDsn } from '../server/utils/dsn.mjs'
 
 const migrationsFolder = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -37,7 +38,7 @@ if (!url) {
   process.exit(1)
 }
 
-const pool = new pg.Pool({ connectionString: url, max: 1 })
+const pool = new pg.Pool({ connectionString: libpqCompatDsn(url), max: 1 })
 
 try {
   await migrate(drizzle(pool), { migrationsFolder })
