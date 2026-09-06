@@ -41,6 +41,12 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# Cap V8's old space well under the platform's 4Gi build ceiling. Left alone,
+# node grows the heap until the cgroup kills BuildKit (exit 137, OOMKilled)
+# rather than collecting — the Nuxt/Vite build is comfortably able to finish in
+# 2Gi once it is made to GC. Raise this only together with the operator raising
+# `builds.resources.memory`, since the ceiling is what a build may take.
+ENV NODE_OPTIONS=--max-old-space-size=2048
 RUN pnpm build
 
 # --- runtime -----------------------------------------------------------------
