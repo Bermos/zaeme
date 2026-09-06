@@ -17,8 +17,19 @@ shell, with the opposite design discipline:
 - **Domain logic lives in `server/domain/`** — add operations there, keep route
   handlers thin. (This was `@enterprise/events-core` while zäme lived inside the
   Enterprise monorepo; it came home with the 2026-09 transplant. zäme is a single
-  flat package now: no workspace, no `packages/*`, no layers, no Dockerfile —
-  Kitchen builds it with buildpacks.)
+  flat package now: no workspace, no `packages/*`, no layers.)
+- **Kitchen builds the `Dockerfile`, not buildpacks**, and that is a workaround
+  rather than a preference: on a buildpacks image a declared process's `command`
+  replaces the CNB launcher that puts Node on `PATH`, so the `migrate` task dies
+  with `exec: "node": executable file not found in $PATH` — and that build emits
+  no `web` process type either, so the server never starts. Both halves are
+  [Bermos/Kitchen#440](https://github.com/Bermos/Kitchen/issues/440). If that is
+  fixed, deleting the `Dockerfile` and setting `build.strategy` back to
+  `buildpacks` is the whole revert. The runtime stage must keep carrying
+  `scripts/migrate.mjs`, `server/database/migrations/` and the production
+  `node_modules`: the deploy task runs the migration as a plain script, outside
+  the Nitro bundle. **Build and boot the image before pushing** — a clean
+  `nuxt build` does not prove the image runs.
 - **Enterprise reaches zäme only over HTTP** (ADR-0036). The contract is
   `docs/zaeme-api.openapi.yaml` — **this repo's copy is the source of truth**,
   served at `GET /api/openapi.yaml`; Enterprise's committed copy is a vendored
