@@ -15,6 +15,9 @@
     "db:generate": "drizzle-kit generate --config ./server/database/drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config ./server/database/drizzle.config.ts"
   },
+  "engines": {
+    "node": "22.x"
+  },
   "dependencies": {
     "@iconify-json/lucide": "^1.2.102",
     "@iconify-json/simple-icons": "^1.2.78",

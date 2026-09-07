@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/Bermos/Kitchen/main/docs/schemas/kitchen.schema.json",
   "build": {
-    "strategy": "dockerfile"
+    "strategy": "buildpacks"
   },
   "runtime": {
     "port": 3000,
@@ -16,10 +16,7 @@
     {
       "name": "migrate",
       "type": "task",
-      "command": [
-        "node",
-        "scripts/migrate.mjs"
-      ],
+      "command": ["node", "scripts/migrate.mjs"],
       "timeout": "10m"
     }
   ]
