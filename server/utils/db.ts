@@ -1,7 +1,6 @@
 import { drizzle } from 'drizzle-orm/node-postgres'
 import pg from 'pg'
 import * as schema from '../database/schema'
-import { libpqCompatDsn } from './dsn.mjs'
 
 /**
  * zäme's Postgres connection — its OWN database, not a schema inside somebody
@@ -20,7 +19,7 @@ export function getPool(): pg.Pool {
     if (!url) {
       throw new Error('DATABASE_URL environment variable is not set')
     }
-    _pool = new pg.Pool({ connectionString: libpqCompatDsn(url) })
+    _pool = new pg.Pool({ connectionString: url })
   }
   return _pool
 }
