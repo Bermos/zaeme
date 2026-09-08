@@ -19,6 +19,12 @@ shell, with the opposite design discipline:
   Enterprise monorepo; it came home with the 2026-09 transplant. zäme is a single
   flat package now: no workspace, no `packages/*`, no layers, no Dockerfile —
   Kitchen builds it with buildpacks.)
+- **`engines.node` in `package.json` is load-bearing — do not drop it.** Kitchen
+  reads that field into `BP_NODE_VERSION` and hands it to the buildpack verbatim.
+  Without it the node-engine buildpack reports no version source at all and the
+  app silently gets whatever Node is newest that day, which is a runtime upgrade
+  nobody asked for and nothing recorded. It looks like tidy-uppable boilerplate
+  and is not.
 - **Enterprise reaches zäme only over HTTP** (ADR-0036). The contract is
   `docs/zaeme-api.openapi.yaml` — **this repo's copy is the source of truth**,
   served at `GET /api/openapi.yaml`; Enterprise's committed copy is a vendored
