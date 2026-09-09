@@ -51,17 +51,48 @@ export interface SendEmailResult {
   id?: string
 }
 
+/**
+ * Every absolute URL in a message, whole.
+ *
+ * The dry-run log used to be `text.slice(0, 200)`, and a magic-link email is
+ * longer than that — so the one line a self-hoster actually needs was cut
+ * through the middle of the token. Clicking the truncated link fails
+ * verification and lands back on `/setup`, which looks exactly like the click
+ * did nothing. First-run bootstrap on an instance with no email configured was
+ * therefore impossible, which is the one case the dry-run exists for.
+ *
+ * Read out of the text part rather than the HTML: an `href` carries `&amp;`
+ * for every `&`, so a URL copied out of the markup loses its query string.
+ * Trailing punctuation is trimmed because a URL at the end of a sentence
+ * otherwise swallows the full stop.
+ */
+export function linksIn(message: string): string[] {
+  const found = message.match(/https?:\/\/[^\s<>"')]+/g) ?? []
+  return [...new Set(found.map(url => url.replace(/[.,;:!?]+$/, '')))]
+}
+
+/**
+ * What the dry-run prints. Split out from `sendEmail` so it can be tested
+ * without capturing stdout — the truncation bug above shipped precisely
+ * because nothing asserted on this shape.
+ */
+export function dryRunPayload(opts: SendEmailOptions) {
+  const body = opts.text ?? opts.html
+  return {
+    tag: opts.tag,
+    to: opts.to,
+    subject: opts.subject,
+    // Whole, never sliced: this is what the reader has to be able to click.
+    links: linksIn(body),
+    preview: body.slice(0, 200)
+  }
+}
+
 export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult> {
   const client = getResend()
 
   if (!client) {
-    // Dry-run: log the payload so self-hosters can verify content in dev.
-    console.log('[email:dry-run]', {
-      tag: opts.tag,
-      to: opts.to,
-      subject: opts.subject,
-      preview: opts.text?.slice(0, 200) ?? opts.html.slice(0, 200)
-    })
+    console.log('[email:dry-run]', dryRunPayload(opts))
     return { sent: false }
   }
 
