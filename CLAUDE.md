@@ -47,3 +47,13 @@ shell, with the opposite design discipline:
   surfaces at the edge and `defineServiceHandler` records the machine one; a new
   route needs no audit code of its own, and the middleware must keep returning
   early for `/api/v1` (no cookie near that surface) and `/api/auth`.
+- **Never put this deployment's private data in another repo.** Bug reports go
+  upstream — usually to `Bermos/Kitchen`, which is public — and the instance's
+  own identifiers must not travel with them: hostnames and URLs (application,
+  platform, registry, database), IP addresses, environment and claim names,
+  account ids, email addresses. Reproduce with placeholders (`app.example.com`)
+  and keep everything else concrete — exact status codes, headers, conditions
+  and code references are what make a report actionable and identify nothing.
+  Get it right the first time: GitHub keeps an issue's edit history and its REST
+  API cannot delete an issue, so redacting afterwards is damage control, not a
+  scrub.
