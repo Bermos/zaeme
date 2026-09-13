@@ -11,6 +11,13 @@
  *
  * The magic link is still offered underneath, for an instance that does have
  * mail and a browser that has no authenticator.
+ *
+ * It lives at `setup/index.vue` rather than `setup.vue` BECAUSE `setup/recover`
+ * exists. Nuxt reads a `setup.vue` sitting beside a `setup/` directory as the
+ * PARENT route of everything in it, and renders a child only where the parent
+ * puts a `<NuxtPage />`. This page has none — so as `setup.vue` it swallowed
+ * `/setup/recover` whole, ran its own redirect, and bounced a locked-out owner
+ * to `/`. As siblings they are two ordinary routes.
  */
 useSeoMeta({ title: 'Set up zäme' })
 

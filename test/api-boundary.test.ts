@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -367,5 +367,74 @@ describe('passkeys are a second way in, not a second credential', () => {
   it('the admin security page is on the admin surface, behind the owner gate', () => {
     const route = readFileSync(join(API_ROOT, 'admin', 'security', 'index.get.ts'), 'utf8')
     expect(route).toMatch(/requireOwner\(/)
+  })
+})
+
+/**
+ * Nuxt's file-based router has one trap this app has already fallen into, and
+ * it is invisible to every test that talks to the API instead of the pages.
+ *
+ * A `foo.vue` sitting BESIDE a `foo/` directory is not a sibling of what is in
+ * that directory — it is their PARENT route, and a child renders only where the
+ * parent puts a `<NuxtPage />`. `app/pages/setup.vue` had none, so shipping
+ * `app/pages/setup/recover.vue` next to it made `/setup/recover` render the
+ * parent instead: it ran `setup.vue`'s own "already claimed, go home" redirect
+ * and bounced a locked-out owner to `/`. In production, with every API check
+ * passing.
+ */
+describe('a page directory never has a same-named page beside it', () => {
+  const PAGES = join(ROOT, 'app', 'pages')
+
+  /**
+   * Only the TEMPLATE counts. The first version of this searched the whole
+   * file, and the comment on `setup/index.vue` explaining this very trap
+   * contains the string `<NuxtPage />` — so the guard read the prose, decided
+   * the parent rendered its children, and passed on the broken layout it was
+   * written to catch. A rule that a comment can satisfy is not a rule.
+   */
+  const rendersChildren = (file: string) => {
+    const src = readFileSync(file, 'utf8')
+    const template = /<template>([\s\S]*)<\/template>/.exec(src)?.[1] ?? ''
+    return /<NuxtPage/.test(template)
+  }
+
+  it('has no `<name>.vue` beside a `<name>/` directory that fails to render it', () => {
+    const offenders: string[] = []
+    const visit = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          const sibling = `${full}.vue`
+          if (existsSync(sibling) && !rendersChildren(sibling)) {
+            offenders.push(rel(sibling))
+          }
+          visit(full)
+        }
+      }
+    }
+    visit(PAGES)
+    expect(offenders).toEqual([])
+  })
+
+  it('still has both setup routes, as siblings', () => {
+    // The fix was `setup.vue` → `setup/index.vue`, and losing either of these
+    // would lock an owner out in a different way.
+    expect(existsSync(join(PAGES, 'setup', 'index.vue'))).toBe(true)
+    expect(existsSync(join(PAGES, 'setup', 'recover.vue'))).toBe(true)
+    expect(existsSync(join(PAGES, 'setup.vue'))).toBe(false)
+  })
+})
+
+/**
+ * A refusal must not read as a broken server. `resolveUser` threw a plain
+ * `Error`, which better-auth renders as a 500 — and `/setup/recover` puts that
+ * message in front of somebody who has just mistyped a token.
+ */
+describe('the bootstrap refuses with a status that means refused', () => {
+  it('throws better-auth\'s APIError rather than a bare Error', () => {
+    const src = readFileSync(join(ROOT, 'server', 'utils', 'auth.ts'), 'utf8')
+    const passkeyBlock = src.slice(src.indexOf('passkey({'))
+    expect(passkeyBlock).toMatch(/new APIError\('UNAUTHORIZED'/)
+    expect(passkeyBlock).not.toMatch(/throw new Error\(/)
   })
 })

@@ -66,7 +66,7 @@ async function call(path, init = {}) {
   } catch {
     body = text
   }
-  return { status: res.status, body }
+  return { status: res.status, body, location: res.headers.get('location') }
 }
 
 function ok(label, cond, extra) {
@@ -95,7 +95,7 @@ if (mode === 'setup') {
 
   // 2. A context with no proof at all is refused.
   const bare = await call('/api/auth/passkey/generate-register-options')
-  ok('no context is refused', bare.status >= 400, bare)
+  ok('no context is refused, as a 401', bare.status === 401, bare)
 
   // 3. The real thing.
   cookies = new Map()
@@ -117,6 +117,12 @@ if (mode === 'setup') {
   const adminMe = await call('/api/admin/me')
   ok('the new account is the instance owner', adminMe.status === 200, adminMe)
 
+  const securityPage = await call('/admin/security', { redirect: 'manual' })
+  ok('the security page renders', securityPage.status === 200, {
+    status: securityPage.status,
+    location: securityPage.location
+  })
+
   const security = await call('/api/admin/security')
   ok('the passkey is listed on the security page', security.body?.passkeys?.length === 1, security.body)
   ok('the listing carries no public key or credential id', !JSON.stringify(security.body).includes('publicKey'), security.body)
@@ -127,7 +133,7 @@ if (mode === 'setup') {
   const ownerJar = new Map(cookies)
   cookies = new Map()
   const again = await call(`/api/auth/passkey/generate-register-options?context=${encodeURIComponent(context)}`)
-  ok('a second claim from a signed-out visitor is refused', again.status >= 400, again)
+  ok('a second claim from a signed-out visitor is refused, as a 401', again.status === 401, again)
   cookies = ownerJar
 
   // 5. Sign out, then sign back in with the passkey alone.
@@ -152,9 +158,23 @@ if (mode === 'recover') {
   const status = await call('/api/setup/status')
   ok('the instance advertises that recovery is available', status.body.recoveryAvailable === true, status.body)
 
+  // The API answering is not the same as the owner being able to REACH it.
+  // `/setup/recover` was a 302 to `/` in production while every API check here
+  // passed: Nuxt reads a `setup.vue` beside a `setup/` directory as the parent
+  // route of everything in it, so the recovery page never rendered and the
+  // parent's own redirect ran instead.
+  // `redirect: 'manual'` is the whole point: fetch follows a 302 by default,
+  // so the broken version — /setup/recover bouncing to / — would have answered
+  // 200 here and this check would have passed while the owner was locked out.
+  const page = await call('/setup/recover', { redirect: 'manual' })
+  ok('the recovery page renders instead of redirecting', page.status === 200, {
+    status: page.status,
+    location: page.location
+  })
+
   const wrong = 'owner-bootstrap:not-the-token'
   const refused = await call(`/api/auth/passkey/generate-register-options?context=${encodeURIComponent(wrong)}`)
-  ok('a wrong token is refused', refused.status >= 400, refused)
+  ok('a wrong token is refused, as a 401', refused.status === 401, refused)
 
   cookies = new Map()
   const context = 'owner-bootstrap:' + token
@@ -181,7 +201,7 @@ if (mode === 'no-recovery') {
   ok('recovery is not advertised when no token is installed', status.body.recoveryAvailable === false, status.body)
   const context = 'owner-bootstrap:anything'
   const refused = await call(`/api/auth/passkey/generate-register-options?context=${encodeURIComponent(context)}`)
-  ok('and every token is refused', refused.status >= 400, refused)
+  ok('and every token is refused, as a 401', refused.status === 401, refused)
 }
 
 console.log(process.exitCode ? '\nsome checks failed' : '\nall checks passed')
