@@ -2,6 +2,7 @@ import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
 import { magicLink } from 'better-auth/plugins'
 import { passkey } from '@better-auth/passkey'
+import { APIError } from 'better-auth/api'
 import { useDb } from './db'
 import { renderMagicLinkEmail, sendEmail } from '../emails/index'
 import { getRequestHeaders, type H3Event } from 'h3'
@@ -99,10 +100,17 @@ export const auth = betterAuth({
         resolveUser: async ({ context }) => {
           const user = await resolveBootstrapUser(context)
           if (!user) {
-            // The plugin turns a throw into a failed registration. Same message
-            // for "no context", "bad token" and "instance already claimed" —
-            // there is nothing useful to tell a caller apart from each other.
-            throw new Error('Passkey registration needs a session.')
+            // An APIError, not a plain Error: better-auth turns anything else
+            // into a 500, and a refusal that reads as "the server broke" is
+            // both a lie and unactionable — `/setup/recover` renders this
+            // message straight to somebody who has just mistyped a token.
+            //
+            // Same message for "no context", "bad token" and "instance already
+            // claimed": there is nothing useful to tell those callers apart
+            // from each other.
+            throw new APIError('UNAUTHORIZED', {
+              message: 'This instance is not accepting a passkey registration without a session.'
+            })
           }
           return user
         },
@@ -118,7 +126,9 @@ export const auth = betterAuth({
           if (!context) return
           const completed = await completeBootstrapRegistration(context, user)
           if (!completed) {
-            throw new Error('Passkey registration could not be completed.')
+            throw new APIError('UNAUTHORIZED', {
+              message: 'This passkey registration could not be completed.'
+            })
           }
           return completed
         }
