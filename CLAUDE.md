@@ -12,8 +12,20 @@ shell, with the opposite design discipline:
   `ui-components` and `navigation` skills do **not** apply here.
 - **SSR stays on** — invite links must render real HTML + OG meta.
 - **No global auth guard.** Guest access is the invite capability URL; the
-  zäme better-auth instance (magic-link, `zaeme_*` tables — NOT the owner's
-  single-account instance) gates only `/me` and `/host`.
+  zäme better-auth instance (`zaeme_*` tables — NOT the owner's single-account
+  instance) gates only `/me`, `/host` and `/admin`.
+- **Two sign-in methods, one credential.** Magic link and **passkey** both end in
+  the same better-auth session on the same account, so nothing downstream learns
+  a second shape. A passkey is the OWNER's way in and the only one that survives
+  an instance with no mail transport — which is every instance between "it
+  builds" and "email works", and is how this one spent its first days unopenable.
+  Registering one normally needs a session; the two circular cases (an unclaimed
+  instance, a locked-out owner holding `ZAEME_OWNER_BOOTSTRAP_TOKEN`) are decided
+  **server-side** in `server/utils/passkey-bootstrap.ts` against the database and
+  the environment, never against anything the browser asserts. That file is
+  imported by `server/utils/auth.ts` and by no route handler; the boundary test
+  asserts it. Changing it means running `pnpm smoke:passkey`, which runs the real
+  ceremony with a software authenticator.
 - **Domain logic lives in `server/domain/`** — add operations there, keep route
   handlers thin. (This was `@enterprise/events-core` while zäme lived inside the
   Enterprise monorepo; it came home with the 2026-09 transplant. zäme is a single
@@ -43,6 +55,12 @@ shell, with the opposite design discipline:
   anywhere but `server/api/admin/**` — the boundary test asserts all of it.
   Cross-event reads go in `server/domain/admin.ts` (instance-scoped; watch the
   N+1 note at the top of that file), never in a route handler.
+- **Outgoing mail has three transports** (`server/emails/send.ts`): the HTTP
+  **mail relay** in front of Proton Bridge (`kitchen-services`, bound in as
+  `KITCHEN_SERVICE_MAIL`), then Resend, then a dry run to stdout. An instance on
+  the dry run cannot deliver a magic link, and `/login` and `/admin/security` say
+  so rather than accepting an address and promising an email — ask
+  `server/utils/mail-status.ts`, never `RESEND_API_KEY` directly.
 - **Mutations are audited.** `server/middleware/audit.ts` records the human
   surfaces at the edge and `defineServiceHandler` records the machine one; a new
   route needs no audit code of its own, and the middleware must keep returning

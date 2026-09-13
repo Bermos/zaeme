@@ -1,14 +1,22 @@
 import { Resend } from 'resend'
+import { relayConfigured, sendViaRelay } from './relay'
 
 /**
- * Thin wrapper around Resend (OVERVIEW: `packages/email`). Lifted from zaeme
- * `server/utils/email.ts`. Keeps three promises:
+ * Everything zäme sends leaves through here. Three transports, tried in this
+ * order, and the order is the whole design:
  *
- * 1. Graceful degradation — when `RESEND_API_KEY` is absent the helper logs the
- *    email payload and resolves successfully, so the request path keeps working
- *    in dev and on self-hosted instances that have not configured email.
- * 2. One client per process (Resend creates a persistent `fetch` instance).
- * 3. A predictable From address from `EMAIL_FROM`.
+ * 1. **The mail relay** (`relay.ts`) — Proton Bridge running as its own
+ *    workload on this platform, reached at the address the platform handed us.
+ *    This is what a self-hosted instance uses, and it is first because an
+ *    instance that has one has deliberately built it.
+ * 2. **Resend**, for an instance that has an API key instead.
+ * 3. **A dry run** — the payload, and every link in it, on stdout. Not a
+ *    failure: the request path keeps working in dev and on an instance whose
+ *    mail is not configured yet, and the printed magic link is how such an
+ *    instance is bootstrapped at all.
+ *
+ * Beside that it keeps two promises it always kept: one Resend client per
+ * process (it creates a persistent `fetch`), and a predictable `From` address.
  */
 
 let resendClient: Resend | null = null
@@ -89,6 +97,10 @@ export function dryRunPayload(opts: SendEmailOptions) {
 }
 
 export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult> {
+  if (relayConfigured()) {
+    return sendViaRelay(opts, getFromAddress())
+  }
+
   const client = getResend()
 
   if (!client) {

@@ -6,6 +6,7 @@ import { tokensMatch } from '../server/utils/service-auth'
 import { serviceCredentialStatus } from '../server/utils/enterprise-link'
 import { ApiError, apiError, toErrorBody } from '../server/utils/api-v1'
 import { eventSlugFromPath } from '../server/domain/audit'
+import { bootstrapConfigured, bootstrapTokenMatches } from '../server/utils/passkey-bootstrap'
 
 /**
  * The two surfaces must not be able to reach each other.
@@ -268,5 +269,103 @@ describe('every failure leaves as the contract\'s error envelope', () => {
     expect(status).toBe(500)
     expect(body.error.code).toBe('internal')
     expect(body.error.message).not.toMatch(/hunter2/)
+  })
+})
+
+/**
+ * PASSKEYS add a second SIGN-IN METHOD, and deliberately not a fourth
+ * credential. What comes out of `signIn.passkey` is the same better-auth
+ * session cookie a magic link produces, on the same account — so `requireOwner`,
+ * `requireGuestUser` and the audit never learn a second shape, and none of the
+ * separations above move.
+ *
+ * The one genuinely new thing is registration WITHOUT a session
+ * (`server/utils/passkey-bootstrap.ts`), which exists because an instance whose
+ * mail transport is not configured cannot be signed in to at all. That is a
+ * door, so this block asserts where it is and where it is not.
+ */
+describe('passkeys are a second way in, not a second credential', () => {
+  const bootstrap = readFileSync(join(ROOT, 'server', 'utils', 'passkey-bootstrap.ts'), 'utf8')
+
+  it('nothing but the auth instance can GRANT a bootstrap registration', () => {
+    // `resolveBootstrapUser` is the function that turns an opaque context into
+    // an account. It belongs to better-auth's registration path and to nothing
+    // else — a route handler calling it would be a second, unreviewed door.
+    //
+    // Two routes DO import `bootstrapConfigured`, and that is a different
+    // thing: a boolean saying a token is installed, which is what points a
+    // locked-out owner at /setup/recover. It grants nothing and reveals no
+    // value.
+    const offenders = allHandlers.filter(f => /resolveBootstrapUser|bootstrapTokenMatches/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+
+    expect(readFileSync(join(ROOT, 'server', 'utils', 'auth.ts'), 'utf8')).toMatch(/resolveBootstrapUser/)
+  })
+
+  it('no /api/v1 handler mentions passkeys at all', () => {
+    // The machine surface is a shared secret in a header. A WebAuthn ceremony
+    // needs a browser, so anything of it near /api/v1 is a mistake.
+    const offenders = machineHandlers.filter(f => /passkey|webauthn/i.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('the break-glass compares in constant time and is off by default', () => {
+    expect(bootstrap).toMatch(/timingSafeEqual/)
+    // Both sides hashed to a fixed length first, so the comparison never throws
+    // on a length mismatch — a throw is itself a length oracle.
+    expect(bootstrap).toMatch(/createHash\('sha256'\)/)
+    expect(bootstrapTokenMatches('anything')).toBe(false)
+  })
+
+  it('the break-glass resolves the owner, never an arbitrary account', () => {
+    // The token buys a passkey on the account that claimed this instance. If it
+    // could name an account, it would be a login as anybody — so the recovery
+    // path reads its identity from the database and the browser's `name` and
+    // `email` reach exactly one place: creating the FIRST account on an
+    // instance that has none. `test/passkey-bootstrap.test.ts` executes both.
+    expect(bootstrap).toMatch(/resolveInstanceOwnerId/)
+    expect(bootstrap).toMatch(/const owner = await loadOwner\(\)/)
+
+    const usesBrowserIdentity = bootstrap.split('\n').filter(l => /parsed\.(name|email)!/.test(l))
+    expect(usesBrowserIdentity).toHaveLength(2)
+    for (const line of usesBrowserIdentity) {
+      expect(line).toMatch(/claimInstance|displayName: parsed\.name!/)
+    }
+  })
+
+  it('records every use of the break-glass, granted or refused', () => {
+    const uses = bootstrap.match(/recordAudit\(/g) ?? []
+    expect(uses.length).toBeGreaterThanOrEqual(3)
+    expect(bootstrap).toMatch(/outcome: 'refused'/)
+    expect(bootstrap).toMatch(/outcome: 'granted'/)
+  })
+
+  it('never puts the break-glass token in a row, a log line or a response', () => {
+    // `parsed.token` is read once, by the comparison, and must not travel.
+    const afterCompare = bootstrap.slice(bootstrap.indexOf('const ownerId'))
+    expect(afterCompare).not.toMatch(/parsed\.token|token/)
+
+    const statusRoute = readFileSync(join(ROOT, 'server', 'api', 'setup', 'status.get.ts'), 'utf8')
+    // /api/setup/status says a token IS installed, which is what points a
+    // locked-out owner at the recovery page. It must never say what it is.
+    expect(statusRoute).toMatch(/bootstrapConfigured/)
+    expect(statusRoute).not.toMatch(/ZAEME_OWNER_BOOTSTRAP_TOKEN|bootstrapTokenMatches/)
+
+    process.env.ZAEME_OWNER_BOOTSTRAP_TOKEN = 'hunter2-the-actual-secret'
+    expect(JSON.stringify({ recoveryAvailable: bootstrapConfigured() })).not.toContain('hunter2')
+    delete process.env.ZAEME_OWNER_BOOTSTRAP_TOKEN
+  })
+
+  it('keeps the recovery page inside the /setup exemption', () => {
+    // An owner who cannot sign in must be able to REACH the page that fixes it.
+    // `/setup` is already exempt from the first-run redirect and `/setup/recover`
+    // rides on that prefix — this pins the prefix rather than the exact path.
+    const src = readFileSync(join(ROOT, 'server', 'middleware', 'setup.ts'), 'utf8')
+    expect(src).toContain('\'/setup\'')
+  })
+
+  it('the admin security page is on the admin surface, behind the owner gate', () => {
+    const route = readFileSync(join(API_ROOT, 'admin', 'security', 'index.get.ts'), 'utf8')
+    expect(route).toMatch(/requireOwner\(/)
   })
 })

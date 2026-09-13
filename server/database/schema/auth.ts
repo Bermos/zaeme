@@ -1,4 +1,4 @@
-import { boolean, index, pgTable, text, timestamp } from 'drizzle-orm/pg-core'
+import { boolean, index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core'
 
 /**
  * zäme's auth tables — better-auth over magic-link accounts, namespaced
@@ -65,9 +65,43 @@ export const guestVerification = pgTable('zaeme_verification', {
   updatedAt: timestamp('updated_at').notNull().defaultNow()
 })
 
+/**
+ * Registered passkeys — WebAuthn credentials, one row per authenticator.
+ *
+ * zäme has no passwords, and until this table existed it had exactly one way
+ * in: a magic link in an email. That is a single point of failure an instance
+ * discovers at the worst possible moment — an instance whose mail transport is
+ * not configured, or is broken, cannot be signed in to AT ALL, owner included.
+ * A passkey is the second, independent factor of possession: it lives in the
+ * owner's authenticator, needs no delivery channel, and cannot be phished.
+ *
+ * Property keys MUST match the better-auth passkey plugin's field names (the
+ * drizzle adapter resolves columns by key); the SQL names stay snake_case like
+ * the rest of the file. `credentialID` is the awkward one — it is camelCase
+ * with a capital D in the plugin, and renaming it here would silently break
+ * lookups at sign-in.
+ */
+export const guestPasskey = pgTable('zaeme_passkey', {
+  id: text('id').primaryKey(),
+  name: text('name'),
+  publicKey: text('public_key').notNull(),
+  userId: text('user_id').notNull().references(() => guestUser.id, { onDelete: 'cascade' }),
+  credentialID: text('credential_id').notNull(),
+  counter: integer('counter').notNull().default(0),
+  deviceType: text('device_type').notNull(),
+  backedUp: boolean('backed_up').notNull().default(false),
+  transports: text('transports'),
+  aaguid: text('aaguid'),
+  createdAt: timestamp('created_at').notNull().defaultNow()
+}, table => [
+  index('zaeme_passkey_user_idx').on(table.userId),
+  index('zaeme_passkey_credential_idx').on(table.credentialID)
+])
+
 export const guestAuthSchema = {
   user: guestUser,
   session: guestSession,
   account: guestAccount,
-  verification: guestVerification
+  verification: guestVerification,
+  passkey: guestPasskey
 }

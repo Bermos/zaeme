@@ -16,6 +16,7 @@ const links = [
   { label: 'Invites', to: '/admin/invites', icon: 'i-lucide-link' },
   { label: 'Media', to: '/admin/media', icon: 'i-lucide-image' },
   { label: 'Accounts', to: '/admin/accounts', icon: 'i-lucide-user-cog' },
+  { label: 'Security', to: '/admin/security', icon: 'i-lucide-key-round' },
   { label: 'Enterprise', to: '/admin/integration', icon: 'i-lucide-plug' },
   { label: 'Audit', to: '/admin/audit', icon: 'i-lucide-scroll-text' }
 ]
