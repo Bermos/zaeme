@@ -31,9 +31,9 @@ Self-hostable. Open source. Built with love in Bern.
 | **Framework** | [Nuxt 4](https://nuxt.com) — full-stack, SSR for invite pages                  |
 | **UI**        | [Nuxt UI](https://ui.nuxt.com) + [Tailwind CSS](https://tailwindcss.com)       |
 | **Database**  | [Neon PostgreSQL](https://neon.tech) + [Drizzle ORM](https://orm.drizzle.team) |
-| **Auth**      | [Better Auth](https://better-auth.com) — email/password + magic link           |
+| **Auth**      | [Better Auth](https://better-auth.com) — passkeys + magic link, no passwords   |
 | **Files**     | [Cloudflare R2](https://developers.cloudflare.com/r2/) — presigned uploads     |
-| **Email**     | [Resend](https://resend.com) + [React Email](https://react.email)              |
+| **Email**     | Proton Bridge via the mail relay, or [Resend](https://resend.com); [React Email](https://react.email) templates |
 | **Jobs**      | [Inngest](https://inngest.com) — background jobs, reminders, travel clustering |
 | **Transit**   | [transport.opendata.ch](https://transport.opendata.ch) — SBB timetables        |
 | **AI**        | [Anthropic SDK](https://docs.anthropic.com) — Claude for assistant + MCP       |
@@ -50,7 +50,27 @@ zäme is designed to be self-hosted with minimal friction. One `compose.yml`, a 
 - Docker + Docker Compose
 - A PostgreSQL database (Neon free tier works great)
 - Cloudflare R2 bucket (or any S3-compatible storage)
-- Resend account (free tier is plenty for personal use)
+- A way to send mail — the Proton Bridge mail relay, or a Resend account. You
+  can set this up **after** the first deploy: sign-in no longer depends on it.
+
+### Getting in
+
+zäme has no passwords. Two ways in, and they fail independently:
+
+- **A passkey** — Touch ID, Windows Hello, a security key. Needs nothing of the
+  instance but a browser, so it works before mail does.
+- **A magic link** — needs a working mail transport.
+
+On first run `/setup` claims the instance with a passkey: the first account
+created owns it. Manage keys afterwards at `/admin/security`.
+
+**If you are locked out** — the account exists but the instance cannot send you
+a link — set `ZAEME_OWNER_BOOTSTRAP_TOKEN` to a random secret
+(`openssl rand -hex 32`), redeploy, and open `/setup/recover`. Quoting it
+registers a passkey on the owner account and nothing else: it is not a session,
+it cannot name a different account, and every use is written to the audit log.
+**Remove the variable once you are back in** — `/admin/security` nags until you
+do.
 
 ### Quick start
 

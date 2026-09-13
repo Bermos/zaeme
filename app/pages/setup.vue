@@ -2,14 +2,24 @@
 /**
  * First run. A fresh self-hosted zäme has an empty database and no way in, so
  * this page claims the instance: the first account created becomes the owner
- * (`server/utils/instance.ts`). Sign-in is magic-link like everywhere else —
- * there is no password anywhere in this app — so "setup" is really just the
- * first sign-in, done deliberately and once.
+ * (`server/utils/instance.ts`).
+ *
+ * It claims it with a PASSKEY. The old flow posted a magic link, which asked a
+ * brand-new deployment to have working outbound mail before anybody could open
+ * it — and an instance that does not is not merely inconvenienced, it is
+ * unopenable. A passkey needs nothing but the browser that is already here.
+ *
+ * The magic link is still offered underneath, for an instance that does have
+ * mail and a browser that has no authenticator.
  */
 useSeoMeta({ title: 'Set up zäme' })
 
-const { data } = await useFetch<{ setupRequired: boolean }>('/api/setup/status')
-if (!data.value?.setupRequired) {
+const { data: status } = await useFetch<{
+  setupRequired: boolean
+  emailConfigured: boolean
+}>('/api/setup/status')
+
+if (!status.value?.setupRequired) {
   await navigateTo('/')
 }
 
@@ -17,10 +27,48 @@ const name = ref('')
 const email = ref('')
 const sent = ref(false)
 const sending = ref(false)
+const claiming = ref(false)
 const errorMsg = ref<string | null>(null)
 
-async function claim() {
-  if (!name.value || !email.value) return
+const hasWebAuthn = ref(false)
+onMounted(() => {
+  hasWebAuthn.value = passkeysSupported()
+})
+
+const ready = computed(() => Boolean(name.value.trim() && email.value.includes('@')))
+
+/**
+ * Claim with a passkey.
+ *
+ * The `context` carries the name and the address, but it is NOT what authorises
+ * this: the server re-checks that no account exists before it creates one
+ * (`server/utils/passkey-bootstrap.ts`). `createSession` means the same call
+ * that registers the key also signs in, so setup finishes in one gesture.
+ */
+async function claimWithPasskey() {
+  if (!ready.value) return
+  claiming.value = true
+  errorMsg.value = null
+  try {
+    const result = await authClient.passkey.addPasskey({
+      name: 'Owner passkey',
+      context: encodeSetupContext({ name: name.value.trim(), email: email.value.trim() }),
+      createSession: true
+    })
+    if (result?.error) {
+      errorMsg.value = result.error.message ?? 'Could not register that passkey.'
+      return
+    }
+    await navigateTo('/admin')
+  } catch {
+    errorMsg.value = null
+  } finally {
+    claiming.value = false
+  }
+}
+
+async function claimWithLink() {
+  if (!ready.value) return
   sending.value = true
   errorMsg.value = null
   try {
@@ -71,7 +119,7 @@ async function claim() {
       <form
         v-else
         class="flex flex-col gap-3"
-        @submit.prevent="claim"
+        @submit.prevent="claimWithPasskey"
       >
         <UFormField
           label="Your name"
@@ -88,6 +136,7 @@ async function claim() {
         <UFormField
           label="Email"
           name="email"
+          help="Used to address you and to match your invites. Sign-in is the passkey."
         >
           <UInput
             v-model="email"
@@ -98,21 +147,49 @@ async function claim() {
             required
           />
         </UFormField>
+
         <UAlert
           v-if="errorMsg"
           color="error"
           variant="subtle"
           :description="errorMsg"
         />
+
         <UButton
+          v-if="hasWebAuthn"
           type="submit"
-          :loading="sending"
-          :disabled="!name || !email"
+          icon="i-lucide-key-round"
+          :loading="claiming"
+          :disabled="!ready"
           block
           size="lg"
         >
-          Claim this instance
+          Claim with a passkey
         </UButton>
+
+        <template v-if="status?.emailConfigured">
+          <USeparator label="or" />
+          <UButton
+            variant="soft"
+            color="neutral"
+            :loading="sending"
+            :disabled="!ready"
+            block
+            size="lg"
+            @click="claimWithLink"
+          >
+            Email me a sign-in link
+          </UButton>
+        </template>
+
+        <UAlert
+          v-else-if="!hasWebAuthn"
+          color="warning"
+          variant="subtle"
+          icon="i-lucide-shield-alert"
+          title="No way in from this browser"
+          description="This browser has no passkey support and the instance has no mail transport. Open this page in a browser with Touch ID, Windows Hello or a security key."
+        />
       </form>
     </UCard>
   </div>
