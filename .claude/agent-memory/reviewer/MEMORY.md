@@ -22,3 +22,5 @@ review. Everything after them is earned.
 - 2026-09-14: Nothing notices when Enterprise's vendored copy of the spec drifts from this one (#11). Ask: does this PR oblige a follow-up in the other repository, and is it raised?
 - 2026-09-14: The events domain has almost no coverage (#9). Ask: what would fail if this change were reverted in place, and is it a test?
 - 2026-09-14: Merging deploys. Ask of every diff: what happens on the way up — a migration that cannot run twice, a startup that now needs an unset variable, a task that fails on the state the instance is really in?
+- 2026-09-14: A field can be stored, typed and surfaced in the UI while no code consumes it — `events_expense.currency` shipped that way and produced a confidently wrong balance. Ask: does anything actually READ this column, and does the read do what the schema comment claims?
+- 2026-09-14: `/api/v1` additions are the owner's call, not a refactor's (#8). Ask of any diff touching `docs/zaeme-api.openapi.yaml`: was exposing this to Enterprise's generated tools decided, or did it arrive as a side effect of building a feature for the guest surface?
