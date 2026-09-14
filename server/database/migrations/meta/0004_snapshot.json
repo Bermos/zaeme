@@ -1,5 +1,5 @@
 {
-  "id": "3472f19d-43b1-4c8a-b7bb-f5965d0d4675",
+  "id": "0e390fa1-c67e-4e00-8874-e4bb8ecdc4fd",
   "prevId": "9fdc4054-b14a-400a-8928-b9075a6e2fb4",
   "version": "7",
   "dialect": "postgresql",
@@ -753,15 +753,13 @@
           "name": "base_currency",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
-          "default": "'CHF'"
+          "notNull": true
         },
         "fx_rate": {
           "name": "fx_rate",
           "type": "numeric(20, 10)",
           "primaryKey": false,
-          "notNull": true,
-          "default": "'1'"
+          "notNull": true
         },
         "amount_base_cents": {
           "name": "amount_base_cents",

@@ -906,12 +906,15 @@ paths:
                     What was actually spent. Defaults to the instance base currency.
                 fxRate:
                   type: string
-                  pattern: '^[0-9]+(\.[0-9]+)?$'
+                  pattern: '^[0-9]{1,9}(\.[0-9]{1,10})?$'
                   description: >-
-                    Decimal string; amountCents x fxRate = amountBaseCents. Supply it
-                    to pin the conversion (and to skip the rate fetch entirely);
-                    omit it and today's rate is fetched. Ignored when currency is
-                    already the instance base, where the rate is always 1.
+                    Decimal string; amountCents x fxRate = amountBaseCents exactly.
+                    Supply it to pin the conversion (and to skip the rate fetch
+                    entirely); omit it and today's rate is fetched. Ignored when
+                    currency is already the instance base, where the rate is always 1.
+                    At most 10 decimal places, which is what the column stores: a
+                    longer rate would be rounded on the way in while amountBaseCents
+                    had been computed at full precision, breaking the equality above.
                 note: { type: string, maxLength: 500 }
                 paidByName: { type: string, minLength: 1, maxLength: 200 }
                 paidByEmail: { type: string, format: email }

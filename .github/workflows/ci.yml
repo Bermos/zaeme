@@ -113,9 +113,12 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
-      # The floor the smoke step asserts. 174 is what the suite runs with both
-      # session cookies and object storage present. Raise this when the
-      # suite grows — never lower it to make a run go green.
+      # The floor the smoke step asserts. 188 is what the suite runs with
+      # both session cookies and object storage present. Raise this when the
+      # suite grows — never lower it to make a run go green, and recompute it
+      # from `main` AT THE MOMENT YOU REBASE rather than from the number your
+      # branch started against: two branches each adding to this file both look
+      # right in isolation and the second one to land is wrong.
       #
       # 106 -> 117 with #48, which added eleven checks to the credential
       # boundary around the trip budget: that expense writes need an account,
@@ -136,19 +139,24 @@ jobs:
       # prove it, and the two-sidedness is the point: labelling the whole of
       # /api/me one way passes half of them.
       #
-      # 139 -> 174 with #25, thirty-five checks that EXECUTE the money
+      # 139 -> 188 with #25, forty-nine checks that EXECUTE the money
       # arithmetic: a CHF + EUR + GBP trip whose balances and settlement plan
       # are reconciled by hand, a delete that takes exactly its own base cents
-      # with it, the refusal-with-a-way-through when no rate can be fetched,
-      # and the owner gate on the instance base currency. They are the only
-      # thing that checks what the budget COMPUTES — `currency` was stored,
-      # typed and rendered for months while nothing summed with it.
+      # with it, a budget whose FIRST expense is foreign (without which
+      # reverting loadBudget's currency to `expenses[0].currency` stays green),
+      # the refusal-with-a-way-through when no rate can be fetched, the three
+      # bounds on a hand-typed rate, one REAL call to frankfurter so a moved
+      # host cannot degrade in silence, and the owner gate on the instance base
+      # currency — asserted on the VALUE written, which is why that block runs
+      # before any expense freezes it. They are the only thing that checks what
+      # the budget COMPUTES — `currency` was stored, typed and rendered for
+      # months while nothing summed with it.
       #
       # Keep this EXACT. A floor that is slack by the width of somebody else's
       # group is a floor that lets that group stop running — which is the silent
       # degradation this assertion exists to prevent, arriving by rebase rather
       # than by rename.
-      MIN_SMOKE_CHECKS: '174'
+      MIN_SMOKE_CHECKS: '188'
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
       # falls through to the dry run, which is what lets the magic-link sign-in
       # below read its token out of the database instead of out of an inbox.

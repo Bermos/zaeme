@@ -18,7 +18,7 @@ const bodySchema = z.object({
   category: z.enum(['travel', 'accommodation', 'food', 'tickets', 'other']).optional(),
   amountCents: z.number().int().min(1),
   currency: z.string().min(3).max(3).optional(),
-  fxRate: z.string().regex(/^\d+(\.\d+)?$/).optional(),
+  fxRate: z.string().regex(/^\d{1,9}(\.\d{1,10})?$/).optional(),
   note: z.string().max(500).optional(),
   paidByName: z.string().min(1).max(200),
   paidByEmail: z.email(),

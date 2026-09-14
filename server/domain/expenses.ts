@@ -2,7 +2,7 @@ import { and, asc, eq, inArray } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
-import { instanceBaseCurrency } from './instance-settings'
+import { baseCurrencyWithin, instanceBaseCurrency } from './instance-settings'
 import { guestUser } from '../database/schema/auth'
 import { assertEventOpenToGuests, assertParticipant, assertPlanner, loadEventBySlug, type ParticipantRole } from './permissions'
 import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
@@ -117,19 +117,46 @@ export function splitEvenlyCents(totalCents: number, count: number): number[] {
 }
 
 /**
+ * The widest amount either cents column can hold. They are `integer` (int4),
+ * and money that overruns one is a Postgres `integer out of range` escaping as
+ * an unhandled 500 — from a handler whose 422 already has a message field for
+ * exactly this. CHF 21 million is not a friend-group budget; the bound is here
+ * to make the refusal legible, not to be a policy.
+ */
+export const MAX_CENTS = 2_147_483_647
+
+/**
+ * The shape an exchange rate is allowed to take: at most nine digits before the
+ * point and at most ten after, which is `numeric(20, 10)`, the column it lands
+ * in.
+ *
+ * The fractional cap is not cosmetic. A rate with more decimals than the column
+ * holds is silently ROUNDED on storage while `amount_base_cents` was computed
+ * at full precision, so the row that comes back violates the invariant the
+ * contract states — `amountCents × fxRate = amountBaseCents` — and no error is
+ * raised anywhere. Refusing the input is the only way that pair stays true.
+ */
+const FX_RATE_PATTERN = /^\d{1,9}(?:\.\d{1,10})?$/
+
+/**
  * `cents × rate`, rounded half up, with no floating point anywhere: the rate is
  * a decimal STRING and the multiplication runs in BigInt over its scale. A
  * `Number` multiplication is off by a cent often enough to matter on a
  * three-way split, and "off by a cent" in a settlement plan is a bug report.
  *
- * Throws 422 on a rate that is not a positive decimal — the only caller that
- * can produce one is a human typing into the override field.
+ * Throws 422 on a rate that is not a positive decimal of a storable shape, or
+ * on a product that would not fit the column. The only caller that can produce
+ * either is a human typing into the override field.
  */
 export function convertCents(cents: number, rate: string): number {
-  const m = /^(\d+)(?:\.(\d+))?$/.exec(rate.trim())
-  if (!m) {
-    throw createError({ statusCode: 422, message: 'An exchange rate is a positive decimal number, like 0.9412' })
+  const trimmed = rate.trim()
+  if (!FX_RATE_PATTERN.test(trimmed)) {
+    throw createError({
+      statusCode: 422,
+      message: 'An exchange rate is a positive decimal number with at most 10 decimal places, like 0.9412'
+    })
   }
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(trimmed)!
   const frac = m[2] ?? ''
   const numerator = BigInt(m[1] + frac)
   const denominator = 10n ** BigInt(frac.length)
@@ -139,7 +166,11 @@ export function convertCents(cents: number, rate: string): number {
   const scaled = BigInt(Math.round(cents)) * numerator
   const whole = scaled / denominator
   const remainder = scaled % denominator
-  return Number(remainder * 2n >= denominator ? whole + 1n : whole)
+  const converted = remainder * 2n >= denominator ? whole + 1n : whole
+  if (converted > BigInt(MAX_CENTS)) {
+    throw createError({ statusCode: 422, message: 'That amount and rate convert to more money than an expense can hold' })
+  }
+  return Number(converted)
 }
 
 /**
@@ -447,6 +478,9 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
   if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
     throw createError({ statusCode: 422, message: 'The amount must be a positive number of cents' })
   }
+  if (input.amountCents > MAX_CENTS) {
+    throw createError({ statusCode: 422, message: 'That is more money than one expense can hold' })
+  }
   const resolved = resolveShares(input.amountCents, input.participants)
   const { currency, baseCurrency, fxRate, amountBaseCents } = await resolveConversion(input)
   // Apportioned as a group against the CONVERTED TOTAL, so the base shares add
@@ -457,6 +491,20 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
   const db = useDb()
 
   await db.transaction(async (tx) => {
+    // The base was read (and the rate fetched) OUTSIDE this transaction, because
+    // an outbound HTTP call must never be made with one open. Re-read it here
+    // and refuse if it moved: without this, an expense recorded while the owner
+    // is changing the instance base lands stamped with the old one — which is
+    // this issue's bug, in one row, produced by a race rather than by the
+    // arithmetic. See the note in `setInstanceBaseCurrency` for the half of
+    // this window that a re-read alone cannot close.
+    const current = await baseCurrencyWithin(tx)
+    if (current !== baseCurrency) {
+      throw createError({
+        statusCode: 409,
+        message: 'The instance base currency changed while this was being recorded. Try again.'
+      })
+    }
     await tx.insert(tables.expense).values({
       id: expenseId,
       eventId,

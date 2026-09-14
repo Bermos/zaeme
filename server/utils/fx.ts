@@ -19,8 +19,16 @@
  * money, and the one thing this codebase does not do with money is floats.
  */
 
-/** Where the rates come from. One place, so a smoke run can see it. */
-const FRANKFURTER = 'https://api.frankfurter.app'
+/**
+ * Where the rates come from. One place, so a smoke run can see it.
+ *
+ * `api.frankfurter.app` (the host the issue names) now answers 301 to
+ * `api.frankfurter.dev/v1`, and its `base`/`symbols` parameters are legacy
+ * aliases of the documented `from`/`to`. Both still work; this uses the current
+ * spelling of both so the call does not rest on a redirect and two aliases
+ * staying alive.
+ */
+const FRANKFURTER = 'https://api.frankfurter.dev/v1'
 
 /** How long an expense write is prepared to wait for a rate. */
 const TIMEOUT_MS = 2500
@@ -61,7 +69,7 @@ export async function fetchFxRate(from: string, to: string): Promise<FxQuote | n
 
   try {
     const res = await $fetch<{ date?: string, rates?: Record<string, number> }>(`${FRANKFURTER}/latest`, {
-      query: { base, symbols: target },
+      query: { from: base, to: target },
       timeout: TIMEOUT_MS,
       retry: 0
     })
@@ -77,7 +85,16 @@ export async function fetchFxRate(from: string, to: string): Promise<FxQuote | n
       source: 'frankfurter'
     }
   } catch {
-    // Deliberately silent. The caller's fallback is to ask a human.
+    // Deliberately silent: every failure — a 404 for a currency the ECB does
+    // not publish, a timeout, a renamed field, a moved host — is the same
+    // answer to the caller, which is to ask a human for the rate.
+    //
+    // That is also why this swallowing needs a check OUTSIDE the unit tests:
+    // a broken client and an unquotable currency are indistinguishable from
+    // here, so `scripts/api-smoke.sh` makes a real, successful fetch and
+    // asserts a rate came back. Without it, the day frankfurter changes shape
+    // every foreign expense quietly starts demanding a manual rate and nothing
+    // in the pipeline says so.
     return null
   }
 }

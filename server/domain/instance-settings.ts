@@ -1,4 +1,4 @@
-import { count, ne } from 'drizzle-orm'
+import { count, eq, ne, sql } from 'drizzle-orm'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
 import { isCurrencyCode, normaliseCurrency } from '../utils/fx'
@@ -48,6 +48,21 @@ export async function instanceBaseCurrency(): Promise<string> {
 }
 
 /**
+ * The same read, inside somebody else's transaction. `addExpense` uses it to
+ * confirm the base has not moved since it fetched a rate against it.
+ *
+ * Typed on the one method it needs rather than on the drizzle transaction type:
+ * the concrete type is an internal generic that changes shape between minor
+ * versions, and naming it here would make this module depend on that.
+ */
+type Selectable = Pick<ReturnType<typeof useDb>, 'select'>
+
+export async function baseCurrencyWithin(tx: Selectable): Promise<string> {
+  const [row] = await tx.select().from(tables.instanceSetting).limit(1)
+  return row?.baseCurrency ?? DEFAULT_BASE_CURRENCY
+}
+
+/**
  * Change what the instance settles up in.
  *
  * REFUSED (409) while any expense is recorded against a different base, and
@@ -70,23 +85,42 @@ export async function setInstanceBaseCurrency(input: string): Promise<InstanceSe
   }
 
   const db = useDb()
-  const [{ blocking } = { blocking: 0 }] = await db
-    .select({ blocking: count() })
-    .from(tables.expense)
-    .where(ne(tables.expense.baseCurrency, baseCurrency))
-  if (blocking > 0) {
-    throw createError({
-      statusCode: 409,
-      message: `${blocking} expense${blocking === 1 ? ' is' : 's are'} already recorded against a different base currency. `
-        + 'Changing it now would re-label balances that were converted at the old one — remove those expenses first, or keep the current base.'
-    })
-  }
+  return db.transaction(async (tx) => {
+    // Make the row exist, then hold it, so the count and the write are one
+    // decision rather than two a concurrent writer can slip between.
+    //
+    // RESIDUAL WINDOW, stated rather than hidden: an `addExpense` that started
+    // before this row existed has nothing to take a lock on, so on a brand-new
+    // instance a simultaneous first-expense-and-first-setting can still cross.
+    // `addExpense` re-reads the base inside its own transaction, which turns
+    // the common case into a 409 instead of a mis-stamped row; closing the rest
+    // needs the expense write to lock this row too, which would put a write on
+    // the read path of every budget. Named in #57 rather than taken.
+    await tx
+      .insert(tables.instanceSetting)
+      .values({ id: INSTANCE_SETTING_ID, baseCurrency })
+      .onConflictDoNothing()
+    await tx.execute(sql`select 1 from events_instance_setting where id = ${INSTANCE_SETTING_ID} for update`)
 
-  await db
-    .insert(tables.instanceSetting)
-    .values({ id: INSTANCE_SETTING_ID, baseCurrency })
-    .onConflictDoUpdate({ target: tables.instanceSetting.id, set: { baseCurrency } })
-  return loadInstanceSettings()
+    const [{ blocking } = { blocking: 0 }] = await tx
+      .select({ blocking: count() })
+      .from(tables.expense)
+      .where(ne(tables.expense.baseCurrency, baseCurrency))
+    if (blocking > 0) {
+      throw createError({
+        statusCode: 409,
+        message: `${blocking} expense${blocking === 1 ? ' is' : 's are'} already recorded against a different base currency. `
+          + 'Changing it now would re-label balances that were converted at the old one — remove those expenses first, or keep the current base.'
+      })
+    }
+
+    await tx
+      .update(tables.instanceSetting)
+      .set({ baseCurrency })
+      .where(eq(tables.instanceSetting.id, INSTANCE_SETTING_ID))
+    const [row] = await tx.select().from(tables.instanceSetting).limit(1)
+    return { baseCurrency: row!.baseCurrency, configured: true, updatedAt: row!.updatedAt }
+  })
 }
 
 /** How many expenses exist on the instance at all — the admin page's context. */

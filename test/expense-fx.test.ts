@@ -3,6 +3,7 @@ import {
   apportionCents,
   computeBalances,
   convertCents,
+  MAX_CENTS,
   resolveShares,
   splitEvenlyCents,
   suggestSettlements,
@@ -69,6 +70,25 @@ describe('convertCents', () => {
     expect(() => convertCents(100, '-1')).toThrow()
     expect(() => convertCents(100, 'abc')).toThrow()
     expect(() => convertCents(100, '')).toThrow()
+  })
+
+  it('refuses a rate the column could not store as written', () => {
+    // `numeric(20, 10)` would ROUND an eleventh decimal on the way in while
+    // `amountBaseCents` was computed at full precision — leaving a row whose
+    // own `amountCents x fxRate = amountBaseCents` is false, silently.
+    expect(() => convertCents(100, '1.12345678901')).toThrow()
+    expect(convertCents(100, '1.1234567890')).toBe(112)
+    expect(() => convertCents(100, '9999999999')).toThrow()
+  })
+
+  it('refuses a product that would overrun the cents column', () => {
+    // Both halves used to escape as an unhandled Postgres 500 (`integer out of
+    // range`) from a handler whose 422 body already had a message field.
+    expect(() => convertCents(1000, '999999999')).toThrow()
+    expect(convertCents(MAX_CENTS, '1')).toBe(MAX_CENTS)
+    expect(() => convertCents(MAX_CENTS, '1.001')).toThrow()
+    // …but a rate that rounds back down to the ceiling still fits.
+    expect(convertCents(MAX_CENTS, '1.0000000001')).toBe(MAX_CENTS)
   })
 })
 

@@ -300,8 +300,24 @@ export const seriesMember = pgTable('events_series_member', {
 
 /**
  * One paid cost on an event (trips mostly): who paid, how much, and how it is
- * split. Money is integer cents (no float money); `currency` is informative —
- * balances are only computed within one currency.
+ * split. Money is integer cents; there is no float money anywhere near this
+ * table.
+ *
+ * TWO AMOUNTS, ALWAYS (#25). `amount_cents`/`currency` is what was handed over;
+ * `amount_base_cents`/`base_currency` is what it settles for, converted at
+ * `fx_rate` when it was recorded and frozen there. Balances, settlements and
+ * totals are computed from the base figures and from nothing else.
+ *
+ * This comment used to say `currency` was "informative — balances are only
+ * computed within one currency". The first half was true and the second was
+ * not: nothing enforced it, and `computeBalances` summed cents straight across
+ * currencies. A schema comment claiming a constraint is not a constraint.
+ *
+ * NO DEFAULTS on the three conversion columns, on purpose. An insert that
+ * forgets all three aborts; one that sets `amount_base_cents` and forgets the
+ * other two would, with defaults, silently stamp CHF-at-1 on a EUR instance —
+ * and then freeze the instance base there via the guard in
+ * `server/domain/instance-settings.ts`.
  */
 export const expense = pgTable('events_expense', {
   id: text('id').primaryKey(),
@@ -321,8 +337,8 @@ export const expense = pgTable('events_expense', {
    * `fx_rate` is numeric, not a float — it is multiplied by money. It is 1
    * whenever `currency` is already the base, which is the ordinary case.
    */
-  baseCurrency: text('base_currency').notNull().default('CHF'),
-  fxRate: numeric('fx_rate', { precision: 20, scale: 10 }).notNull().default('1'),
+  baseCurrency: text('base_currency').notNull(),
+  fxRate: numeric('fx_rate', { precision: 20, scale: 10 }).notNull(),
   /**
    * The total in BASE cents — the only figure balances and settlements are ever
    * computed from. Materialised here rather than derived at read time so the

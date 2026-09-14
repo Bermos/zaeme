@@ -225,6 +225,54 @@ else
 fi
 
 echo
+echo "== the base currency is the OWNER's setting, and it is a VALUE (#25, D6) =="
+# This block runs BEFORE any expense in the suite, on purpose. The change is
+# refused once an expense is recorded against a different base, so a settings
+# check placed after the fixtures can only ever prove the refusal — and a
+# `setInstanceBaseCurrency` that discarded its input and wrote the default
+# would pass every other check in this file.
+#
+# A re-run against a database the last run left behind would be blocked by its
+# own fixtures, so the block CLEARS the instance of expenses it can reach first.
+# On a fresh database (which is what CI hands it) that loop does nothing.
+for CLEAN_SLUG in $(body "${AUTH[@]}" "$API/events" | grep -o '"slug":"[^"]*"' | sed 's/^"slug":"//;s/"$//'); do
+  for CLEAN_ID in $(body "${AUTH[@]}" "$API/events/$CLEAN_SLUG/budget" | grep -o '"id":"[^"]*"' | sed 's/^"id":"//;s/"$//'); do
+    curl -s -o /dev/null "${AUTH[@]}" -X DELETE "$API/events/$CLEAN_SLUG/expenses/$CLEAN_ID"
+  done
+done
+
+check "the instance settings need a session"     401 "$BASE/api/admin/settings"
+check "...and a service token is not one"        401 "${AUTH[@]}" "$BASE/api/admin/settings"
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  SET_OWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  check "the owner reads them"                   200 "${SET_OWNER[@]}" "$BASE/api/admin/settings"
+  check "...and writes them"                     200 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
+  contains "...to the VALUE that was asked for"         "$(body "${SET_OWNER[@]}" "$BASE/api/admin/settings")" '"baseCurrency":"EUR"'
+  check "...and back again"                      200 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"CHF"}'
+  contains "...which the read reflects too"             "$(body "${SET_OWNER[@]}" "$BASE/api/admin/settings")" '"baseCurrency":"CHF"'
+  contains "...and records that somebody chose it"      "$(body "${SET_OWNER[@]}" "$BASE/api/admin/settings")" '"configured":true'
+  check "a code that is not three letters"       400 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"CH"}'
+  # The rate the expense form prefills, and the ONE place in this suite that
+  # makes a real, successful call to frankfurter. Every other expense here pins
+  # `fxRate` by hand, so without this the whole FX client could be broken — a
+  # moved host, a renamed field — and the only symptom would be foreign
+  # expenses quietly demanding a manual rate, which no other check can see.
+  contains "a live rate actually comes back"            "$(body "${SET_OWNER[@]}" "$BASE/api/me/fx/rate?from=EUR")" '"rate":"'
+  contains "...dated by the source that published it"   "$(body "${SET_OWNER[@]}" "$BASE/api/me/fx/rate?from=EUR")" '"asOf":"20'
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the OWNER's session to run these"
+fi
+
+if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  SET_GUEST=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
+  check "another account cannot read the settings" 403 "${SET_GUEST[@]}" "$BASE/api/admin/settings"
+  check "...nor change what everyone settles in"   403 "${SET_GUEST[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
+else
+  echo "  skip  set ZAEME_TEST_GUEST_COOKIE to a NON-owner session to run these"
+fi
+
+echo
 echo "== events, invites, RSVPs =="
 SUFFIX=$(date +%s)
 EV=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
@@ -393,32 +441,53 @@ BYHAND=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
   -d "{\"title\":\"Bazaar\",\"amountCents\":1000,\"currency\":\"XXX\",\"fxRate\":\"2\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\"}]}")
 contains "...which is then recorded at that rate"        "$BYHAND" '"amountBaseCents":2000'
 
-echo
-echo "== the base currency is the OWNER's setting (#25, D6) =="
-check "the instance settings need a session"     401 "$BASE/api/admin/settings"
-check "...and a service token is not one"        401 "${AUTH[@]}" "$BASE/api/admin/settings"
+# A rate that would not survive the column it lands in. Both were unhandled
+# Postgres errors escaping as 500s before #57 review: `integer out of range` on
+# the converted amount, `numeric field overflow` on the rate itself.
+check "a rate with too many digits"              422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
+  -d "{\"title\":\"Huge\",\"amountCents\":1000,\"currency\":\"XXX\",\"fxRate\":\"9999999999\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\"}]}"
+check "...and one with too many decimals"        422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
+  -d "{\"title\":\"Precise\",\"amountCents\":1000,\"currency\":\"XXX\",\"fxRate\":\"1.123456789012\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\"}]}"
+check "...and an amount that overruns the column" 422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
+  -d "{\"title\":\"Overflow\",\"amountCents\":1000,\"currency\":\"XXX\",\"fxRate\":\"999999999\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\"}]}"
 
+# An expense with NO fxRate, in a currency the ECB publishes: the only write in
+# this suite that depends on the outbound fetch working. `equals` rather than
+# `contains`, because the answer that has to fail is "1" — a broken client that
+# fell back to the identity would satisfy any substring check for a rate.
+LIVE=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
+  -d "{\"title\":\"Gelato\",\"amountCents\":12000,\"currency\":\"EUR\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\"}]}")
+LIVERATE=$(printf '%s' "$LIVE" | sed -n 's/.*"fxRate":"\([^"]*\)".*/\1/p')
+equals "an expense with no rate fetches a live one" "$([ -n "$LIVERATE" ] && [ "$LIVERATE" != "1" ] && echo fetched || echo "not-fetched:${LIVERATE:-none}")" "fetched"
+
+# A budget whose FIRST expense is foreign. Without this trip, reverting
+# `loadBudget`'s `currency: baseCurrency` to the original
+# `expenses[0]?.currency` leaves every check in this file green: every other
+# budget here happens to open with an expense already in the base.
+ONLYEUR=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke foreign-first $SUFFIX\",\"type\":\"trip\"}")
+OSLUG2=$(printf '%s' "$ONLYEUR" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+FIRST=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$OSLUG2/expenses" \
+  -d "{\"title\":\"Dinner\",\"amountCents\":10000,\"currency\":\"EUR\",\"fxRate\":\"0.9412\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":$SPLIT3}")
+contains "the only expense on this trip is foreign"      "$FIRST" '"amountCents":10000,"currency":"EUR"'
+FIRSTB=$(body "${AUTH[@]}" "$API/events/$OSLUG2/budget")
+contains "...and the budget is STILL labelled in base"   "$FIRSTB" '"currency":"CHF"'
+contains "...totalling the converted cents, not the spent ones" "$FIRSTB" '"totalCents":9412'
+
+echo
+echo "== ...and is FROZEN once expenses are converted into it (#25) =="
 if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
-  SET_OWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
-  check "the owner reads them"                   200 "${SET_OWNER[@]}" "$BASE/api/admin/settings"
-  contains "...and they say what we settle in"           "$(body "${SET_OWNER[@]}" "$BASE/api/admin/settings")" '"baseCurrency":"CHF"'
-  check "the owner writes them"                  200 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"CHF"}'
-  contains "...and the row is now the owner's choice" "$(body "${SET_OWNER[@]}" "$BASE/api/admin/settings")" '"configured":true'
-  check "a code that is not three letters"       400 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"CH"}'
+  LOCK_OWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
   # The rule that keeps every balance summable: expenses freeze the base they
-  # were converted into, so the instance base cannot drift away from them.
-  check "changing it under recorded expenses"    409 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
-  contains "...and says which expenses hold it"          "$(body "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}')" 'already recorded against a different base currency'
+  # were converted into, so the instance base cannot drift away from them. By
+  # now the fixtures above have recorded some, so the change that succeeded at
+  # the top of this run is refused here — which is the whole of the lock.
+  check "changing it under recorded expenses"    409 "${LOCK_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
+  contains "...and says which expenses hold it"          "$(body "${LOCK_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}')" 'already recorded against a different base currency'
+  contains "...and where to go and remove them"         "$(body "${LOCK_OWNER[@]}" "$BASE/api/admin/settings")" '"hold":{"bases":['
+  contains "...naming the trips by slug"                "$(body "${LOCK_OWNER[@]}" "$BASE/api/admin/settings")" "\"slug\":\"$FSLUG\""
+  contains "...and the base is still what it was"       "$(body "${LOCK_OWNER[@]}" "$BASE/api/admin/settings")" '"baseCurrency":"CHF"'
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the OWNER's session to run these"
-fi
-
-if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
-  GUEST=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
-  check "another account cannot read the settings" 403 "${GUEST[@]}" "$BASE/api/admin/settings"
-  check "...nor change what everyone settles in"   403 "${GUEST[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
-else
-  echo "  skip  set ZAEME_TEST_GUEST_COOKIE to a NON-owner session to run these"
 fi
 
 echo
