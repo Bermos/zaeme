@@ -26,7 +26,15 @@ Everything after them is earned.
 - 2026-09-14: driving the magic-link sign-in from a script needs an `Origin` header on `POST /api/auth/sign-in/magic-link` — better-auth's CSRF middleware answers `403 MISSING_OR_NULL_ORIGIN` without one, and `fetch` does not send it. The token is `zaeme_verification.identifier` (stored plain) and its `value` carries the email, so match on that rather than on "the newest row".
 - 2026-09-14: the mail dry run's `[email:dry-run]` log prints the magic link twice — the `preview` field truncates the token, the `links` array does NOT. Read `zaeme_verification` anyway, and match the row on the email inside `value`: "newest row wins" picks the wrong token exactly when you are signing in two accounts in a row.
 - 2026-09-14: The contract test polices paths, methods and operationIds and reads **no comments**. `docs/zaeme-api.openapi.yaml` and the `/api/v1` handlers carry long prose that CI cannot falsify, and two comments had been wrong about timeline editing since `bee78a3` (#10 fixed them). Enterprise vendors that YAML, so a stale comment there misinforms another repository — a comment-only diff is safe, and is owed whenever the surface it describes moves.
+- 2026-09-14: `/api/me/**` is the ACCOUNT surface — a session, no planner row required — and since #48 it holds expense writes as well as the `/me` aggregation. The gate is `assertParticipant` in `server/domain/permissions.ts` (planner row, or an RSVP whose `guestEmail` is the account's lowercased email). Guest-surface writes that need an identity belong here, never in `server/api/invites/**`.
 - 2026-09-14: `server/middleware/audit.ts` records mutations at the edge; a new route needs no audit code. It must keep returning early for `/api/v1` and `/api/auth` — a change that drops those early returns puts a cookie read next to the machine surface.
+
+## Running things locally (smoke scripts, a scratch database)
+
+- 2026-09-14: There is no docker daemon in the agent environment, but Postgres 16 binaries are: `su postgres -c "/usr/lib/postgresql/16/bin/initdb -D <dir> -U zaeme --auth=trust"` then `pg_ctl -D <dir> -o '-p <port> -k /tmp' start`. That is enough to run `scripts/migrate.mjs` and a full `pnpm smoke:api`.
+- 2026-09-14: CONCURRENT AGENTS STEAL PORTS. A sibling worktree's smoke server on the same port answers your requests with its own token and database, and `pnpm smoke:api` then reports ~100 failures that look exactly like your change broke everything. Check `ss -ltnp` and `tr '\0' '\n' < /proc/<pid>/environ` before believing a red smoke run; pick a port nobody else would guess.
+- 2026-09-14: A background server started from a tool call is killed when the call's process group goes away. `setsid nohup <script> > log 2>&1 < /dev/null &` survives; a bare `&` does not.
+- 2026-09-14: An invite token only resolves on a LIVE event — `resolveInviteToken` 403s on `draft` and `cancelled` (`server/domain/invite.ts`). Any smoke check against `/api/invites/**` must publish the event first, or it fails for a reason that has nothing to do with what it is testing.
 
 ## Deploys, builds and the platform
 
@@ -57,4 +65,6 @@ Everything after them is earned.
 
 ## Rebase and generated files
 
+- 2026-09-14: Editing only a JSDoc comment on a schema column generates NO migration (`pnpm db:generate` says "No schema changes"), and drizzle's `text('x', { enum: [...] })` renders a plain text column — widening that list is a TypeScript change, not a migration. Both are free ways to keep `server/database/schema/*.ts` honest.
+- 2026-09-14: better-auth's `useSession()` is safe to call on an SSR'd public page (the invite page does), but `data` is null until the client resolves it. Gate any "you need an account" message on `session.value.isPending`, or a signed-in friend sees the refusal for a frame before it is taken back.
 - 2026-09-14: Drizzle migrations are generated (`pnpm db:generate`) and are not mergeable text. After a rebase that brought in another migration, regenerate and re-verify rather than resolving by hand.

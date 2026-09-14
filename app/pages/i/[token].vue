@@ -56,10 +56,56 @@ onMounted(loadMedia)
 watch(() => identity.value.email, loadMedia)
 
 /* ---- budget ---- */
+/**
+ * READING the budget is still the invite link's — it renders for anybody
+ * holding it. WRITING moved onto an account (#48): the POST goes to
+ * `/api/me/events/<slug>/expenses`, which needs a session AND an RSVP (or a
+ * planner row) on this event.
+ */
 const budget = computed(() => page.value?.budget ?? null)
 function onBudgetUpdated() {
   refresh()
 }
+
+const session = useSession()
+const account = computed(() => {
+  const u = session.value.data?.user
+  return u?.email ? { name: u.name || u.email, email: u.email.toLowerCase() } : null
+})
+
+/**
+ * An instance on the mail dry run cannot deliver a magic link, so pointing a
+ * signed-out friend at /login would be pointing them at a form that goes
+ * nowhere. Asked only when it matters — a signed-out viewer looking at a
+ * budget — and only in the browser, so the SSR'd invite page stays one query.
+ */
+const mailReady = ref<boolean | null>(null)
+watch([budget, account], async ([b, acct]) => {
+  if (!import.meta.client || !b || acct || mailReady.value !== null) return
+  const status = await $fetch<{ emailConfigured: boolean }>('/api/setup/status').catch(() => null)
+  mailReady.value = status?.emailConfigured ?? true
+}, { immediate: true })
+
+const budgetLockedReason = computed(() => {
+  // While the session is still resolving, claim nothing: the card renders
+  // read-only for a moment rather than telling a signed-in friend they need an
+  // account and then taking it back.
+  if (account.value || session.value.isPending) return null
+  if (mailReady.value === false) {
+    // The trap named in #48: gating money behind an account makes the budget
+    // unreachable on an instance that cannot deliver a magic link. Say that,
+    // rather than offering a form that accepts an address and sends nothing.
+    return 'Money is recorded against a person, not a link. This instance cannot send email yet, so a sign-in link '
+      + 'would never arrive — only a passkey will get you in. Ask your host to set up mail if you have not got one.'
+  }
+  if (mailReady.value === true) {
+    return 'Money is recorded against a person, not a link. Sign in — a link by email, or a passkey — and you can add '
+      + 'expenses, including ones a friend paid.'
+  }
+  return 'Money is recorded against a person, not a link, so adding an expense needs a sign-in.'
+})
+const budgetSignInTo = computed(() => `/login?redirect=${encodeURIComponent(route.fullPath)}`)
+
 const splitParticipants = computed(() => {
   const fromRsvps = (page.value?.attendees ?? [])
     .filter(a => a.status === 'yes' || a.status === 'maybe')
@@ -72,6 +118,7 @@ const splitParticipants = computed(() => {
     for (const s of x.shares) seen.set(s.email, { name: s.name, email: s.email })
   }
   if (complete.value) seen.set(identity.value.email, { name: identity.value.name, email: identity.value.email })
+  if (account.value) seen.set(account.value.email, account.value)
   return seen.size ? [...seen.values()] : fromRsvps.filter(p => p.email)
 })
 
@@ -258,13 +305,14 @@ const errorMessage = computed(() => {
 
       <!-- Trip budget & splitting -->
       <BudgetCard
-        v-if="budget && complete"
+        v-if="budget"
         :budget="budget"
-        :add-url="`/api/invites/${token}/expenses`"
-        :expenses-base="`/api/invites/${token}/expenses`"
+        :add-url="`/api/me/events/${page.event.slug}/expenses`"
+        :expenses-base="`/api/me/events/${page.event.slug}/expenses`"
         :participants="splitParticipants"
-        :viewer="{ name: identity.name, email: identity.email }"
-        guest-mode
+        :viewer="account"
+        :locked-reason="budgetLockedReason"
+        :sign-in-to="budgetSignInTo"
         @updated="onBudgetUpdated"
       />
 

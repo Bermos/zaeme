@@ -677,6 +677,7 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
         :expenses-base="`/api/host/events/${slug}/expenses`"
         :participants="splitParticipants"
         :viewer="me"
+        can-remove-any
         @updated="() => refresh()"
       />
 

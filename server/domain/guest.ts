@@ -6,7 +6,7 @@ import { resolveInviteToken, bumpInviteUsage } from './invite'
 import { summariseRsvps, type EventDispatch, type RsvpStatus, type RsvpSummary } from './events-data'
 import { loadPoll, type PollOptionView, type PollAnswer } from './poll'
 import { addContribution, claimContribution, listContributions, releaseContribution, type ContributionView } from './contributions'
-import { addExpense, loadBudget, removeExpense, type AddExpenseInput } from './expenses'
+import { loadBudget } from './expenses'
 import { loadSeriesContext, type SeriesContext } from './series'
 import { listMessages, postMessage } from './chat'
 import {
@@ -331,20 +331,14 @@ export async function guestReleaseContribution(token: string, contributionId: st
 
 /* ------------------------------ trip expenses ------------------------------ */
 
-/** A guest records an expense they fronted (or one they know about) via their link. */
-export async function guestAddExpense(token: string, input: AddExpenseInput, identity: GuestIdentity) {
-  const { event: ev } = await resolveInviteToken(token)
-  return addExpense(ev.id, input, {
-    guestEmail: identity.guestEmail
-  })
-}
-
-/** A guest removes an expense they recorded or paid. */
-export async function guestRemoveExpense(token: string, expenseId: string, email: string) {
-  const { event: ev } = await resolveInviteToken(token)
-  await removeExpense(ev.id, expenseId, { email })
-  return loadBudget(ev.id)
-}
+/**
+ * READS ONLY. Writing an expense moved off the capability URL and onto an
+ * account in #48 — the owner's call, because money is the one thing on the
+ * guest surface where "whoever holds the link" is not a good enough answer to
+ * "who says so". The write lives on `/api/me/events/[slug]/expenses`, gated by
+ * `assertParticipant`; nothing here may grow a session check, and
+ * `test/api-boundary.test.ts` asserts it.
+ */
 
 /** The budget refresh for the guest page. */
 export async function guestLoadBudget(token: string) {
