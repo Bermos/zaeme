@@ -1,6 +1,106 @@
 name: ci
 
-on: push
+# BOTH triggers, for two things neither does alone. `push` keeps a check on
+# every branch in this repository, including one whose pull request is not open
+# yet — which is how work here usually starts, and is why it was the only
+# trigger. `pull_request` is the only way a FORK's proposal gets checked at all:
+# its push happens in the fork, and the run lands there with it.
+#
+# They overlap on a branch of this repository that has a pull request open, and
+# the `concurrency` group below is what keeps that from running everything
+# twice: `head_ref` (the branch a pull request comes FROM) and `ref_name` (the
+# branch a push MOVED) are the same string, so the two runs share a group and
+# the second cancels the first. Expect to see a cancelled run beside the green
+# one on such a commit — both were pointed at the same SHA and the survivor is
+# whichever started later.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  # ...but never on `main`, where the run is the record of what was deployed.
+  # Two merges landing a minute apart would otherwise leave the first commit
+  # with no evidence it was ever checked, and `main` is the branch Kitchen
+  # builds from.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# The floor both smoke runs assert — `api` against a fresh database and
+# `upgrade` against a migrated one. It lives up here so there is ONE number: two
+# jobs each carrying their own copy is how a floor gets raised in one place and
+# left behind in the other, which looks green and measures less.
+#
+# 188 is what the suite ran with both session cookies and object storage present
+# when this number was first written down. Raise it when the suite grows — never
+# lower it to make a run go green, and recompute it from `main` AT THE MOMENT
+# YOU REBASE rather than from the number your branch started against: two
+# branches each adding to this file both look right in isolation and the second
+# one to land is wrong.
+#
+# 106 -> 117 with #48, which added eleven checks to the credential boundary
+# around the trip budget: that expense writes need an account, that the invite
+# link no longer has one, and that a draft or cancelled event takes no money
+# while a completed one still settles up.
+#
+# 117 -> 133 with #8, sixteen checks that EXECUTE a timeline re-order and assert
+# the resulting order and numbering. They are the only thing that checks what
+# `applyTimelineItemMove` computes: deleting its transposition, pinning its
+# delta, and dropping its `event_id` scoping so one move renumbers every
+# itinerary on the instance all leave vitest green.
+#
+# 133 -> 139 with #51, six checks that EXECUTE writes on /api/me and then read
+# back the kind the audit RECORDED for each — `participant` for a friend with an
+# RSVP and no planner row, `planner` for a non-owner who really does plan the
+# event, `owner` for the instance owner. The label is computed at the edge and
+# read by a query, so nothing structural can prove it, and the two-sidedness is
+# the point: labelling the whole of /api/me one way passes half of them.
+#
+# 139 -> 188 with #25, forty-nine checks that EXECUTE the money arithmetic: a
+# CHF + EUR + GBP trip whose balances and settlement plan are reconciled by
+# hand, a delete that takes exactly its own base cents with it, a budget whose
+# FIRST expense is foreign (without which reverting loadBudget's currency to
+# `expenses[0].currency` stays green), the refusal-with-a-way-through when no
+# rate can be fetched, the three bounds on a hand-typed rate, one REAL call to
+# frankfurter so a moved host cannot degrade in silence, and the owner gate on
+# the instance base currency — asserted on the VALUE written, which is why that
+# block runs before any expense freezes it. They are the only thing that checks
+# what the budget COMPUTES — `currency` was stored, typed and rendered for
+# months while nothing summed with it.
+#
+# 188 -> 217 with #26, twenty-nine checks that EXECUTE a split: a weighted 2/1/1
+# whose 5000 no even split of 100.00 could produce, a weight of 0 that leaves
+# somebody out (the one part of that fixture the default gets wrong, and
+# therefore the part asserted), a percentage split down to its smallest slice,
+# the 99 and 101 refusals with the sum NAMED in each, exact amounts and the
+# three ways they are refused, seven people and 100.00 reconciled through the
+# balances, and a weighted EUR expense whose shares sum exactly in the euros
+# spent AND in the francs it settles for. The fixtures are lopsided on purpose:
+# 1/1/1/1 across 100.00 is 25/25/25/25 under every mode there is, and proves
+# none of them.
+#
+# …plus FOUR on the surfaces a person actually writes to. Those 29 all post to
+# /api/v1 with the service token, and `BudgetCard.vue` posts to /api/me and
+# /api/host — two more schemas, each with its own `splitMode` enum and `weight`
+# regex that nothing else in this file executes. Narrow either of them and every
+# percentage and weight split in the PRODUCT 400s with vitest, the typecheck and
+# this floor all still green. 217 -> 221.
+#
+# #61 makes the budget a double-entry ledger and adds 57: the accounts, the
+# entry-balance invariant, the line ordering, the `Rounding` account (which on
+# this path correctly holds nothing), and the chart of accounts driven through
+# /api/me and /api/host, which is where people actually write. 221 -> 278.
+#
+# #63 adds JOBS, not checks, and leaves this at 278. The `upgrade` job runs this
+# same suite a second time against a migrated database and asserts the same
+# floor; the run it does against the PREVIOUS release asserts that release's own
+# floor, read out of that commit's copy of this file, because a new floor is
+# never true of an old build.
+#
+# Keep this EXACT. A floor that is slack by the width of somebody else's group
+# is a floor that lets that group stop running — which is the silent degradation
+# this assertion exists to prevent, arriving by rebase rather than by rename.
+env:
+  MIN_SMOKE_CHECKS: '278'
 
 jobs:
   ci:
@@ -40,6 +140,49 @@ jobs:
       # a system that is not in this repository — it has to be caught on push.
       - name: Test
         run: pnpm run test
+
+      # The migration chain and `server/database/schema/*.ts` are two
+      # descriptions of one database, and nothing until now compared them.
+      # Editing a schema file without running `pnpm db:generate` leaves lint,
+      # the typecheck and every test green — the TypeScript is consistent with
+      # itself, and the column it describes simply is not there. The smoke suite
+      # catches it only if some check happens to read that column, and a
+      # deploy's first symptom is a 500 on the one screen that does.
+      # `server/database/schema/audit.ts` already TELLS a reader to run this "to
+      # confirm it still says there is nothing to migrate"; this is that
+      # instruction with something behind it.
+      #
+      # `git status` is the authority rather than drizzle-kit's own "No schema
+      # changes" line, which is a message in somebody else's program. Reading
+      # what it WROTE also names the file for whoever has to fix it.
+      #
+      # `< /dev/null` is load-bearing: when a table both gains and loses a
+      # column drizzle-kit asks whether one is a rename of the other, and a
+      # prompt with no TTY behind it either hangs this step until the job
+      # timeout or dies with a message about TTYs. Denying it a stdin makes it
+      # die immediately, and the branch below reports that as what it is.
+      - name: Migrations match the schema
+        timeout-minutes: 5
+        run: |
+          dirty=$(git status --porcelain -- server/database/migrations)
+          if [ -n "$dirty" ]; then
+            echo "::error::server/database/migrations was already dirty before this check ran"
+            echo "$dirty"
+            exit 1
+          fi
+          if ! pnpm db:generate < /dev/null > generate.log 2>&1; then
+            echo "::error::pnpm db:generate did not finish — the chain cannot be compared to the schema"
+            cat generate.log
+            exit 1
+          fi
+          wanted=$(git status --porcelain -- server/database/migrations)
+          if [ -n "$wanted" ]; then
+            echo "::error::the schema and the migration chain disagree — drizzle-kit wanted to write:"
+            echo "$wanted"
+            echo "Run pnpm db:generate and commit what it produces, migration and snapshot both."
+            exit 1
+          fi
+          echo "the schema and the migration chain agree"
 
   # The executed half. Everything in `ci` above is static: the contract test
   # reads the OpenAPI document and the route tree off disk, the boundary test
@@ -113,68 +256,8 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
-      # The floor the smoke step asserts. 188 is what the suite runs with
-      # both session cookies and object storage present. Raise this when the
-      # suite grows — never lower it to make a run go green, and recompute it
-      # from `main` AT THE MOMENT YOU REBASE rather than from the number your
-      # branch started against: two branches each adding to this file both look
-      # right in isolation and the second one to land is wrong.
-      #
-      # 106 -> 117 with #48, which added eleven checks to the credential
-      # boundary around the trip budget: that expense writes need an account,
-      # that the invite link no longer has one, and that a draft or cancelled
-      # event takes no money while a completed one still settles up.
-      #
-      # 117 -> 133 with #8, sixteen checks that EXECUTE a timeline re-order and
-      # assert the resulting order and numbering. They are the only thing that
-      # checks what `applyTimelineItemMove` computes: deleting its transposition,
-      # pinning its delta, and dropping its `event_id` scoping so one move
-      # renumbers every itinerary on the instance all leave vitest green.
-      #
-      # 133 -> 139 with #51, six checks that EXECUTE writes on /api/me and then
-      # read back the kind the audit RECORDED for each — `participant` for a
-      # friend with an RSVP and no planner row, `planner` for a non-owner who
-      # really does plan the event, `owner` for the instance owner. The label is
-      # computed at the edge and read by a query, so nothing structural can
-      # prove it, and the two-sidedness is the point: labelling the whole of
-      # /api/me one way passes half of them.
-      #
-      # 139 -> 188 with #25, forty-nine checks that EXECUTE the money
-      # arithmetic: a CHF + EUR + GBP trip whose balances and settlement plan
-      # are reconciled by hand, a delete that takes exactly its own base cents
-      # with it, a budget whose FIRST expense is foreign (without which
-      # reverting loadBudget's currency to `expenses[0].currency` stays green),
-      # the refusal-with-a-way-through when no rate can be fetched, the three
-      # bounds on a hand-typed rate, one REAL call to frankfurter so a moved
-      # host cannot degrade in silence, and the owner gate on the instance base
-      # currency — asserted on the VALUE written, which is why that block runs
-      # before any expense freezes it. They are the only thing that checks what
-      # the budget COMPUTES — `currency` was stored, typed and rendered for
-      # months while nothing summed with it.
-      #
-      # 188 -> 217 with #26, twenty-nine checks that EXECUTE a split: a
-      # weighted 2/1/1 whose 5000 no even split of 100.00 could produce, a
-      # weight of 0 that leaves somebody out (the one part of that fixture the
-      # default gets wrong, and therefore the part asserted), a percentage split
-      # down to its smallest slice, the 99 and 101 refusals with the sum NAMED
-      # in each, exact amounts and the three ways they are refused, seven people
-      # and 100.00 reconciled through the balances, and a weighted EUR expense
-      # whose shares sum exactly in the euros spent AND in the francs it settles
-      # for. The fixtures are lopsided on purpose: 1/1/1/1 across 100.00 is
-      # 25/25/25/25 under every mode there is, and proves none of them.
-      #
-      # …plus FOUR on the surfaces a person actually writes to. Those 29 all
-      # post to /api/v1 with the service token, and `BudgetCard.vue` posts to
-      # /api/me and /api/host — two more schemas, each with its own `splitMode`
-      # enum and `weight` regex that nothing else in this file executes. Narrow
-      # either of them and every percentage and weight split in the PRODUCT 400s
-      # with vitest, the typecheck and this floor all still green. 217 -> 221.
-      #
-      # Keep this EXACT. A floor that is slack by the width of somebody else's
-      # group is a floor that lets that group stop running — which is the silent
-      # degradation this assertion exists to prevent, arriving by rebase rather
-      # than by rename.
-      MIN_SMOKE_CHECKS: '221'
+      # MIN_SMOKE_CHECKS is set once at the top of this file, for this job and
+      # for `upgrade` together.
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
       # falls through to the dry run, which is what lets the magic-link sign-in
       # below read its token out of the database instead of out of an inbox.
@@ -279,3 +362,342 @@ jobs:
       - name: Server log
         if: failure()
         run: cat server.log || true
+
+  # The UPGRADED half, and the reason it is a second job rather than more steps
+  # in `api`: the two prove opposite things about the same artifact.
+  #
+  # `api` boots this branch against a database that has never held a row.
+  # `migrate.mjs` replays 0000..N into an empty schema, where every backfill,
+  # every `SET NOT NULL` and every unique index is satisfied because there is
+  # nothing there to fail them. A deploy never does that: Kitchen's `migrate`
+  # task applies migration N to a database sitting at N-1 with the previous
+  # release's rows in it, and that difference is the only place a backfill can
+  # be wrong (#63). `0006_red_redwing.sql` is the demonstration — its header
+  # says which of its statements "only do work when rows exist", and CI ran all
+  # of them against zero rows.
+  #
+  # So this job plays the deploy out. Build the PREVIOUS release, fill a
+  # database through its own API, then check this branch out beside it, run the
+  # same `node scripts/migrate.mjs` Kitchen runs against THAT database, and make
+  # this branch's server answer questions about rows it did not write.
+  #
+  # WHAT IT COSTS: a second `pnpm build` and a second smoke run, about the
+  # length of `api` again. It runs BESIDE `api` rather than after it, so the
+  # pipeline's wall time grows by the difference between the two jobs and not by
+  # their sum.
+  #
+  # WHAT IT CANNOT SEE, so that nobody reads more into a green than is there: a
+  # migration that ALREADY EXISTED at the previous release and was edited on
+  # this branch. drizzle records what it has applied and never looks at the file
+  # again, so an edit to an applied migration does not run here — and does not
+  # run on any deployed instance either, which is the thing to know. What this
+  # job executes is the migrations this branch ADDS, which is what a deploy
+  # executes.
+  upgrade:
+    name: upgrade (the previous release's rows, then this migration)
+    needs: ci
+    runs-on: ubuntu-latest
+
+    # The same services as `api`, for the same reasons — see that job for why
+    # the health check carries `-U zaeme -d zaeme` and why object storage is
+    # `adobe/s3mock`. Both releases boot against these, one after the other.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: zaeme
+          POSTGRES_PASSWORD: zaeme
+          POSTGRES_DB: zaeme
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U zaeme -d zaeme"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      s3:
+        image: adobe/s3mock:5.2.2
+        env:
+          COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: zaeme-ci
+          COM_ADOBE_TESTING_S3MOCK_STORE_REGION: us-east-1
+        ports: ['9090:9090']
+
+    # Deliberately identical to `api`'s block, and it has to stay that way: two
+    # releases of the same app are being booted with it, and a variable that
+    # exists in one job and not the other would make this job prove something
+    # about a configuration nobody deploys. Anything added there belongs here.
+    # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are absent for the same reason —
+    # mail falls through to the dry run, which is what lets the magic-link
+    # sign-in read its token out of the database.
+    env:
+      DATABASE_URL: postgres://zaeme:zaeme@127.0.0.1:5432/zaeme
+      PORT: '3111'
+      BASE_URL: http://127.0.0.1:3111
+      BETTER_AUTH_SECRET: ci-only-not-a-secret-0123456789abcdef
+      ZAEME_SERVICE_TOKEN: ci-only-service-token
+      ZAEME_ENTERPRISE_OWNER_ID: ci_enterprise_owner
+      S3_ACCESS_KEY_ID: ci
+      S3_SECRET_ACCESS_KEY: ci-secret
+      S3_BUCKET: zaeme-ci
+      S3_ENDPOINT: http://127.0.0.1:9090
+      S3_REGION: us-east-1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # The previous release has to be reachable as a commit, and the
+          # default shallow fetch has no history to find it in.
+          fetch-depth: 0
+
+      - name: Work out which release this one replaces
+        id: previous
+        run: |
+          # An explicit refspec rather than `git fetch origin main`: this has to
+          # leave a `refs/remotes/origin/main` behind for the merge base below,
+          # and what the shorthand updates has moved between git versions.
+          git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
+          base=$(git merge-base origin/main HEAD || true)
+          # On a push to `main` the merge base IS this commit, and on a
+          # `pull_request` run HEAD is already the merge of the branch into
+          # `main`. In the first case the release being replaced is the commit
+          # before it; in the second the merge base is `main`'s tip, which is
+          # exactly right.
+          if [ -z "$base" ] || [ "$base" = "$(git rev-parse HEAD)" ]; then
+            base=$(git rev-parse HEAD^)
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+
+          # How many migration FILES this branch adds on top of that release.
+          # The migrator is asked to apply exactly this many further down: a
+          # file added without a journal entry, or with a `when` that predates
+          # one already applied, is silently skipped by drizzle — it would ship
+          # as a green deploy with a missing table, and the count is what says
+          # so out loud.
+          added=$(git diff --name-status "$base" HEAD -- server/database/migrations \
+                  | awk '$1 == "A" && $2 ~ /\.sql$/' | wc -l | tr -d ' ')
+          echo "added=$added" >> "$GITHUB_OUTPUT"
+          echo "previous release: $base — $(git log -1 --format=%s "$base")"
+          echo "migrations this branch adds: $added"
+
+      - name: Check the previous release out beside this one
+        run: git worktree add "$RUNNER_TEMP/previous" --detach "${{ steps.previous.outputs.sha }}"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      # `engines.node` again — see `api`. Both releases are built with THIS
+      # branch's Node, which is the Node the deploy will use for both the
+      # migration and the server that follows it.
+      - name: Install node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Install the previous release's dependencies
+        working-directory: ${{ runner.temp }}/previous
+        run: pnpm install
+
+      # Everything from here to "Stop the previous release" is the PREVIOUS
+      # release doing what it does in production: its own migration chain, its
+      # own build, its own rows.
+      - name: Migrate to the previous release's schema
+        working-directory: ${{ runner.temp }}/previous
+        run: node scripts/migrate.mjs
+
+      - name: Seed the owner and one other account
+        working-directory: ${{ runner.temp }}/previous
+        run: node scripts/ci-smoke-setup.mjs seed
+
+      - name: Build the previous release
+        working-directory: ${{ runner.temp }}/previous
+        run: pnpm build
+
+      - name: Wait for object storage
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS "$S3_ENDPOINT/" > /dev/null; then
+              echo "s3mock is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::s3mock never answered at $S3_ENDPOINT"
+          exit 1
+
+      # `.output/server/index.mjs`, not `pnpm dev`, for the reason `api` gives:
+      # what fills this database has to be the artifact that release deployed,
+      # not a dev server with different module resolution writing rows that
+      # production never would have.
+      - name: Boot the previous release
+        working-directory: ${{ runner.temp }}/previous
+        run: |
+          nohup node .output/server/index.mjs > "$RUNNER_TEMP/previous-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/previous.pid"
+          for _ in $(seq 1 60); do
+            if curl -fsS "$BASE_URL/healthz" > /dev/null; then
+              echo "the previous release is healthy"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the previous release never answered /healthz"
+          cat "$RUNNER_TEMP/previous-server.log"
+          exit 1
+
+      # The same magic-link ceremony `api` runs, with the same masking — its
+      # stdout must not be redirected. The two cookies it exports are used again
+      # AFTER the migration, by the smoke run at the bottom of this job, which
+      # means a migration that invalidates every existing session shows up here
+      # rather than in somebody's browser.
+      - name: Sign in as both accounts
+        working-directory: ${{ runner.temp }}/previous
+        run: node scripts/ci-smoke-setup.mjs sign-in
+
+      # The seeder. The smoke suite is already the thing that writes realistic
+      # rows — a trip in three currencies, weighted and percentage splits, a
+      # chat, an itinerary, RSVPs — so it fills the database rather than a
+      # fixture nobody owns.
+      #
+      # ITS FLOOR IS THAT RELEASE'S, read out of that commit's copy of this
+      # file. Asserting the new floor against an old build fails every branch
+      # that adds a smoke check, for a reason that has nothing to do with what
+      # it changed.
+      #
+      # A failure here FAILS THE JOB, on purpose: if the previous release is
+      # red, the database it leaves behind is not the database a deploy would
+      # migrate, and everything after this measures nothing. The cost is that a
+      # transiently broken `main` fails every branch's `upgrade` until it is
+      # fixed — which is a loud version of a problem that is already there, and
+      # the error below says which release failed so nobody spends an afternoon
+      # looking for it in their own diff.
+      - name: Fill the database the way the previous release did
+        working-directory: ${{ runner.temp }}/previous
+        run: |
+          set -o pipefail
+          floor=$(git show "${{ steps.previous.outputs.sha }}:.github/workflows/ci.yml" \
+                  | sed -n "s/.*MIN_SMOKE_CHECKS: *'\([0-9][0-9]*\)'.*/\1/p" | head -1)
+          if [ -z "$floor" ]; then
+            echo "::error::could not read MIN_SMOKE_CHECKS out of ${{ steps.previous.outputs.sha }}'s workflow"
+            exit 1
+          fi
+          ./scripts/api-smoke.sh | tee "$RUNNER_TEMP/previous-smoke.log"
+          if grep -q '^  skip' "$RUNNER_TEMP/previous-smoke.log"; then
+            echo "::error::the previous release's smoke suite skipped checks — a credential or an S3_* variable is missing"
+            grep '^  skip' "$RUNNER_TEMP/previous-smoke.log"
+            exit 1
+          fi
+          passed=$(sed -n 's/^passed \([0-9]\{1,\}\), failed .*/\1/p' "$RUNNER_TEMP/previous-smoke.log")
+          if [ "${passed:-0}" -lt "$floor" ]; then
+            echo "::error::THE PREVIOUS RELEASE (${{ steps.previous.outputs.sha }}) is red, not this branch: expected at least $floor checks, got ${passed:-no count at all}. Check that commit's own ci run before looking at your diff."
+            exit 1
+          fi
+          echo "$passed checks ran against the previous release, floor $floor"
+
+      # What that release wrote, as that release reports it — plus a canary trip
+      # this script mints itself, because "whatever the smoke suite happened to
+      # leave" is a fixture nobody owns. Run from THIS branch's checkout: the
+      # previous release has no copy of the script the first time this job runs.
+      - name: Record what the previous release wrote
+        run: node scripts/ci-upgrade-check.mjs snapshot "$RUNNER_TEMP/previous.json"
+
+      # Verified dead, not asked to stop. A previous-release server still
+      # holding :3111 makes every boot below exit 0 WITHOUT BINDING, and curl
+      # keeps answering — from the old build, against the old schema. The job
+      # would then be green about a release it never ran.
+      - name: Stop the previous release
+        run: |
+          kill "$(cat "$RUNNER_TEMP/previous.pid")" 2>/dev/null || true
+          for _ in $(seq 1 30); do
+            if ! curl -fsS "$BASE_URL/healthz" > /dev/null 2>&1; then
+              echo "the previous release is down"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the previous release is still answering on $BASE_URL — everything after this would measure the OLD build"
+          exit 1
+
+      - name: Build this branch
+        run: pnpm build
+
+      # THE POINT OF THIS JOB. The same command Kitchen runs as its `migrate`
+      # task, against a database holding the previous release's rows.
+      - name: Migrate that database to this branch
+        run: |
+          set -o pipefail
+          node scripts/migrate.mjs | tee "$RUNNER_TEMP/migrate.log"
+          applied=$(sed -n 's/^\[migrate\] applied \([0-9]\{1,\}\) migration.*/\1/p' "$RUNNER_TEMP/migrate.log")
+          want='${{ steps.previous.outputs.added }}'
+          if [ "${applied:-none}" != "$want" ]; then
+            echo "::error::this branch adds $want migration file(s) and the migrator applied ${applied:-no count at all} — a file with no journal entry, or one whose \`when\` predates a migration already applied, is skipped in silence"
+            exit 1
+          fi
+          echo "applied $applied migration(s), which is what this branch adds"
+
+      # Kitchen's `migrate` task can be retried, and `scripts/migrate.mjs` says
+      # in its header that it is idempotent. Until now that was a claim: CI ran
+      # it exactly once. Asserted on the line it prints rather than on exit 0,
+      # because a script that did the whole chain again would also exit 0.
+      - name: Run it again — a deploy task can be retried
+        run: |
+          set -o pipefail
+          node scripts/migrate.mjs | tee "$RUNNER_TEMP/migrate-again.log"
+          if ! grep -q '^\[migrate\] applied 0 migration' "$RUNNER_TEMP/migrate-again.log"; then
+            echo "::error::the second run was not a no-op — see the line above"
+            exit 1
+          fi
+
+      - name: Boot this branch's built server
+        run: |
+          nohup node .output/server/index.mjs > server.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -fsS "$BASE_URL/healthz" > /dev/null; then
+              echo "the new build is healthy on the migrated database"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the new build never answered /healthz against the migrated database"
+          cat server.log
+          exit 1
+
+      # The rows the previous release wrote, read and WRITTEN by this one. The
+      # smoke suite cannot do this part: it mints its own events, so on a
+      # migrated database every row it touches was written after the migration
+      # by the code under test.
+      #
+      # BEFORE the smoke run below, and not after — that suite starts by
+      # deleting every expense it can reach through `/api/v1`, so that it can
+      # prove the base-currency setting on a database a previous run left
+      # behind. It would take the previous release's money with it.
+      - name: Read and write the previous release's rows
+        run: node scripts/ci-upgrade-check.mjs verify "$RUNNER_TEMP/previous.json"
+
+      # And the whole suite again, against the upgraded database rather than a
+      # fresh one. Same floor as `api`, same refusal to accept a skip: this is
+      # the half that says the new release WORKS on a migrated instance, not
+      # only that the migration applied.
+      - name: Smoke the API against the upgraded database
+        run: |
+          set -o pipefail
+          pnpm smoke:api | tee smoke.log
+          if grep -q '^  skip' smoke.log; then
+            echo "::error::the smoke suite skipped checks — a credential or an S3_* variable is missing"
+            grep '^  skip' smoke.log
+            exit 1
+          fi
+          passed=$(sed -n 's/^passed \([0-9]\{1,\}\), failed .*/\1/p' smoke.log)
+          if [ "${passed:-0}" -lt "$MIN_SMOKE_CHECKS" ]; then
+            echo "::error::expected at least $MIN_SMOKE_CHECKS checks on the upgraded database, got ${passed:-no count at all}"
+            exit 1
+          fi
+          echo "$passed checks ran against the upgraded database, none skipped"
+
+      # Two servers ran here, and a failure after the migration is usually
+      # explained by what one of them said at the time.
+      - name: Server logs
+        if: failure()
+        run: |
+          echo "=== the previous release ==="; cat "$RUNNER_TEMP/previous-server.log" || true
+          echo "=== this branch ==="; cat server.log || true

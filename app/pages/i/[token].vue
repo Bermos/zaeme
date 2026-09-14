@@ -318,6 +318,7 @@ const errorMessage = computed(() => {
         :budget="budget"
         :add-url="`/api/me/events/${page.event.slug}/expenses`"
         :expenses-base="`/api/me/events/${page.event.slug}/expenses`"
+        :accounts-base="account ? `/api/me/events/${page.event.slug}/accounts` : null"
         :participants="splitParticipants"
         :viewer="account"
         :show-amounts="complete || !!account"

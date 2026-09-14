@@ -99,6 +99,84 @@ equals() {
   fi
 }
 
+# THE LEDGER HELPERS (#61). The budget is double-entry now, and the one
+# assertion worth more than all the others is that every entry's lines sum to
+# zero. That is arithmetic over a JSON array, which sed cannot do honestly — so
+# these four shell out to node, which every machine that can build this app
+# already has.
+
+# `ledger_imbalance <budget-json>` — the WORST absolute imbalance across every
+# entry in a budget, in cents, counting an entry with no lines at all as broken.
+# `0` is the only passing answer. Accepts a bare budget or a `{budget:…}` body,
+# because /api/v1 answers the first and the human surfaces answer the second.
+ledger_imbalance() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      // A budget, or the single expense a /api/v1 write answers with.
+      const expenses = budget.expenses ?? (budget.lines ? [budget] : [])
+      if (!expenses.length) return process.stdout.write("no-expenses")
+      let worst = 0
+      for (const e of expenses) {
+        const lines = e.lines ?? []
+        if (!lines.length) { worst = Math.max(worst, 1e9); continue }
+        worst = Math.max(
+          worst,
+          Math.abs(lines.reduce((a, l) => a + l.amountCents, 0)),
+          Math.abs(lines.reduce((a, l) => a + l.amountBaseCents, 0))
+        )
+      }
+      process.stdout.write(String(worst))
+    })'
+}
+
+# `entry_lines <body> <title>` — how many lines the named entry has.
+entry_lines() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const e = (budget.expenses ?? [budget]).find(x => x.title === process.argv[1])
+      process.stdout.write(e ? String((e.lines ?? []).length) : "no-such-entry")
+    })' "$2"
+}
+
+# `entry_order <body> <title>` — the names on the named entry's shares, in the
+# order the payload lists them. All the lines of an entry share one `created_at`
+# (Postgres `now()` is transaction time) and cuid2 ids do not sort by age, so
+# without an explicit `seq` this is whatever the planner felt like returning.
+entry_order() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const e = (budget.expenses ?? [budget]).find(x => x.title === process.argv[1])
+      if (!e) return process.stdout.write("no-such-entry")
+      process.stdout.write((e.shares ?? []).map(sh => sh.name).join(" "))
+    })' "$2"
+}
+
+# `account_id <body> <name>` — the id of the named account, from a budget or an
+# `{accounts:…}` body.
+account_id() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("") }
+      const list = b.accounts ?? b.budget?.accounts ?? []
+      const a = list.find(x => x.name === process.argv[1])
+      process.stdout.write(a ? a.id : "")
+    })' "$2"
+}
+
 # `audit_await <url> <needle>` — the audit row is written from the response's
 # `finish` hook, AFTER the body is on the wire, so a read issued straight
 # afterwards can legitimately beat it. Poll briefly rather than sleep blindly,
@@ -584,6 +662,10 @@ contains "...and the last person owes the larger one"     "$SEVENB" '"g@e.com","
 #
 #   EUR 100.00 at 0.8367 → CHF 83.67
 #   spent 5000/2500/2500   base 4183/2092/2092 (sum 8367)
+#
+# Converting each share on its own would give 4184/2092/2092 = 8368: a cent of
+# liability invented, not a residual discovered. #61 keeps the group
+# apportionment and leaves the Rounding account with nothing to do.
 FXWTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke fx-weight $SUFFIX\",\"type\":\"trip\"}")
 WSLUG=$(printf '%s' "$FXWTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
 FXW=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$WSLUG/expenses" \
@@ -593,6 +675,186 @@ contains "...and in the base it settles for"               "$FXW" '"amountCents"
 FXWB=$(body "${AUTH[@]}" "$API/events/$WSLUG/budget")
 contains "...to the last cent of the converted total"      "$FXWB" '"currency":"CHF","totalCents":8367'
 contains "...with the balances reconciled in base cents"   "$FXWB" '"a@e.com","paidCents":8367,"owedCents":4183,"netCents":4184'
+
+echo
+echo "== the budget is a double-entry ledger with accounts (#61) =="
+# Every figure in a budget is now a sum over accounts, so every assertion here
+# EXECUTES one against a real Postgres. Three PRs this wave shipped checks that
+# passed with the logic they guarded reversed; the mutations these are built to
+# redden are named beside them.
+#
+#   posting every line to Uncategorised   → the category checks below
+#   dropping the rounding line            → the imbalance check AND the Rounding one
+#   letting an entry not balance          → `ledger_imbalance`, which is 0 or it is nothing
+LEDGER=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke ledger $SUFFIX\",\"type\":\"trip\"}")
+LSLUG=$(printf '%s' "$LEDGER" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+SPLIT2='[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]'
+
+# No category, and the UI never asks for one: it still has to land somewhere.
+PLAIN61=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$LSLUG/expenses" \
+  -d "{\"title\":\"Coffee\",\"amountCents\":1200,\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":$SPLIT2}")
+contains "an expense with no category lands in Uncategorised" "$PLAIN61" '"category":"Uncategorised"'
+contains "...on a real account, never a null"                 "$PLAIN61" '"accountKind":"category","accountEmail":null'
+# Five lines, not two: the payer's credit, the category debit and credit, and
+# one debit per person. A "ledger" that still wrote only the shares has three
+# fewer, and every sum over accounts below would then be reading nothing.
+equals "...written out as a full entry"          "$(entry_lines "$PLAIN61" Coffee)" "5"
+
+# The old enum still resolves BY NAME, which is what keeps every client
+# generated from the previous contract working.
+STAY61=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$LSLUG/expenses" \
+  -d "{\"title\":\"Chalet\",\"category\":\"accommodation\",\"amountCents\":30000,\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":$SPLIT2}")
+contains "the old category enum resolves to its account"  "$STAY61" '"category":"Accommodation"'
+FOOD61=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$LSLUG/expenses" \
+  -d "{\"title\":\"Dinner out\",\"category\":\"Food\",\"amountCents\":8000,\"paidByName\":\"B\",\"paidByEmail\":\"b@e.com\",\"participants\":$SPLIT2}")
+contains "...and so does the account's own name"          "$FOOD61" '"category":"Food"'
+NOSUCH61="{\"title\":\"Nope\",\"category\":\"Sherpas\",\"amountCents\":100,\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":$SPLIT2}"
+check "a category the event does not have"       422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$LSLUG/expenses" -d "$NOSUCH61"
+contains "...is refused by name, not silently filed"      "$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$LSLUG/expenses" -d "$NOSUCH61")" 'has no category called'
+
+LB=$(body "${AUTH[@]}" "$API/events/$LSLUG/budget")
+# THE assertion. Every entry's lines sum to zero, in both currencies.
+equals "every entry in the budget balances"      "$(ledger_imbalance "$LB")" "0"
+# "What did accommodation cost" is the debits into one account. The three
+# figures below are three DIFFERENT accounts, so a write that posted everything
+# to Uncategorised fails two of them and the third by its amount.
+contains "accommodation cost is one account's debits"     "$LB" '"kind":"category","name":"Accommodation","email":null,"isSystem":false,"debitCents":30000'
+contains "...food is another's"                           "$LB" '"kind":"category","name":"Food","email":null,"isSystem":false,"debitCents":8000'
+contains "...and the uncategorised coffee is its own"     "$LB" '"name":"Uncategorised","email":null,"isSystem":true,"debitCents":1200'
+contains "a category nobody used is still an account"     "$LB" '"name":"Tickets","email":null,"isSystem":false,"debitCents":0'
+contains "the trip total is the sum of category debits"   "$LB" '"totalCents":39200'
+contains "a member account carries the standing"          "$LB" '"kind":"member","name":"A","email":"a@e.com"'
+contains "...and nothing has been posted to Rounding"     "$LB" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
+
+STAY_ID=$(printf '%s' "$STAY61" | grep -o '"id":"[^"]*"' | head -1 | sed 's/^"id":"//;s/"$//')
+check "removing the categorised expense"         200 "${AUTH[@]}" -X DELETE "$API/events/$LSLUG/expenses/$STAY_ID"
+LB2=$(body "${AUTH[@]}" "$API/events/$LSLUG/budget")
+contains "...takes its whole entry with it"               "$LB2" '"name":"Accommodation","email":null,"isSystem":false,"debitCents":0'
+contains "...and exactly its cents off the total"         "$LB2" '"totalCents":9200'
+equals "...leaving every remaining entry balanced" "$(ledger_imbalance "$LB2")" "0"
+
+echo
+echo "== the residual has a home, and this path never gives it anything (#61) =="
+# EUR 100.00 at 0.8367, "Ana counts double": 50.00 / 25.00 / 25.00.
+#   the total converts to 8367. Converting each share on its own would give
+#   4184 + 2092 + 2092 = 8368 — three people severally owing 83.68 for a thing
+#   that cost 83.67, and a payer credited 83.68 for handing over 83.67. That is
+#   a cent of liability invented, not a residual discovered, so the shares are
+#   apportioned as a group and the entry has NO residual at all.
+#
+# `Rounding` having nothing to do here is the correct answer, not a gap. The
+# branch that posts to it is the guarantee that an entry can never be written
+# unbalanced, and it is what #59 will need when a currency change recomputes
+# per-person amounts that were rounded against a total that no longer exists.
+ROUNDTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke rounding $SUFFIX\",\"type\":\"trip\"}")
+RSLUG=$(printf '%s' "$ROUNDTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+RESID=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$RSLUG/expenses" \
+  -d '{"title":"Milan dinner","amountCents":10000,"currency":"EUR","fxRate":"0.8367","splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"2"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"}]}')
+# 4183, not the 4184 that 5000 x 0.8367 rounds to on its own.
+contains "the double share is apportioned, not rounded up" "$RESID" '"amountCents":5000,"amountBaseCents":4183'
+contains "...and the other two take the rest exactly"     "$RESID" '"amountCents":2500,"amountBaseCents":2092'
+# Six lines and no seventh: an entry that needed a rounding line would have one.
+equals "...in six lines, with no residual among them" "$(entry_lines "$RESID" "Milan dinner")" "6"
+equals "...and it balances, which is the whole invariant" "$(ledger_imbalance "$RESID")" "0"
+RB=$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")
+equals "...as does every entry in that budget"       "$(ledger_imbalance "$RB")" "0"
+contains "the Rounding account is there, holding nothing" "$RB" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
+contains "the trip total is what was SPENT"               "$RB" '"totalCents":8367'
+contains "...and the payer is credited what they paid"    "$RB" '"a@e.com","paidCents":8367,"owedCents":4183,"netCents":4184'
+contains "...with a debtor owing their apportioned share" "$RB" '"b@e.com","paidCents":0,"owedCents":2092,"netCents":-2092'
+contains "the plan clears the whole of one debt"          "$RB" '"toEmail":"a@e.com","amountCents":2092'
+# A same-currency expense divides the same way and also writes no extra line.
+body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$RSLUG/expenses" \
+  -d '{"title":"Tram","amountCents":900,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"}]}' > /dev/null
+equals "a same-currency split writes no extra line either" "$(entry_lines "$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")" Tram)" "6"
+contains "...and Rounding is still empty"                 "$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")" '"name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
+
+echo
+echo "== the chart of accounts, through the surfaces the product writes (#61) =="
+# The ledger has to work where PEOPLE write, which is /api/me from the invite
+# page and /api/host from the host page — never /api/v1, which is Enterprise's.
+# #26 shipped 29 checks entirely on /api/v1 while both human schemas were
+# narrow enough to 400 every split a person could make.
+ACCTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke accounts $SUFFIX\",\"type\":\"trip\"}")
+ASLUG=$(printf '%s' "$ACCTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$ASLUG/status" -d '{"status":"published"}' > /dev/null
+MEACC="$BASE/api/me/events/$ASLUG/accounts"
+
+check "an anonymous read of the accounts"        401 "$MEACC"
+check "a service token is not an account here"   401 "${AUTH[@]}" "$MEACC"
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  PL61=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  MEEXP61="$BASE/api/me/events/$ASLUG/expenses"
+  HOSTACC="$BASE/api/host/events/$ASLUG/accounts"
+
+  ACCLIST=$(body "${PL61[@]}" "$MEACC")
+  contains "the account surface lists the seeded chart"   "$ACCLIST" '"name":"Uncategorised","email":null,"isSystem":true'
+  contains "...including the one nobody sees"             "$ACCLIST" '"kind":"rounding","name":"Rounding"'
+  contains "the host surface answers the same chart"      "$(body "${PL61[@]}" "$HOSTACC")" '"name":"Uncategorised","email":null,"isSystem":true'
+
+  # An expense through /api/me, with no category: the ordinary path, and the one
+  # the UI takes.
+  MEPLAIN=$(body "${PL61[@]}" "${JSON[@]}" -X POST "$MEEXP61" \
+    -d "{\"title\":\"Petrol\",\"amountCents\":6000,\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":$SPLIT2}")
+  contains "an expense through /api/me lands in Uncategorised" "$MEPLAIN" '"category":"Uncategorised"'
+  equals "...and its entry balances"               "$(ledger_imbalance "$MEPLAIN")" "0"
+
+  # A category the group adds themselves, then posts into by id — the whole
+  # "the picker is not shown until they want it" story, executed.
+  check "adding a category through /api/me"        201 "${PL61[@]}" "${JSON[@]}" -X POST "$MEACC" -d '{"name":"Ski pass"}'
+  ACCLIST2=$(body "${PL61[@]}" "$MEACC")
+  contains "...and it joins the chart, not as a system one" "$ACCLIST2" '"kind":"category","name":"Ski pass","email":null,"isSystem":false'
+  check "...and a second one by the same name"     409 "${PL61[@]}" "${JSON[@]}" -X POST "$MEACC" -d '{"name":"ski PASS"}'
+  SKI_ID=$(account_id "$ACCLIST2" "Ski pass")
+  # Named out of alphabetical order, and with the payer in the middle, so the
+  # order asserted below is one that neither a sort nor a payer-first rule gives.
+  SPLIT3ORD='[{"name":"Cleo","email":"cleo@e.com"},{"name":"Ana","email":"ana@e.com"},{"name":"Ben","email":"ben@e.com"}]'
+  MESKI=$(body "${PL61[@]}" "${JSON[@]}" -X POST "$MEEXP61" \
+    -d "{\"title\":\"Lift pass\",\"accountId\":\"$SKI_ID\",\"amountCents\":22000,\"paidByName\":\"Ana\",\"paidByEmail\":\"ana@e.com\",\"participants\":$SPLIT3ORD}")
+  contains "an expense posted into it lands there"  "$MESKI" '"category":"Ski pass"'
+  # The lines come back in the order they were written, so `shares[]` is still
+  # the order the split named people in — all seven share one `created_at`, so
+  # without `seq` this is whatever Postgres feels like returning.
+  equals "...with the shares still in the order given" "$(entry_order "$MESKI" "Lift pass")" "Cleo Ana Ben"
+  equals "...and that entry balances too"          "$(ledger_imbalance "$MESKI")" "0"
+  contains "...so the new account carries the cost" "$(body "${PL61[@]}" "$MEACC")" '"name":"Ski pass","email":null,"isSystem":false,"debitCents":22000'
+
+  # The two refusals, and they are DIFFERENT refusals. A category holding lines
+  # cannot go; Uncategorised cannot go at all.
+  check "removing a category that holds lines"     409 "${PL61[@]}" -X DELETE "$MEACC/$SKI_ID"
+  contains "...saying which one and why"                  "$(body "${PL61[@]}" -X DELETE "$MEACC/$SKI_ID")" 'still has expenses posted to it'
+  # `Uncategorised` is refused OUTRIGHT, holding lines or not: the system check
+  # comes first on purpose, because telling somebody to delete every expense on
+  # it and then refusing anyway is a worse answer than refusing straight away.
+  UNCAT_ID=$(account_id "$ACCLIST2" Uncategorised)
+  check "removing Uncategorised while it holds lines" 422 "${PL61[@]}" -X DELETE "$MEACC/$UNCAT_ID"
+  contains "...saying it is part of every budget"         "$(body "${PL61[@]}" -X DELETE "$MEACC/$UNCAT_ID")" 'part of every budget'
+  TICKETS_ID=$(account_id "$ACCLIST2" Tickets)
+  check "removing a category nobody has used"      200 "${PL61[@]}" -X DELETE "$MEACC/$TICKETS_ID"
+  ACCLIST3=$(body "${PL61[@]}" "$MEACC")
+  equals "...and it is gone from the chart"        "$(account_id "$ACCLIST3" Tickets)" ""
+  # …and an EMPTY Uncategorised still cannot go, which is the other half of the
+  # rule: a refusal that only fired on the line count would let it through here.
+  EMPTYTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke empty $SUFFIX\",\"type\":\"trip\"}")
+  ESLUG=$(printf '%s' "$EMPTYTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$ESLUG/status" -d '{"status":"published"}' > /dev/null
+  EMPTYACC="$BASE/api/me/events/$ESLUG/accounts"
+  EUNCAT=$(account_id "$(body "${PL61[@]}" "$EMPTYACC")" Uncategorised)
+  check "removing an EMPTY Uncategorised"          422 "${PL61[@]}" -X DELETE "$EMPTYACC/$EUNCAT"
+  ERND=$(account_id "$(body "${PL61[@]}" "$EMPTYACC")" Rounding)
+  check "...and removing Rounding"                 422 "${PL61[@]}" -X DELETE "$EMPTYACC/$ERND"
+
+  # The host surface writes the same ledger, and the residual reaches it too.
+  HOSTFX=$(body "${PL61[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$ESLUG/expenses" \
+    -d '{"title":"Milan again","amountCents":10000,"currency":"EUR","fxRate":"0.8367","splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"2"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"}]}')
+  contains "the HOST surface apportions the same way"     "$HOSTFX" '"amountCents":5000,"amountBaseCents":4183'
+  equals "...and its entry balances as well"       "$(ledger_imbalance "$HOSTFX")" "0"
+  contains "...with the total what was spent"             "$HOSTFX" '"totalCents":8367'
+  check "adding a category on the host surface"    201 "${PL61[@]}" "${JSON[@]}" -X POST "$HOSTACC" -d '{"name":"Petrol"}'
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
 
 echo
 echo "== the boundary: money is written by an ACCOUNT, read by the link (#48) =="
