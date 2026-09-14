@@ -247,30 +247,33 @@ watch(splitMode, () => {
 const splitPeople = computed(() => props.participants.filter(p => selected.value.includes(p.email)))
 
 /**
- * A typed value as an integer at four decimal places — the scale the server
- * stores a percentage or a weight at. Integer arithmetic, because `0.1 + 0.2`
- * is not `0.3`, and "your percentages come to 99.99999999" would be a worse
- * message than the one it replaces. `null` means "not a number yet".
+ * A percentage or weight as an integer at the scale the server stores it at.
+ *
+ * `scaleWeight` and `unscaleWeight` are the SERVER'S functions, auto-imported
+ * from `shared/utils/split-weight.ts`: the running total under the rows has to
+ * agree with the refusal the write would produce, and a second copy of the rule
+ * here would agree until somebody changed one of them — after which the form
+ * reads `100% of 100%` beside a server that refuses the save.
  */
-function scaleEntered(raw: string | undefined): number | null {
-  const trimmed = (raw ?? '').trim()
-  if (!/^\d{1,8}(\.\d{1,4})?$/.test(trimmed)) return null
-  const [whole, frac = ''] = trimmed.split('.')
-  return Number(whole) * 10000 + Number(`${frac}0000`.slice(0, 4))
-}
 
-/** The same string as cents, for the `exact` rows, which are typed in francs. */
+/** A `exact` row, which is typed in whole currency units, as cents. */
 function enteredCents(raw: string | undefined): number | null {
   const trimmed = (raw ?? '').trim()
   if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null
   return Math.round(Number.parseFloat(trimmed) * 100)
 }
 
+/** Whether a row has SOMETHING in it, as opposed to something unusable. */
+function isBlank(raw: string | undefined): boolean {
+  return (raw ?? '').trim() === ''
+}
+
 const splitEntries = computed(() => splitPeople.value.map(p => ({
   name: p.name,
   email: p.email,
   raw: (splitValues.value[p.email] ?? '').trim(),
-  scaled: scaleEntered(splitValues.value[p.email]),
+  blank: isBlank(splitValues.value[p.email]),
+  scaled: scaleWeight(splitValues.value[p.email] ?? ''),
   cents: enteredCents(splitValues.value[p.email])
 })))
 
@@ -283,12 +286,6 @@ const splitTotal = computed(() => splitEntries.value.reduce(
   (sum, e) => sum + (splitMode.value === 'exact' ? (e.cents ?? 0) : (e.scaled ?? 0)), 0
 ))
 
-/** `333300` back to `33.33` — how a running total is shown. */
-function unscale(value: number): string {
-  const frac = `${value % 10000}`.padStart(4, '0').replace(/0+$/, '')
-  return frac ? `${Math.floor(value / 10000)}.${frac}` : `${Math.floor(value / 10000)}`
-}
-
 /**
  * What the form says under the rows, and whether that is a complaint. `weight`
  * has no target to miss — 2/1/1 is a complete answer — so it states the total
@@ -297,6 +294,19 @@ function unscale(value: number): string {
 const splitStatus = computed<{ text: string, off: boolean } | null>(() => {
   if (splitMode.value === 'even' || !splitEntries.value.length) return null
   if (!allEntered.value) {
+    // "Give everybody a number" is the WRONG complaint about `33.33333`, which
+    // is a number — it is one the column cannot store. Say which it is, because
+    // the server's own message ("at most 4 decimal places") can never be seen
+    // from here: the button is disabled before a request goes out.
+    const unusable = splitEntries.value.some(e => !e.blank && (splitMode.value === 'exact' ? e.cents === null : e.scaled === null))
+    if (unusable) {
+      return {
+        text: splitMode.value === 'exact'
+          ? 'An amount is a number with at most 2 decimal places, like 40.00.'
+          : 'A number with at most 4 decimal places, like 33.33.',
+        off: true
+      }
+    }
     return {
       text: splitMode.value === 'exact'
         ? 'Give everybody an amount.'
@@ -306,11 +316,11 @@ const splitStatus = computed<{ text: string, off: boolean } | null>(() => {
   }
   if (splitMode.value === 'weight') {
     return splitTotal.value > 0
-      ? { text: `Total weight ${unscale(splitTotal.value)} — shares are worked out from it.`, off: false }
+      ? { text: `Total weight ${unscaleWeight(splitTotal.value)} — shares are worked out from it.`, off: false }
       : { text: 'At least one person needs a weight above zero.', off: true }
   }
   if (splitMode.value === 'percentage') {
-    return { text: `${unscale(splitTotal.value)}% of 100%`, off: splitTotal.value !== 1_000_000 }
+    return { text: `${unscaleWeight(splitTotal.value)}% of 100%`, off: splitTotal.value !== FULL_PERCENT }
   }
   const code = spentCurrency.value.trim().toUpperCase() || props.budget.currency
   return {

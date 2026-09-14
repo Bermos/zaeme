@@ -6,6 +6,7 @@ import {
   type ExpenseParticipantInput,
   type SplitMode
 } from '../server/domain/expenses'
+import { FULL_PERCENT, scaleWeight, unscaleWeight, WEIGHT_SCALE } from '../shared/utils/split-weight'
 
 /**
  * Splitting an expense by percentage or by weight (#26).
@@ -313,5 +314,59 @@ describe('a split sums exactly in BOTH currencies', () => {
     const base = apportionCents(spent, 10000, converted)
     expect(base).toEqual([4183, 2092, 2092])
     expect(sum(base)).toBe(8367)
+  })
+})
+
+describe('the entered-weight scale, which the form and the server share', () => {
+  /**
+   * `shared/utils/split-weight.ts` is one definition read from two places: the
+   * server refuses a write whose percentages do not sum to 100, and
+   * `BudgetCard.vue` shows the running total that lets somebody see `99% of
+   * 100%` before they save. It used to be two copies that agreed — which is the
+   * state a rule is in immediately before it stops agreeing, the symptom being
+   * a form reading `100% of 100%` beside a server that refuses.
+   */
+  it('scales a typed decimal to an integer, exactly', () => {
+    expect(scaleWeight('33.33')).toBe(333_300)
+    expect(scaleWeight('2')).toBe(20_000)
+    expect(scaleWeight(2)).toBe(20_000)
+    expect(scaleWeight('0')).toBe(0)
+    expect(scaleWeight(' 1.5 ')).toBe(15_000)
+    expect(scaleWeight('0.0001')).toBe(1)
+  })
+
+  it('makes the thirds people type add up to exactly 100', () => {
+    // The whole reason this is integers: as doubles, 33.33 + 33.33 + 33.34 is
+    // 99.99999999999999 and a split three friends would call fair is refused.
+    const thirds = ['33.33', '33.33', '33.34'].map(v => scaleWeight(v)!)
+    expect(thirds.reduce((a, b) => a + b, 0)).toBe(FULL_PERCENT)
+    expect(FULL_PERCENT).toBe(100 * WEIGHT_SCALE)
+  })
+
+  it('refuses what the column could not store as written', () => {
+    // Postgres ROUNDS a fifth decimal into `numeric(12,4)` rather than
+    // erroring, so this refusal is the only thing keeping the stored intent
+    // equal to the entered one.
+    expect(scaleWeight('33.33333')).toBeNull()
+    expect(scaleWeight('999999999')).toBeNull()
+    expect(scaleWeight('-1')).toBeNull()
+    expect(scaleWeight('')).toBeNull()
+    expect(scaleWeight('abc')).toBeNull()
+  })
+
+  it('round-trips back to what was typed', () => {
+    for (const entered of ['0', '1', '2', '1.5', '33.33', '14.29', '0.0001', '99.9999']) {
+      expect(unscaleWeight(scaleWeight(entered)!)).toBe(entered)
+    }
+  })
+
+  it('is the same rule the domain enforces', () => {
+    // Stated as an execution rather than as a comment: the message the write
+    // refuses with names this module's limit, and the split it accepts is the
+    // one this module says sums to 100.
+    expect(() => resolveShares(10000, people(2, ['50.00001', '49.99999']), 'percentage'))
+      .toThrow(/at most 4 decimal places/)
+    expect(cents(resolveShares(10000, people(3, ['33.33', '33.33', '33.34']), 'percentage')))
+      .toEqual([3333, 3333, 3334])
   })
 })

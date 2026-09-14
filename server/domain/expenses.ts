@@ -6,6 +6,7 @@ import { baseCurrencyWithin, instanceBaseCurrency } from './instance-settings'
 import { guestUser } from '../database/schema/auth'
 import { assertEventOpenToGuests, assertParticipant, assertPlanner, loadEventBySlug, type ParticipantRole } from './permissions'
 import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
+import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '../../shared/utils/split-weight'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
@@ -26,8 +27,14 @@ import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
  * `resolveShares` at write time and stored materialised, so nothing downstream
  * — a balance, a settlement, a total — knows there is more than one mode. What
  * the person meant is kept beside the amounts (`splitMode` on the expense, the
- * entered `weight` on each share) purely so an edit can re-split without them
- * re-typing it; no read ever computes money from either.
+ * entered `weight` on each share) so the screen can name the mode and an edit
+ * can start from it; no read ever computes money from either.
+ *
+ * That record is COMPLETE for `percentage` and `weight` (the numbers are on the
+ * shares) and for `exact` (the amounts are the shares). It is NOT complete for
+ * `even`, which honours explicit per-person amounts and splits the remainder
+ * across the rest: nothing records which participants were pinned, so a mixed
+ * `even` expense is the one an edit cannot re-split without asking again.
  */
 
 export type ExpenseCategory = 'travel' | 'accommodation' | 'food' | 'tickets' | 'other'
@@ -258,45 +265,20 @@ export function apportionCents(parts: number[], total: number, newTotal: number)
 }
 
 /**
- * The shape a percentage or a weight may take: at most eight digits before the
- * point and four after, which is `numeric(12, 4)`, the column it lands in.
- *
- * Four decimals is what makes a percentage split of three people possible at
- * all — `33.3333` three times is not 100, so the honest entry is
- * `33.33/33.33/33.34`, and refusing more precision than the column holds keeps
- * the stored intent equal to the entered one. Same reasoning as `FX_RATE_PATTERN`.
- */
-const WEIGHT_PATTERN = /^\d{1,8}(?:\.\d{1,4})?$/
-
-/** `numeric(12, 4)`: every weight is compared and summed as an integer at this scale. */
-const WEIGHT_SCALE = 10_000
-
-/** 100%, at `WEIGHT_SCALE`. What a percentage split has to add up to. */
-const FULL_PERCENT = 100 * WEIGHT_SCALE
-
-/**
- * A percentage or weight as an integer at `WEIGHT_SCALE`, so the sum-to-100
- * check is exact. `33.33` is `333300`; no float ever touches it, because
- * `0.1 + 0.2 !== 0.3` is precisely the shape of bug that makes a split of a
- * dinner bill wrong by a cent and a friend group stop trusting the screen.
+ * The scale and shape a percentage or weight is entered at live in
+ * `shared/utils/split-weight.ts`, because the form has to reach the SAME answer
+ * to show a running total — `99% of 100%` under the rows beats a refusal after
+ * the save. This file owns the refusal; that one owns the rule.
  */
 function scaleWeight(value: string | number, label: string): number {
-  const trimmed = `${value}`.trim()
-  if (!WEIGHT_PATTERN.test(trimmed)) {
+  const scaled = scaleWeightOrNull(value)
+  if (scaled === null) {
     throw createError({
       statusCode: 422,
       message: `${label} is a positive number with at most 4 decimal places, like 33.33`
     })
   }
-  const [whole, frac = ''] = trimmed.split('.')
-  return Number(whole) * WEIGHT_SCALE + Number(`${frac}0000`.slice(0, 4))
-}
-
-/** `333300` back to `'33.33'` — what gets stored, and what an edit reads back. */
-function unscaleWeight(scaled: number): string {
-  const whole = Math.floor(scaled / WEIGHT_SCALE)
-  const frac = `${scaled % WEIGHT_SCALE}`.padStart(4, '0').replace(/0+$/, '')
-  return frac ? `${whole}.${frac}` : `${whole}`
+  return scaled
 }
 
 /** `'33.33'` as a share of 100, rendered for a refusal message. */

@@ -628,6 +628,23 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   contains "a planner's account may write"          "$PAID" '"expenses"'
   contains "...and the row records WHO added it"    "$PAID" '"addedByName"'
 
+  # THE TWO SURFACES THE PRODUCT ACTUALLY WRITES TO (#26). `BudgetCard.vue`
+  # posts to /api/me on the invite page and to /api/host on the host page, and
+  # BOTH schemas gained a `splitMode` enum and a `weight` regex. The /api/v1
+  # block above cannot exercise either: it posts a third schema with a third
+  # credential. Narrow these two to `['even','exact']` with a `weight` regex
+  # matching nothing and every percentage and weight split a PERSON makes 400s,
+  # while vitest, the typecheck and the smoke floor all stay green. These four
+  # checks are the only thing that notices.
+  MEW='{"title":"Chalet by weight","amountCents":10000,"splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"2"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"}]}'
+  MEP99='{"title":"Off by one","amountCents":10000,"splitMode":"percentage","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"33"},{"name":"B","email":"b@e.com","weight":"33"},{"name":"C","email":"c@e.com","weight":"33"}]}'
+  contains "a weighted split over the ACCOUNT surface" "$(body "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$MEW")" '"amountCents":5000,"amountBaseCents":5000,"weight":"2"'
+  # 422 and not 400: the refusal has to come from the DOMAIN, having understood
+  # the mode, rather than from a schema that never let it through.
+  check "...and 99% is refused there by the domain" 422 "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$MEP99"
+  contains "...naming the sum on that surface too"  "$(body "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$MEP99")" 'add up to 99%, not 100%'
+  contains "a weighted split over the HOST surface"    "$(body "${PLANNER[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$TSLUG/expenses" -d "$MEW")" '"amountCents":5000,"amountBaseCents":5000,"weight":"2"'
+
   # The event LIFECYCLE check used to come free with `resolveInviteToken`.
   # Moving the write off the token dropped it, and an expense recorded happily
   # against a cancelled trip; `assertEventOpenToGuests` is that rule, shared.

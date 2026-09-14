@@ -2219,8 +2219,9 @@ components:
                 type: [string, 'null']
                 description: >-
                   The percentage or share count entered for this person under a
-                  percentage or weight split, kept so the expense can be re-split
-                  without it being typed again. null under even and exact.
+                  percentage or weight split, kept so those two modes can be
+                  re-split from the same numbers. null under even and exact,
+                  where the amounts are the whole of what was meant.
 
     Budget:
       type: object
