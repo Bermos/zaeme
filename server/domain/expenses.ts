@@ -6,6 +6,7 @@ import { baseCurrencyWithin, instanceBaseCurrency } from './instance-settings'
 import { guestUser } from '../database/schema/auth'
 import { assertEventOpenToGuests, assertParticipant, assertPlanner, loadEventBySlug, type ParticipantRole } from './permissions'
 import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
+import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '../../shared/utils/split-weight'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
@@ -20,15 +21,59 @@ import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
  * this file is computed from `amountBaseCents` alone. `currency` used to be
  * stored, typed and rendered while nothing summed with it — one €120 dinner on
  * a CHF trip was added as 12000 CHF cents, confidently and silently.
+ *
+ * SPLIT MODES (#26). An expense can be divided evenly, by exact per-person
+ * amounts, by percentage, or by weight. All four are resolved to cents by
+ * `resolveShares` at write time and stored materialised, so nothing downstream
+ * — a balance, a settlement, a total — knows there is more than one mode. What
+ * the person meant is kept beside the amounts (`splitMode` on the expense, the
+ * entered `weight` on each share) so the screen can name the mode and an edit
+ * can start from it; no read ever computes money from either.
+ *
+ * That record is COMPLETE for `percentage` and `weight` (the numbers are on the
+ * shares) and for `exact` (the amounts are the shares). It is NOT complete for
+ * `even`, which honours explicit per-person amounts and splits the remainder
+ * across the rest: nothing records which participants were pinned, so a mixed
+ * `even` expense is the one an edit cannot re-split without asking again.
  */
 
 export type ExpenseCategory = 'travel' | 'accommodation' | 'food' | 'tickets' | 'other'
 
+/**
+ * How a total is divided across the people it is split between (#26).
+ *
+ * - `even` — what every expense did before this existed, and still the default:
+ *   explicit per-person amounts are honoured, and whatever is left of the total
+ *   is split evenly across everybody else.
+ * - `exact` — every person carries their own amount and the amounts must sum to
+ *   the total. The strict form of the above: nothing is inferred, so a typo is
+ *   refused instead of quietly landing on whoever had no amount.
+ * - `percentage` — each person's `weight` is their percentage, and the
+ *   percentages must sum to 100.
+ * - `weight` — each person's `weight` is a share count ("Ana counts double" is
+ *   2). Any positive total works; a weight of 0 means "not in this one".
+ *
+ * The mode is a record of INTENT. It is resolved to cents at write time and no
+ * read re-derives anything from it.
+ */
+export type SplitMode = 'even' | 'exact' | 'percentage' | 'weight'
+
 export interface ExpenseParticipantInput {
   name: string
   email: string
-  /** Explicit share in cents; omit for an even split of the remainder. */
+  /**
+   * This person's share in cents. Optional under `even` (omit it and they take
+   * an even slice of the remainder), required under `exact`, and refused under
+   * `percentage` and `weight`, where `weight` says what they owe instead.
+   */
   amountCents?: number
+  /**
+   * The percentage (`percentage`) or the share count (`weight`) as ENTERED —
+   * `33.33`, or `2` for someone who counts double. Required under those two
+   * modes and refused under the other two, where it would be a second source of
+   * truth beside an amount.
+   */
+  weight?: string | number
 }
 
 export interface AddExpenseInput {
@@ -48,6 +93,12 @@ export interface AddExpenseInput {
   note?: string | null
   paidByName: string
   paidByEmail: string
+  /**
+   * How to divide the total. Defaults to `even`, which is exactly what every
+   * expense did before this field existed — an omitted `splitMode` is not a
+   * new behaviour anywhere.
+   */
+  splitMode?: SplitMode
   /** Who the cost is split across (usually the trip's yes-RSVPs, payer included). */
   participants: ExpenseParticipantInput[]
 }
@@ -64,6 +115,8 @@ export interface ExpenseView {
   baseCurrency: string
   /** The rate this row was converted at, as a decimal string. `'1'` in base. */
   fxRate: string
+  /** How the total was divided (#26). A record of intent; nothing re-derives from it. */
+  splitMode: SplitMode
   paidByName: string
   paidByEmail: string
   note: string | null
@@ -76,7 +129,14 @@ export interface ExpenseView {
    */
   addedByName: string | null
   addedByEmail: string | null
-  shares: Array<{ name: string, email: string, amountCents: number, amountBaseCents: number }>
+  shares: Array<{
+    name: string
+    email: string
+    amountCents: number
+    amountBaseCents: number
+    /** The percentage or share count entered for this person, or null. */
+    weight: string | null
+  }>
 }
 
 /**
@@ -205,18 +265,44 @@ export function apportionCents(parts: number[], total: number, newTotal: number)
 }
 
 /**
- * Resolve an expense's participant list into materialised shares: explicit
- * amounts are honoured, the rest of the total is split evenly across the
- * participants without one. Throws 422 when the explicit amounts alone
- * overshoot the total or leave nothing valid to distribute.
+ * The scale and shape a percentage or weight is entered at live in
+ * `shared/utils/split-weight.ts`, because the form has to reach the SAME answer
+ * to show a running total — `99% of 100%` under the rows beats a refusal after
+ * the save. This file owns the refusal; that one owns the rule.
  */
-export function resolveShares(
-  amountCents: number,
-  participants: ExpenseParticipantInput[]
-): Array<{ name: string, email: string, amountCents: number }> {
+function scaleWeight(value: string | number, label: string): number {
+  const scaled = scaleWeightOrNull(value)
+  if (scaled === null) {
+    throw createError({
+      statusCode: 422,
+      message: `${label} is a positive number with at most 4 decimal places, like 33.33`
+    })
+  }
+  return scaled
+}
+
+/** `'33.33'` as a share of 100, rendered for a refusal message. */
+function percentText(scaled: number): string {
+  return `${unscaleWeight(scaled)}%`
+}
+
+interface ResolvedShare {
+  name: string
+  email: string
+  amountCents: number
+  /** The entered percentage or weight, canonicalised; null under `even`/`exact`. */
+  weight: string | null
+}
+
+/**
+ * Deduplicate the participant list by email (first mention wins) and refuse an
+ * empty one. Every mode starts here, so "Ana twice" cannot become two shares
+ * under one mode and one under another.
+ */
+function cleanParticipants(participants: ExpenseParticipantInput[]): ExpenseParticipantInput[] {
   const seen = new Set<string>()
   const cleaned = participants
-    .map(p => ({ name: p.name, email: p.email.toLowerCase(), amountCents: p.amountCents }))
+    .map(p => ({ ...p, email: p.email.toLowerCase() }))
     .filter((p) => {
       if (seen.has(p.email)) return false
       seen.add(p.email)
@@ -224,6 +310,48 @@ export function resolveShares(
     })
   if (cleaned.length === 0) {
     throw createError({ statusCode: 422, message: 'An expense needs at least one participant' })
+  }
+  return cleaned
+}
+
+/**
+ * Resolve an expense's participant list into materialised shares that sum to
+ * `amountCents` EXACTLY, whichever mode was asked for.
+ *
+ * Every mode lands in the same place — a list of cents — because shares are
+ * materialised at write time and a balance is a plain sum. The mode only
+ * decides how the arithmetic gets there, and the cent-by-cent remainder
+ * distribution (`splitEvenlyCents` for `even`, `apportionCents` for the
+ * proportional modes) is what makes "exactly" true for every total, including
+ * the ones that do not divide.
+ *
+ * Throws 422 on anything that does not add up, naming the sum it got: the
+ * person typing 33/33/33 needs to be told it is 99, not that "something is
+ * wrong".
+ */
+export function resolveShares(
+  amountCents: number,
+  participants: ExpenseParticipantInput[],
+  splitMode: SplitMode = 'even'
+): ResolvedShare[] {
+  const cleaned = cleanParticipants(participants)
+
+  if (splitMode === 'percentage' || splitMode === 'weight') {
+    return resolveProportional(amountCents, cleaned, splitMode)
+  }
+
+  if (cleaned.some(p => p.weight !== undefined && p.weight !== null)) {
+    throw createError({
+      statusCode: 422,
+      message: 'A percentage or weight only means something on a percentage or weight split'
+    })
+  }
+
+  if (splitMode === 'exact' && cleaned.some(p => p.amountCents === undefined)) {
+    throw createError({
+      statusCode: 422,
+      message: 'An exact split needs an amount for everybody it is split between'
+    })
   }
 
   const fixed = cleaned.filter(p => p.amountCents !== undefined)
@@ -245,7 +373,65 @@ export function resolveShares(
   return cleaned.map(p => ({
     name: p.name,
     email: p.email,
-    amountCents: p.amountCents !== undefined ? p.amountCents : evenShares[flexIndex++]!
+    amountCents: p.amountCents !== undefined ? p.amountCents : evenShares[flexIndex++]!,
+    weight: null
+  }))
+}
+
+/**
+ * `percentage` and `weight`: the same arithmetic over the same column, differing
+ * only in what the number has to add up to. Percentages must total 100; weights
+ * may total anything above zero, because "Ana counts double" is 2/1/1 and
+ * nobody should have to turn that into 50/25/25 themselves.
+ *
+ * The distribution is `apportionCents` — the very function that keeps converted
+ * shares summing to the converted total — so the remainder lands cent by cent
+ * on the largest fractional parts rather than on whoever happens to be last.
+ */
+function resolveProportional(
+  amountCents: number,
+  cleaned: ExpenseParticipantInput[],
+  splitMode: 'percentage' | 'weight'
+): ResolvedShare[] {
+  const label = splitMode === 'percentage' ? 'A percentage' : 'A weight'
+  if (cleaned.some(p => p.amountCents !== undefined)) {
+    throw createError({
+      statusCode: 422,
+      message: `A ${splitMode} split takes ${splitMode === 'percentage' ? 'percentages' : 'weights'}, not per-person amounts`
+    })
+  }
+  const weights = cleaned.map((p) => {
+    if (p.weight === undefined || p.weight === null || `${p.weight}`.trim() === '') {
+      throw createError({
+        statusCode: 422,
+        message: splitMode === 'percentage'
+          ? `${p.name} has no percentage — give everybody one, or 0 to leave them out of this expense`
+          : `${p.name} has no weight — give everybody one, or 0 to leave them out of this expense`
+      })
+    }
+    return scaleWeight(p.weight, label)
+  })
+
+  const total = weights.reduce((sum, w) => sum + w, 0)
+  if (splitMode === 'percentage' && total !== FULL_PERCENT) {
+    throw createError({
+      statusCode: 422,
+      message: `Those percentages add up to ${percentText(total)}, not 100%`
+    })
+  }
+  if (total <= 0) {
+    throw createError({
+      statusCode: 422,
+      message: 'At least one person needs a weight above zero, or there is nobody to split this between'
+    })
+  }
+
+  const shares = apportionCents(weights, total, amountCents)
+  return cleaned.map((p, i) => ({
+    name: p.name,
+    email: p.email.toLowerCase(),
+    amountCents: shares[i]!,
+    weight: unscaleWeight(weights[i]!)
   }))
 }
 
@@ -314,11 +500,12 @@ export function suggestSettlements(balances: BalanceView[]): SettlementView[] {
 }
 
 /**
- * `numeric(20, 10)` comes back from Postgres padded to its scale —
- * `'0.9412000000'` — which is the same number and a worse thing to show a
- * person or hand a client. Trailing zeros off, decimal point with them.
+ * A `numeric` column comes back from Postgres padded to its scale —
+ * `'0.9412000000'` for the rate, `'2.0000'` for a weight — which is the same
+ * number and a worse thing to show a person or hand a client. Trailing zeros
+ * off, decimal point with them.
  */
-function trimRate(stored: string): string {
+function trimDecimal(stored: string): string {
   return stored.includes('.') ? stored.replace(/0+$/, '').replace(/\.$/, '') : stored
 }
 
@@ -369,7 +556,8 @@ export async function loadBudget(eventId: string): Promise<{
     currency: r.currency,
     amountBaseCents: r.amountBaseCents,
     baseCurrency: r.baseCurrency,
-    fxRate: trimRate(r.fxRate),
+    fxRate: trimDecimal(r.fxRate),
+    splitMode: r.splitMode,
     paidByName: r.paidByName,
     paidByEmail: r.paidByEmail,
     note: r.note,
@@ -378,7 +566,13 @@ export async function loadBudget(eventId: string): Promise<{
     addedByEmail: addedByEmail?.toLowerCase() ?? null,
     shares: shares
       .filter(s => s.expenseId === r.id)
-      .map(s => ({ name: s.name, email: s.email, amountCents: s.amountCents, amountBaseCents: s.amountBaseCents }))
+      .map(s => ({
+        name: s.name,
+        email: s.email,
+        amountCents: s.amountCents,
+        amountBaseCents: s.amountBaseCents,
+        weight: s.weight === null ? null : trimDecimal(s.weight)
+      }))
   }))
 
   const balances = computeBalances(expenses)
@@ -481,11 +675,14 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
   if (input.amountCents > MAX_CENTS) {
     throw createError({ statusCode: 422, message: 'That is more money than one expense can hold' })
   }
-  const resolved = resolveShares(input.amountCents, input.participants)
+  const splitMode = input.splitMode ?? 'even'
+  const resolved = resolveShares(input.amountCents, input.participants, splitMode)
   const { currency, baseCurrency, fxRate, amountBaseCents } = await resolveConversion(input)
   // Apportioned as a group against the CONVERTED TOTAL, so the base shares add
-  // up to it exactly — the same guarantee `splitEvenlyCents` gives in the
-  // currency the money was actually spent in.
+  // up to it exactly — the same guarantee `resolveShares` gives in the currency
+  // the money was actually spent in, whichever mode produced them. The two
+  // guarantees compose: a 2/1/1 weighted EUR dinner sums to the euros spent AND
+  // to the francs it settles for, and neither sum needs the other to be tidy.
   const baseShares = apportionCents(resolved.map(s => s.amountCents), input.amountCents, amountBaseCents)
   const expenseId = createId()
   const db = useDb()
@@ -515,6 +712,7 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
       baseCurrency,
       fxRate,
       amountBaseCents,
+      splitMode,
       paidByName: input.paidByName,
       paidByEmail: input.paidByEmail.toLowerCase(),
       note: input.note ?? null,
@@ -528,7 +726,8 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
       name: share.name,
       email: share.email,
       amountCents: share.amountCents,
-      amountBaseCents: baseShares[i]!
+      amountBaseCents: baseShares[i]!,
+      weight: share.weight
     })))
   })
 

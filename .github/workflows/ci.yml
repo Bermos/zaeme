@@ -152,11 +152,29 @@ jobs:
       # the budget COMPUTES — `currency` was stored, typed and rendered for
       # months while nothing summed with it.
       #
+      # 188 -> 217 with #26, twenty-nine checks that EXECUTE a split: a
+      # weighted 2/1/1 whose 5000 no even split of 100.00 could produce, a
+      # weight of 0 that leaves somebody out (the one part of that fixture the
+      # default gets wrong, and therefore the part asserted), a percentage split
+      # down to its smallest slice, the 99 and 101 refusals with the sum NAMED
+      # in each, exact amounts and the three ways they are refused, seven people
+      # and 100.00 reconciled through the balances, and a weighted EUR expense
+      # whose shares sum exactly in the euros spent AND in the francs it settles
+      # for. The fixtures are lopsided on purpose: 1/1/1/1 across 100.00 is
+      # 25/25/25/25 under every mode there is, and proves none of them.
+      #
+      # …plus FOUR on the surfaces a person actually writes to. Those 29 all
+      # post to /api/v1 with the service token, and `BudgetCard.vue` posts to
+      # /api/me and /api/host — two more schemas, each with its own `splitMode`
+      # enum and `weight` regex that nothing else in this file executes. Narrow
+      # either of them and every percentage and weight split in the PRODUCT 400s
+      # with vitest, the typecheck and this floor all still green. 217 -> 221.
+      #
       # Keep this EXACT. A floor that is slack by the width of somebody else's
       # group is a floor that lets that group stop running — which is the silent
       # degradation this assertion exists to prevent, arriving by rebase rather
       # than by rename.
-      MIN_SMOKE_CHECKS: '188'
+      MIN_SMOKE_CHECKS: '221'
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
       # falls through to the dry run, which is what lets the magic-link sign-in
       # below read its token out of the database instead of out of an inbox.

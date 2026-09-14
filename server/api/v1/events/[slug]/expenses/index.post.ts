@@ -12,6 +12,15 @@ import { expense } from '#server/utils/v1-shapes'
  * (#25). Pass `fxRate` to pin the conversion yourself — otherwise the rate is
  * fetched, and a fetch that comes back empty is a 422 naming this field rather
  * than an expense recorded at a rate nobody chose.
+ *
+ * `splitMode` (#26) divides the total another way: `exact` per-person amounts,
+ * `percentage` (which must sum to 100), or `weight` — "Ana counts double" is 2,
+ * and 0 leaves somebody out of this one. Under those last two each participant
+ * carries `weight` instead of `amountCents`.
+ *
+ * It is OPTIONAL and defaults to `even`, which is precisely what this route did
+ * before the field existed: a caller that never sends it sees no change in any
+ * request or any response field it already reads.
  */
 const bodySchema = z.object({
   title: z.string().min(1).max(200),
@@ -22,10 +31,12 @@ const bodySchema = z.object({
   note: z.string().max(500).optional(),
   paidByName: z.string().min(1).max(200),
   paidByEmail: z.email(),
+  splitMode: z.enum(['even', 'exact', 'percentage', 'weight']).optional(),
   participants: z.array(z.object({
     name: z.string().min(1).max(200),
     email: z.email(),
-    amountCents: z.number().int().min(0).optional()
+    amountCents: z.number().int().min(0).optional(),
+    weight: z.string().regex(/^\d{1,8}(\.\d{1,4})?$/).optional()
   }).strict()).min(1).max(50)
 }).strict()
 

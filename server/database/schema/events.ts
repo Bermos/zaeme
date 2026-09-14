@@ -345,6 +345,28 @@ export const expense = pgTable('events_expense', {
    * arithmetic is a plain sum and history cannot drift.
    */
   amountBaseCents: integer('amount_base_cents').notNull(),
+  /**
+   * How the total was divided (#26): evenly, by exact per-person amounts, by
+   * percentage, or by weight ("Ana counts double").
+   *
+   * A RECORD OF INTENT, not an instruction. The shares are already materialised
+   * below, so no read re-derives anything from this column; it exists so the
+   * screen can say "split by weight" instead of showing four numbers with no
+   * explanation, and so an edit can offer the mode back rather than starting
+   * from `even` every time.
+   *
+   * WHAT IT DOES NOT RECOVER. `even` honours explicit per-person amounts and
+   * splits the remainder across everybody else, and this column records nothing
+   * about WHICH participants were pinned — the shares are cents either way. So
+   * a mixed `even` expense is the one case an edit cannot re-split from the row
+   * alone; `percentage`, `weight` (the entered numbers are on each share) and
+   * `exact` (the amounts ARE the shares) all can. #27 is where that matters.
+   *
+   * No DEFAULT, for the same reason as the three conversion columns above:
+   * `addExpense` always writes it, and an insert that forgets it should abort
+   * rather than claim an even split nothing ever checked.
+   */
+  splitMode: text('split_mode', { enum: ['even', 'exact', 'percentage', 'weight'] }).notNull(),
   /** Who fronted the money — same name+email identity as RSVPs. */
   paidByName: text('paid_by_name').notNull(),
   paidByEmail: text('paid_by_email').notNull(),
@@ -370,8 +392,8 @@ export const expense = pgTable('events_expense', {
 
 /**
  * One participant's slice of an expense. Shares are materialised amounts (the
- * even-split remainder distribution happens at write time), so balances are a
- * plain sum — no split-mode arithmetic at read time.
+ * remainder distribution happens at write time, whatever the split mode was),
+ * so balances are a plain sum — no split-mode arithmetic at read time.
  */
 export const expenseShare = pgTable('events_expense_share', {
   id: text('id').primaryKey(),
@@ -380,6 +402,20 @@ export const expenseShare = pgTable('events_expense_share', {
   name: text('name').notNull(),
   email: text('email').notNull(),
   amountCents: integer('amount_cents').notNull(),
+  /**
+   * What this person had ENTERED for them under a `percentage` or `weight`
+   * split — `33.33` or `2` — and null under `even` and `exact`, where the
+   * amounts are the whole of what was meant (#26).
+   *
+   * Kept only so an edit of a `percentage` or `weight` expense can re-split from
+   * the same numbers rather than asking for them again — an `even` expense with
+   * some amounts pinned has no equivalent record, and #27 will have to ask.
+   * `amount_cents` stays the source of truth for every balance: nothing reads
+   * this column to compute money, which is why a row whose weight says 2 and
+   * whose amount says otherwise is a display problem and never a wrong
+   * settlement.
+   */
+  weight: numeric('weight', { precision: 12, scale: 4 }),
   /**
    * The same slice in BASE cents, apportioned at write time so the base shares
    * sum to the expense's `amount_base_cents` EXACTLY (largest remainder, same
