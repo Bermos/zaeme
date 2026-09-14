@@ -102,7 +102,7 @@ equals() {
 # THE LEDGER HELPERS (#61). The budget is double-entry now, and the one
 # assertion worth more than all the others is that every entry's lines sum to
 # zero. That is arithmetic over a JSON array, which sed cannot do honestly — so
-# these three shell out to node, which every machine that can build this app
+# these four shell out to node, which every machine that can build this app
 # already has.
 
 # `ledger_imbalance <budget-json>` — the WORST absolute imbalance across every
