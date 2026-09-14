@@ -2,14 +2,24 @@ import { and, asc, eq, inArray } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
+import { baseCurrencyWithin, instanceBaseCurrency } from './instance-settings'
 import { guestUser } from '../database/schema/auth'
 import { assertEventOpenToGuests, assertParticipant, assertPlanner, loadEventBySlug, type ParticipantRole } from './permissions'
+import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
  * the resulting who-owes-whom. Money is integer cents throughout (no float
  * money); shares are materialised at write time so balances are a plain sum.
  * Identity is the same name+email pair RSVPs use.
+ *
+ * MIXED CURRENCIES (#25). An expense is recorded in the currency it was spent
+ * in and converted ONCE, at write time, into the instance base currency
+ * (`server/domain/instance-settings.ts`). Both the rate and the converted
+ * amount are frozen onto the row, and every balance, settlement and total in
+ * this file is computed from `amountBaseCents` alone. `currency` used to be
+ * stored, typed and rendered while nothing summed with it — one €120 dinner on
+ * a CHF trip was added as 12000 CHF cents, confidently and silently.
  */
 
 export type ExpenseCategory = 'travel' | 'accommodation' | 'food' | 'tickets' | 'other'
@@ -24,8 +34,17 @@ export interface ExpenseParticipantInput {
 export interface AddExpenseInput {
   title: string
   category?: ExpenseCategory
+  /** The total AS SPENT, in `currency`. */
   amountCents: number
+  /** What was handed over. Defaults to the instance base currency. */
   currency?: string
+  /**
+   * The rate from `currency` into the instance base, supplied by hand. Omit it
+   * and the rate is fetched once at write time; supply it and NOTHING is
+   * fetched, which is both the override and the answer to an instance with no
+   * outbound network.
+   */
+  fxRate?: string | number
   note?: string | null
   paidByName: string
   paidByEmail: string
@@ -37,8 +56,14 @@ export interface ExpenseView {
   id: string
   title: string
   category: ExpenseCategory
+  /** As spent, in `currency`. */
   amountCents: number
   currency: string
+  /** As settled: the frozen conversion of `amountCents` into `baseCurrency`. */
+  amountBaseCents: number
+  baseCurrency: string
+  /** The rate this row was converted at, as a decimal string. `'1'` in base. */
+  fxRate: string
   paidByName: string
   paidByEmail: string
   note: string | null
@@ -51,9 +76,15 @@ export interface ExpenseView {
    */
   addedByName: string | null
   addedByEmail: string | null
-  shares: Array<{ name: string, email: string, amountCents: number }>
+  shares: Array<{ name: string, email: string, amountCents: number, amountBaseCents: number }>
 }
 
+/**
+ * Per-person standing, in BASE cents throughout. The field names carry no
+ * `base` because there has never been a balance in anything else and Enterprise
+ * already generates a client from them — renaming them would break that client
+ * to say something the `currency` beside them already says.
+ */
 export interface BalanceView {
   name: string
   email: string
@@ -83,6 +114,94 @@ export function splitEvenlyCents(totalCents: number, count: number): number[] {
   const base = Math.floor(totalCents / count)
   const remainder = totalCents - base * count
   return Array.from({ length: count }, (_, i) => base + (i < remainder ? 1 : 0))
+}
+
+/**
+ * The widest amount either cents column can hold. They are `integer` (int4),
+ * and money that overruns one is a Postgres `integer out of range` escaping as
+ * an unhandled 500 — from a handler whose 422 already has a message field for
+ * exactly this. CHF 21 million is not a friend-group budget; the bound is here
+ * to make the refusal legible, not to be a policy.
+ */
+export const MAX_CENTS = 2_147_483_647
+
+/**
+ * The shape an exchange rate is allowed to take: at most nine digits before the
+ * point and at most ten after, which is `numeric(20, 10)`, the column it lands
+ * in.
+ *
+ * The fractional cap is not cosmetic. A rate with more decimals than the column
+ * holds is silently ROUNDED on storage while `amount_base_cents` was computed
+ * at full precision, so the row that comes back violates the invariant the
+ * contract states — `amountCents × fxRate = amountBaseCents` — and no error is
+ * raised anywhere. Refusing the input is the only way that pair stays true.
+ */
+const FX_RATE_PATTERN = /^\d{1,9}(?:\.\d{1,10})?$/
+
+/**
+ * `cents × rate`, rounded half up, with no floating point anywhere: the rate is
+ * a decimal STRING and the multiplication runs in BigInt over its scale. A
+ * `Number` multiplication is off by a cent often enough to matter on a
+ * three-way split, and "off by a cent" in a settlement plan is a bug report.
+ *
+ * Throws 422 on a rate that is not a positive decimal of a storable shape, or
+ * on a product that would not fit the column. The only caller that can produce
+ * either is a human typing into the override field.
+ */
+export function convertCents(cents: number, rate: string): number {
+  const trimmed = rate.trim()
+  if (!FX_RATE_PATTERN.test(trimmed)) {
+    throw createError({
+      statusCode: 422,
+      message: 'An exchange rate is a positive decimal number with at most 10 decimal places, like 0.9412'
+    })
+  }
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(trimmed)!
+  const frac = m[2] ?? ''
+  const numerator = BigInt(m[1] + frac)
+  const denominator = 10n ** BigInt(frac.length)
+  if (numerator === 0n) {
+    throw createError({ statusCode: 422, message: 'An exchange rate cannot be zero' })
+  }
+  const scaled = BigInt(Math.round(cents)) * numerator
+  const whole = scaled / denominator
+  const remainder = scaled % denominator
+  const converted = remainder * 2n >= denominator ? whole + 1n : whole
+  if (converted > BigInt(MAX_CENTS)) {
+    throw createError({ statusCode: 422, message: 'That amount and rate convert to more money than an expense can hold' })
+  }
+  return Number(converted)
+}
+
+/**
+ * Re-express `parts` (which sum to `total`) so they sum to `newTotal` EXACTLY,
+ * by largest remainder: floor each proportional share, then hand the leftover
+ * cents out one at a time to the largest fractional parts.
+ *
+ * This is why shares are converted as a GROUP rather than one at a time.
+ * Converting each share on its own rounds each one independently, and three
+ * roundings of 3333.33 do not add up to the converted total — the budget then
+ * shows a total nobody owes, which is exactly the kind of quiet cent that makes
+ * a friend group stop trusting the numbers.
+ */
+export function apportionCents(parts: number[], total: number, newTotal: number): number[] {
+  if (parts.length === 0) return []
+  if (total <= 0) return parts.map(() => 0)
+  const big = BigInt(total)
+  const scaled = parts.map(p => BigInt(p) * BigInt(newTotal))
+  const floors = scaled.map(v => v / big)
+  const remainders = scaled.map(v => v % big)
+  let leftover = BigInt(newTotal) - floors.reduce((sum, v) => sum + v, 0n)
+  const order = parts
+    .map((_, i) => i)
+    .sort((a, b) => (remainders[b]! === remainders[a]! ? a - b : (remainders[b]! > remainders[a]! ? 1 : -1)))
+  const out = floors.map(v => v)
+  for (const i of order) {
+    if (leftover <= 0n) break
+    out[i] = out[i]! + 1n
+    leftover -= 1n
+  }
+  return out.map(Number)
 }
 
 /**
@@ -130,7 +249,13 @@ export function resolveShares(
   }))
 }
 
-/** Per-person balances (paid − owed) across a list of expenses. */
+/**
+ * Per-person balances (paid − owed) across a list of expenses, in BASE cents.
+ *
+ * This function used to add `amountCents` across every expense whatever
+ * currency it named, which is the whole of #25. It reads `amountBaseCents` and
+ * nothing else; the as-spent figures exist to be shown, never to be summed.
+ */
 export function computeBalances(expenses: ExpenseView[]): BalanceView[] {
   const byEmail = new Map<string, BalanceView>()
   const touch = (name: string, email: string): BalanceView => {
@@ -142,9 +267,9 @@ export function computeBalances(expenses: ExpenseView[]): BalanceView[] {
     return b
   }
   for (const exp of expenses) {
-    touch(exp.paidByName, exp.paidByEmail.toLowerCase()).paidCents += exp.amountCents
+    touch(exp.paidByName, exp.paidByEmail.toLowerCase()).paidCents += exp.amountBaseCents
     for (const share of exp.shares) {
-      touch(share.name, share.email.toLowerCase()).owedCents += share.amountCents
+      touch(share.name, share.email.toLowerCase()).owedCents += share.amountBaseCents
     }
   }
   const balances = [...byEmail.values()]
@@ -156,6 +281,10 @@ export function computeBalances(expenses: ExpenseView[]): BalanceView[] {
  * Greedy settlement plan: repeatedly match the largest debtor with the largest
  * creditor. Not guaranteed minimal in pathological cases, but at friend-group
  * scale it produces the short "A pays B" list people actually want.
+ *
+ * Base cents, like the balances it clears — a settlement is a single figure one
+ * friend hands another, so it is stated in the one currency the instance
+ * settles up in and never in the currency of whatever was bought.
  */
 export function suggestSettlements(balances: BalanceView[]): SettlementView[] {
   const creditors = balances.filter(b => b.netCents > 0).map(b => ({ ...b }))
@@ -184,17 +313,36 @@ export function suggestSettlements(balances: BalanceView[]): SettlementView[] {
   return plan
 }
 
+/**
+ * `numeric(20, 10)` comes back from Postgres padded to its scale —
+ * `'0.9412000000'` — which is the same number and a worse thing to show a
+ * person or hand a client. Trailing zeros off, decimal point with them.
+ */
+function trimRate(stored: string): string {
+  return stored.includes('.') ? stored.replace(/0+$/, '').replace(/\.$/, '') : stored
+}
+
 /* --------------------------------- reads ---------------------------------- */
 
-/** All expenses with their shares, plus balances and a settlement plan. */
+/**
+ * All expenses with their shares, plus balances and a settlement plan.
+ *
+ * `currency` is the INSTANCE BASE CURRENCY — the one thing every figure below
+ * `expenses` is denominated in. It used to be `expenses[0]?.currency`, i.e.
+ * whichever row came back first, which is how a budget could be labelled EUR
+ * while the numbers under it were a sum of CHF and GBP cents.
+ */
 export async function loadBudget(eventId: string): Promise<{
   expenses: ExpenseView[]
   balances: BalanceView[]
   settlements: SettlementView[]
+  /** The sum of every expense IN BASE CENTS. */
   totalCents: number
+  /** The instance base currency: what `totalCents`, balances and settlements are in. */
   currency: string
 }> {
   const db = useDb()
+  const baseCurrency = await instanceBaseCurrency()
   const rows = await db
     .select({
       expense: tables.expense,
@@ -219,6 +367,9 @@ export async function loadBudget(eventId: string): Promise<{
     category: r.category as ExpenseCategory,
     amountCents: r.amountCents,
     currency: r.currency,
+    amountBaseCents: r.amountBaseCents,
+    baseCurrency: r.baseCurrency,
+    fxRate: trimRate(r.fxRate),
     paidByName: r.paidByName,
     paidByEmail: r.paidByEmail,
     note: r.note,
@@ -227,7 +378,7 @@ export async function loadBudget(eventId: string): Promise<{
     addedByEmail: addedByEmail?.toLowerCase() ?? null,
     shares: shares
       .filter(s => s.expenseId === r.id)
-      .map(s => ({ name: s.name, email: s.email, amountCents: s.amountCents }))
+      .map(s => ({ name: s.name, email: s.email, amountCents: s.amountCents, amountBaseCents: s.amountBaseCents }))
   }))
 
   const balances = computeBalances(expenses)
@@ -235,9 +386,34 @@ export async function loadBudget(eventId: string): Promise<{
     expenses,
     balances,
     settlements: suggestSettlements(balances),
-    totalCents: expenses.reduce((sum, e) => sum + e.amountCents, 0),
-    currency: expenses[0]?.currency ?? 'CHF'
+    totalCents: expenses.reduce((sum, e) => sum + e.amountBaseCents, 0),
+    currency: baseCurrency
   }
+}
+
+/**
+ * What the expense form shows before anything is saved: the instance base
+ * currency, and today's rate into it if one can be had.
+ *
+ * `rate: null` is an ordinary answer — the currency is not on the ECB's list,
+ * the instance has no outbound network, frankfurter is down. The form then asks
+ * for the rate by hand, and the write accepts it. Nothing about recording an
+ * expense waits on this call succeeding.
+ */
+export async function quoteExpenseRate(currency: string): Promise<{
+  currency: string
+  baseCurrency: string
+  rate: string | null
+  asOf: string | null
+}> {
+  const baseCurrency = await instanceBaseCurrency()
+  const from = normaliseCurrency(currency || baseCurrency)
+  if (!isCurrencyCode(from)) {
+    throw createError({ statusCode: 422, message: 'A currency is a three-letter code, like CHF or EUR.' })
+  }
+  if (from === baseCurrency) return { currency: from, baseCurrency, rate: '1', asOf: null }
+  const quote = await fetchFxRate(from, baseCurrency)
+  return { currency: from, baseCurrency, rate: quote?.rate ?? null, asOf: quote?.asOf ?? null }
 }
 
 /* --------------------------------- writes --------------------------------- */
@@ -257,36 +433,102 @@ export interface ParticipantActor {
   email: string
 }
 
+/**
+ * Settle the conversion for one expense: which base currency it is being
+ * recorded against, at what rate, and what that makes it worth.
+ *
+ * The outbound fetch happens HERE — before the transaction opens, and only when
+ * there is something to convert. An expense in the base currency never leaves
+ * the process, which is the ordinary case on an instance whose friends all
+ * spend the same money; an expense carrying its own `fxRate` never leaves the
+ * process either, which is the manual override AND the answer for an instance
+ * with no outbound network. Only the remaining case asks frankfurter, once,
+ * with a 2.5s ceiling — and when that comes back empty the write is refused
+ * with a message naming the field to fill in rather than being recorded at a
+ * rate nobody chose.
+ */
+async function resolveConversion(input: AddExpenseInput): Promise<{ currency: string, baseCurrency: string, fxRate: string, amountBaseCents: number }> {
+  const baseCurrency = await instanceBaseCurrency()
+  const currency = normaliseCurrency(input.currency ?? baseCurrency)
+  if (!isCurrencyCode(currency)) {
+    throw createError({ statusCode: 422, message: 'A currency is a three-letter code, like CHF or EUR.' })
+  }
+
+  let fxRate: string
+  if (currency === baseCurrency) {
+    fxRate = '1'
+  } else if (input.fxRate !== undefined && input.fxRate !== null && `${input.fxRate}`.trim() !== '') {
+    fxRate = `${input.fxRate}`.trim()
+  } else {
+    const quote = await fetchFxRate(currency, baseCurrency)
+    if (!quote) {
+      throw createError({
+        statusCode: 422,
+        message: `No ${currency} → ${baseCurrency} rate could be fetched just now. Enter the rate yourself and the expense will be recorded with it.`
+      })
+    }
+    fxRate = quote.rate
+  }
+
+  return { currency, baseCurrency, fxRate, amountBaseCents: convertCents(input.amountCents, fxRate) }
+}
+
 /** Record an expense with materialised shares, in one transaction. */
 export async function addExpense(eventId: string, input: AddExpenseInput, by: ExpenseActor) {
   if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
     throw createError({ statusCode: 422, message: 'The amount must be a positive number of cents' })
   }
+  if (input.amountCents > MAX_CENTS) {
+    throw createError({ statusCode: 422, message: 'That is more money than one expense can hold' })
+  }
   const resolved = resolveShares(input.amountCents, input.participants)
+  const { currency, baseCurrency, fxRate, amountBaseCents } = await resolveConversion(input)
+  // Apportioned as a group against the CONVERTED TOTAL, so the base shares add
+  // up to it exactly — the same guarantee `splitEvenlyCents` gives in the
+  // currency the money was actually spent in.
+  const baseShares = apportionCents(resolved.map(s => s.amountCents), input.amountCents, amountBaseCents)
   const expenseId = createId()
   const db = useDb()
 
   await db.transaction(async (tx) => {
+    // The base was read (and the rate fetched) OUTSIDE this transaction, because
+    // an outbound HTTP call must never be made with one open. Re-read it here
+    // and refuse if it moved: without this, an expense recorded while the owner
+    // is changing the instance base lands stamped with the old one — which is
+    // this issue's bug, in one row, produced by a race rather than by the
+    // arithmetic. See the note in `setInstanceBaseCurrency` for the half of
+    // this window that a re-read alone cannot close.
+    const current = await baseCurrencyWithin(tx)
+    if (current !== baseCurrency) {
+      throw createError({
+        statusCode: 409,
+        message: 'The instance base currency changed while this was being recorded. Try again.'
+      })
+    }
     await tx.insert(tables.expense).values({
       id: expenseId,
       eventId,
       title: input.title,
       category: input.category ?? 'other',
       amountCents: input.amountCents,
-      currency: (input.currency ?? 'CHF').toUpperCase(),
+      currency,
+      baseCurrency,
+      fxRate,
+      amountBaseCents,
       paidByName: input.paidByName,
       paidByEmail: input.paidByEmail.toLowerCase(),
       note: input.note ?? null,
       createdByUserId: by.userId,
       createdByGuestEmail: null
     })
-    await tx.insert(tables.expenseShare).values(resolved.map(share => ({
+    await tx.insert(tables.expenseShare).values(resolved.map((share, i) => ({
       id: createId(),
       expenseId,
       eventId,
       name: share.name,
       email: share.email,
-      amountCents: share.amountCents
+      amountCents: share.amountCents,
+      amountBaseCents: baseShares[i]!
     })))
   })
 

@@ -848,7 +848,11 @@ paths:
       description: >-
         Get a trip/event's budget: every expense with its shares, per-person
         balances (paid vs owed), and the suggested "who pays whom" settlement plan.
-        Amounts are integer cents.
+        Amounts are integer cents. Each expense carries BOTH what was spent
+        (amountCents in its own currency) and what it settles for
+        (amountBaseCents in the instance base currency, frozen at the fxRate it
+        was recorded at); `currency` on the budget is the instance base currency,
+        and totalCents, every balance and every settlement are in it.
       responses:
         '200':
           description: Expenses, balances and the settlement plan.
@@ -871,6 +875,12 @@ paths:
         Record an expense on a trip/event: who paid, the total in cents, and who it
         is split across. Participants without an explicit amountCents split the
         remainder evenly. Use the attendees' names and emails from listRsvps.
+
+        An expense in a currency other than the instance base is converted ONCE,
+        at write time, and the rate is frozen onto it — history never moves when
+        the market does. Pass fxRate to pin that conversion yourself; omit it and
+        the rate is fetched. If no rate can be fetched the call answers 422 and
+        names fxRate, rather than recording money at a rate nobody chose.
       requestBody:
         required: true
         content:
@@ -892,7 +902,19 @@ paths:
                   type: string
                   minLength: 3
                   maxLength: 3
-                  description: Defaults to CHF.
+                  description: >-
+                    What was actually spent. Defaults to the instance base currency.
+                fxRate:
+                  type: string
+                  pattern: '^[0-9]{1,9}(\.[0-9]{1,10})?$'
+                  description: >-
+                    Decimal string; amountCents x fxRate = amountBaseCents exactly.
+                    Supply it to pin the conversion (and to skip the rate fetch
+                    entirely); omit it and today's rate is fetched. Ignored when
+                    currency is already the instance base, where the rate is always 1.
+                    At most 10 decimal places, which is what the column stores: a
+                    longer rate would be rounded on the way in while amountBaseCents
+                    had been computed at full precision, breaking the equality above.
                 note: { type: string, maxLength: 500 }
                 paidByName: { type: string, minLength: 1, maxLength: 200 }
                 paidByEmail: { type: string, format: email }
@@ -2112,13 +2134,29 @@ components:
 
     Expense:
       type: object
-      required: [id, title, amountCents, currency, shares]
+      required: [id, title, amountCents, currency, amountBaseCents, baseCurrency, fxRate, shares]
+      description: >-
+        Two amounts, always. amountCents/currency is what was handed over;
+        amountBaseCents/baseCurrency is what it settles for, converted once at
+        fxRate when it was recorded and frozen there. Only the base figures are
+        ever summed.
       properties:
         id: { type: string }
         title: { type: string }
         category: { type: string, enum: [travel, accommodation, food, tickets, other] }
-        amountCents: { type: integer }
-        currency: { type: string }
+        amountCents: { type: integer, description: 'As spent, in `currency`.' }
+        currency: { type: string, description: 'What was actually spent.' }
+        amountBaseCents:
+          type: integer
+          description: 'As settled, in `baseCurrency`. The only figure balances are computed from.'
+        baseCurrency:
+          type: string
+          description: 'The instance base currency at the moment this expense was recorded.'
+        fxRate:
+          type: string
+          description: >-
+            Decimal string, frozen at write time: amountCents x fxRate = amountBaseCents.
+            "1" whenever currency is already baseCurrency.
         note: { type: [string, 'null'] }
         paidByName: { type: string }
         paidByEmail: { type: string }
@@ -2127,19 +2165,31 @@ components:
           type: array
           items:
             type: object
-            required: [name, email, amountCents]
+            required: [name, email, amountCents, amountBaseCents]
             properties:
               name: { type: string }
               email: { type: string }
               amountCents: { type: integer }
+              amountBaseCents:
+                type: integer
+                description: >-
+                  The same slice in base cents, apportioned so the shares sum to
+                  amountBaseCents exactly.
 
     Budget:
       type: object
       required: [expenses, balances, settlements, currency]
-      description: All amounts are integer cents; there is no floating point anywhere in this payload.
+      description: >-
+        All amounts are integer cents; there is no floating point anywhere in this
+        payload. Everything outside the expense list is denominated in `currency`,
+        the instance base currency.
       properties:
-        currency: { type: string }
-        totalCents: { type: integer }
+        currency:
+          type: string
+          description: >-
+            The INSTANCE BASE CURRENCY — what totalCents, every balance and every
+            settlement below are in. Not the currency of any particular expense.
+        totalCents: { type: integer, description: 'Every expense summed, in base cents.' }
         expenses:
           type: array
           items: { $ref: '#/components/schemas/Expense' }
@@ -2152,8 +2202,8 @@ components:
             properties:
               name: { type: string }
               email: { type: string }
-              paidCents: { type: integer }
-              owedCents: { type: integer }
+              paidCents: { type: integer, description: 'Base cents.' }
+              owedCents: { type: integer, description: 'Base cents.' }
               netCents:
                 type: integer
                 description: Positive means they are owed money; negative means they owe.

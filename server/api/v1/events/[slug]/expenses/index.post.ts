@@ -6,12 +6,19 @@ import { expense } from '#server/utils/v1-shapes'
 /**
  * `addTripExpense` — participants without an explicit `amountCents` split the
  * remainder evenly. Money is integer cents throughout.
+ *
+ * `currency` is what was SPENT and defaults to the instance base currency;
+ * anything else is converted once, at write time, and frozen onto the row
+ * (#25). Pass `fxRate` to pin the conversion yourself — otherwise the rate is
+ * fetched, and a fetch that comes back empty is a 422 naming this field rather
+ * than an expense recorded at a rate nobody chose.
  */
 const bodySchema = z.object({
   title: z.string().min(1).max(200),
   category: z.enum(['travel', 'accommodation', 'food', 'tickets', 'other']).optional(),
   amountCents: z.number().int().min(1),
   currency: z.string().min(3).max(3).optional(),
+  fxRate: z.string().regex(/^\d{1,9}(\.\d{1,10})?$/).optional(),
   note: z.string().max(500).optional(),
   paidByName: z.string().min(1).max(200),
   paidByEmail: z.email(),

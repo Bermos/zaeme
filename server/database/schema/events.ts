@@ -1,5 +1,5 @@
 import { relations } from 'drizzle-orm'
-import { bigint, boolean, index, integer, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core'
+import { bigint, boolean, index, integer, numeric, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core'
 
 /**
  * The events domain tables, namespaced `events_*`. zäme owns this schema and
@@ -37,7 +37,10 @@ import { bigint, boolean, index, integer, pgTable, text, timestamp, uniqueIndex 
  *  - `events_series_member` — the standing group of a recurring series: each
  *    new occurrence auto-invites every member.
  *  - `events_expense` + `events_expense_share` — the trip budget (integer
- *    cents; no float money).
+ *    cents; no float money), each row carrying the base currency and the FX
+ *    rate it was recorded at.
+ *  - `events_instance_setting` — the one-row instance configuration (the base
+ *    currency the whole instance settles up in).
  *  - `events_message` — the per-event group chat.
  *  - `events_event_planner` + `events_planner_invite` — co-organizers.
  *  - `events_ical_token` — the per-attendee calendar-feed credential.
@@ -297,16 +300,51 @@ export const seriesMember = pgTable('events_series_member', {
 
 /**
  * One paid cost on an event (trips mostly): who paid, how much, and how it is
- * split. Money is integer cents (no float money); `currency` is informative —
- * balances are only computed within one currency.
+ * split. Money is integer cents; there is no float money anywhere near this
+ * table.
+ *
+ * TWO AMOUNTS, ALWAYS (#25). `amount_cents`/`currency` is what was handed over;
+ * `amount_base_cents`/`base_currency` is what it settles for, converted at
+ * `fx_rate` when it was recorded and frozen there. Balances, settlements and
+ * totals are computed from the base figures and from nothing else.
+ *
+ * This comment used to say `currency` was "informative — balances are only
+ * computed within one currency". The first half was true and the second was
+ * not: nothing enforced it, and `computeBalances` summed cents straight across
+ * currencies. A schema comment claiming a constraint is not a constraint.
+ *
+ * NO DEFAULTS on the three conversion columns, on purpose. An insert that
+ * forgets all three aborts; one that sets `amount_base_cents` and forgets the
+ * other two would, with defaults, silently stamp CHF-at-1 on a EUR instance —
+ * and then freeze the instance base there via the guard in
+ * `server/domain/instance-settings.ts`.
  */
 export const expense = pgTable('events_expense', {
   id: text('id').primaryKey(),
   eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
   category: text('category', { enum: ['travel', 'accommodation', 'food', 'tickets', 'other'] }).notNull().default('other'),
+  /** The total AS SPENT, in the currency it was spent in. */
   amountCents: integer('amount_cents').notNull(),
+  /** What was actually handed over — EUR for a dinner in Milan. */
   currency: text('currency').notNull().default('CHF'),
+  /**
+   * The instance base currency at the moment this was recorded, and the rate
+   * that converted it (#25). Both are a SNAPSHOT: an expense entered in June
+   * stays converted at June's rate forever, because a balance that moves when
+   * the market does is not a balance anybody can settle.
+   *
+   * `fx_rate` is numeric, not a float — it is multiplied by money. It is 1
+   * whenever `currency` is already the base, which is the ordinary case.
+   */
+  baseCurrency: text('base_currency').notNull(),
+  fxRate: numeric('fx_rate', { precision: 20, scale: 10 }).notNull(),
+  /**
+   * The total in BASE cents — the only figure balances and settlements are ever
+   * computed from. Materialised here rather than derived at read time so the
+   * arithmetic is a plain sum and history cannot drift.
+   */
+  amountBaseCents: integer('amount_base_cents').notNull(),
   /** Who fronted the money — same name+email identity as RSVPs. */
   paidByName: text('paid_by_name').notNull(),
   paidByEmail: text('paid_by_email').notNull(),
@@ -342,6 +380,13 @@ export const expenseShare = pgTable('events_expense_share', {
   name: text('name').notNull(),
   email: text('email').notNull(),
   amountCents: integer('amount_cents').notNull(),
+  /**
+   * The same slice in BASE cents, apportioned at write time so the base shares
+   * sum to the expense's `amount_base_cents` EXACTLY (largest remainder, same
+   * discipline as `splitEvenlyCents`). Converting each share at read time would
+   * lose or invent cents on almost every split.
+   */
+  amountBaseCents: integer('amount_base_cents').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 }, table => [
   index('events_expense_share_expense_idx').on(table.expenseId),
@@ -349,6 +394,31 @@ export const expenseShare = pgTable('events_expense_share', {
   index('events_expense_share_email_idx').on(table.email),
   uniqueIndex('events_expense_share_expense_email_unique').on(table.expenseId, table.email)
 ])
+
+/* ---------------------------- instance settings ---------------------------- */
+
+/**
+ * The instance's own settings — one row, id `instance` (#25, D6).
+ *
+ * There is exactly one zäme instance per deployment and its owner is the first
+ * account registered, so a single row with TYPED COLUMNS is the honest shape: a
+ * key/value table would store every setting as text, make each reader parse and
+ * validate it, and give the database no way to hold a default. When a second
+ * setting arrives it is a column here, which is a migration either way.
+ *
+ * The row is created on the first write. A missing row is not an error — it
+ * means "still on the defaults", and every reader falls back to them.
+ */
+export const instanceSetting = pgTable('events_instance_setting', {
+  id: text('id').primaryKey(),
+  /**
+   * The currency this instance settles up in — "expectation is to have the same
+   * currency in the friends group" (D6). Every expense is converted into it at
+   * write time and every balance is expressed in it.
+   */
+  baseCurrency: text('base_currency').notNull().default('CHF'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
+})
 
 /* -------------------------------- group chat ------------------------------- */
 
@@ -420,5 +490,6 @@ export const eventsSchema = {
   expense,
   expenseShare,
   message,
-  plannerInvite
+  plannerInvite,
+  instanceSetting
 }
