@@ -239,7 +239,15 @@ export async function eventTimelineAsOwner(slug: string) {
     .select()
     .from(tables.timelineItem)
     .where(eq(tables.timelineItem.eventId, ev.id))
-    .orderBy(tables.timelineItem.sortOrder, tables.timelineItem.startsAt, tables.timelineItem.createdAt)
+    .orderBy(
+      tables.timelineItem.sortOrder,
+      tables.timelineItem.startsAt,
+      tables.timelineItem.createdAt,
+      // The same last tiebreak `applyTimelineItemMove` renumbers by. Drop it and
+      // a tied itinerary is listed in one order and renumbered in another, so
+      // the first click on the arrows moves the wrong row.
+      tables.timelineItem.id
+    )
 }
 
 /**

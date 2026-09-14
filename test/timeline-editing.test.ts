@@ -97,6 +97,16 @@ describe('an itinerary item can be corrected, not only created and destroyed', (
 describe('re-ordering an itinerary cannot half-apply', () => {
   const data = readFileSync(join(ROOT, 'server', 'domain', 'events-data.ts'), 'utf8')
 
+  /**
+   * ⚠️ NOTHING IN THIS BLOCK KNOWS WHAT THE STATEMENT COMPUTES. These assertions
+   * survive deleting the transposition, pinning `delta` to +1, and dropping the
+   * `event_id` scoping so a move renumbers every itinerary on the instance —
+   * all three were tried, and all three left the suite green. What catches them
+   * is `scripts/api-smoke.sh`, which EXECUTES a move against a real Postgres and
+   * asserts the resulting order and numbering; the `api` job runs it on every
+   * push and fails if a single check is skipped. These are the cheap guard on
+   * the SHAPE, and they are not the proof.
+   */
   it('is a verb of its own on both human surfaces', () => {
     expect(existsSync(join(API_ROOT, 'host', 'events', '[slug]', 'timeline', '[id]', 'move.post.ts'))).toBe(true)
     const adminMove = join(API_ROOT, 'admin', 'events', '[slug]', 'timeline', '[id]', 'move.post.ts')
@@ -109,6 +119,50 @@ describe('re-ordering an itinerary cannot half-apply', () => {
     expect(move).toMatch(/row_number\(\) over \(order by sort_order/)
     // One `update`, so it cannot leave two rows on the same number.
     expect(move.match(/update events_timeline_item/g) ?? []).toHaveLength(1)
+  })
+
+  it('takes every row of the itinerary, in a fixed order, before it writes', () => {
+    // `is distinct from` keeps `updated_at` still on rows that did not move —
+    // and in doing so drops them from the statement's lock set, so a concurrent
+    // move can change one without this one rechecking it. Locking the whole
+    // itinerary restores the invariant; ordering that lock by `id` stops two
+    // movers taking the same rows in different orders and deadlocking.
+    const move = data.slice(data.indexOf('export async function applyTimelineItemMove'))
+    expect(move).toMatch(/\.transaction\(/)
+    expect(move).toMatch(/select id from events_timeline_item where event_id = \$\{eventId\} order by id for update/)
+  })
+
+  it('lists an itinerary in the same order it renumbers it, tiebreak included', () => {
+    // The arrows are drawn from the LIST, and the renumber recomputes positions
+    // from its own ordering. Let those disagree on the last tiebreak and the
+    // first click on a tied itinerary moves a different row than the one the
+    // user pointed at — on the very path that exists to repair a tie. `id` is
+    // the last key of the renumber (`…, created_at, id`), so it must be the
+    // last key of every list of the same rows.
+    expect(data).toMatch(/row_number\(\) over \(order by sort_order, starts_at nulls last, created_at, id\)/)
+
+    const orderings = (src: string) => {
+      const out: string[] = []
+      for (let i = src.indexOf('.orderBy('); i !== -1; i = src.indexOf('.orderBy(', i + 1)) {
+        let depth = 0
+        for (let j = i + '.orderBy'.length; j < src.length; j++) {
+          if (src[j] === '(') {
+            depth++
+          } else if (src[j] === ')' && --depth === 0) {
+            out.push(src.slice(i, j + 1))
+            break
+          }
+        }
+      }
+      return out.filter(o => o.includes('timelineItem.sortOrder'))
+    }
+
+    const files = ['events-data.ts', 'admin.ts', 'guest.ts']
+      .map(f => readFileSync(join(ROOT, 'server', 'domain', f), 'utf8'))
+    const sorts = files.flatMap(orderings)
+    // listTimeline, the move's read-back, eventTimelineAsOwner, the guest view.
+    expect(sorts.length).toBeGreaterThanOrEqual(4)
+    for (const o of sorts) expect(o).toContain('timelineItem.id')
   })
 
   it('leaves neither editor swapping sortOrder from the browser', () => {

@@ -105,7 +105,7 @@ export async function getInvitePage(token: string): Promise<InvitePage> {
     db.select().from(tables.rsvp).where(eq(tables.rsvp.eventId, ev.id)).orderBy(asc(tables.rsvp.createdAt)),
     db.select().from(tables.timelineItem)
       .where(eq(tables.timelineItem.eventId, ev.id))
-      .orderBy(asc(tables.timelineItem.sortOrder), asc(tables.timelineItem.startsAt)),
+      .orderBy(asc(tables.timelineItem.sortOrder), asc(tables.timelineItem.startsAt), asc(tables.timelineItem.createdAt), asc(tables.timelineItem.id)),
     loadPoll(ev.id),
     listContributions(ev.id),
     ev.parentId ? loadSeriesContext(ev.parentId, ev.id) : Promise.resolve(null),

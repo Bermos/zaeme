@@ -87,6 +87,24 @@ contains() {
   esac
 }
 
+# `equals <name> <got> <want>` — exact, for assertions where `contains` would
+# pass on the wrong answer (an ORDER is the obvious one: every permutation of a
+# list contains the same items).
+equals() {
+  local name="$1" got="$2" want="$3"
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS + 1)); printf '  ok   %-58s\n' "$name"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL %-58s want [%s] got [%s]\n' "$name" "$want" "$got"
+  fi
+}
+
+# The three fields of an itinerary, in the order the API returned them. No jq:
+# this script runs wherever curl and sed do.
+tl_titles() { printf '%s' "$1" | grep -o '"title":"[^"]*"' | sed 's/^"title":"//;s/"$//' | tr '\n' ' ' | sed 's/ $//'; }
+tl_orders() { printf '%s' "$1" | grep -o '"sortOrder":[0-9-]*' | sed 's/^"sortOrder"://' | tr '\n' ' ' | sed 's/ $//'; }
+tl_ids()    { printf '%s' "$1" | grep -o '"id":"[^"]*"' | sed 's/^"id":"//;s/"$//' | tr '\n' ' ' | sed 's/ $//'; }
+
 AUTH=(-H "Authorization: Bearer $TOKEN" -H "x-mcp-user: $OWNER")
 # The four provenance headers Enterprise stamps. zäme does nothing with them
 # yet; accepting them without erroring is what keeps the lineage option open.
@@ -221,6 +239,60 @@ contains "...as the zäme planner, not an Enterprise-supplied name" "$CHAT" '"au
 check "readEventChat"                            200 "${AUTH[@]}" "$API/events/$SLUG/chat"
 check "readEventChat?afterId"                    200 "${AUTH[@]}" "$API/events/$SLUG/chat?afterId=nothing"
 check "inviteCoOrganizer"                        201 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SLUG/planner-invites" -d '{"role":"co_planner"}'
+
+echo
+echo "== re-ordering an itinerary, executed (Bermos/zaeme#8) =="
+# The ONLY evidence `applyTimelineItemMove` computes the right thing. Every
+# static check it has passes just as happily when the statement does the
+# opposite: deleting the transposition, pinning `delta` to +1, or dropping the
+# `event_id` scoping so it renumbers every itinerary on the INSTANCE into one
+# global sequence are all invisible to vitest and eslint. So the move is run,
+# and the resulting ORDER and NUMBERING are asserted — the global-renumber
+# mutation is what the exact "0 10 20" below exists to catch.
+#
+# The tie is minted through the machine API rather than faked, because that is
+# how a real one arrives: `addTimelineItem` takes an explicit `sortOrder`, so
+# Enterprise can put two items on one number by itself.
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  OWNER_COOKIE=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  ORD=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke order $SUFFIX\",\"type\":\"trip\"}")
+  OSLUG=$(printf '%s' "$ORD" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  echo "  itinerary: $OSLUG"
+  check "an itinerary item"                        201 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$OSLUG/timeline" -d '{"title":"Alpha","type":"transport","sortOrder":10}'
+  check "...a second"                              201 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$OSLUG/timeline" -d '{"title":"Bravo","type":"meal","sortOrder":20}'
+  check "...and a third ON THE SAME NUMBER"        201 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$OSLUG/timeline" -d '{"title":"Charlie","type":"meal","sortOrder":20}'
+
+  TL=$(body "${OWNER_COOKIE[@]}" "$BASE/api/admin/events/$OSLUG/timeline")
+  equals "the machine API can mint a tie by itself" "$(tl_orders "$TL")" "10 20 20"
+  # Which of the tied pair sorts first is decided by created_at and then by id,
+  # so it is read rather than assumed; everything after this is relative to it.
+  A=$(tl_titles "$TL" | cut -d' ' -f1)
+  B=$(tl_titles "$TL" | cut -d' ' -f2)
+  C=$(tl_titles "$TL" | cut -d' ' -f3)
+  LAST=$(tl_ids "$TL" | awk '{print $NF}')
+
+  check "moveTimelineItem up (admin)"              200 "${OWNER_COOKIE[@]}" "${JSON[@]}" -X POST "$BASE/api/admin/events/$OSLUG/timeline/$LAST/move" -d '{"direction":"up"}'
+  TL=$(body "${OWNER_COOKIE[@]}" "$BASE/api/admin/events/$OSLUG/timeline")
+  equals "...transposes it with its neighbour"     "$(tl_titles "$TL")" "$A $C $B"
+  equals "...and renumbers, so the tie is gone"    "$(tl_orders "$TL")" "0 10 20"
+
+  check "moving it up again"                       200 "${OWNER_COOKIE[@]}" "${JSON[@]}" -X POST "$BASE/api/admin/events/$OSLUG/timeline/$LAST/move" -d '{"direction":"up"}'
+  equals "...puts it first"                        "$(tl_titles "$(body "${OWNER_COOKIE[@]}" "$BASE/api/admin/events/$OSLUG/timeline")")" "$C $A $B"
+
+  check "moving it up off the top is a no-op"      200 "${OWNER_COOKIE[@]}" "${JSON[@]}" -X POST "$BASE/api/admin/events/$OSLUG/timeline/$LAST/move" -d '{"direction":"up"}'
+  TL=$(body "${OWNER_COOKIE[@]}" "$BASE/api/admin/events/$OSLUG/timeline")
+  equals "...and really is one"                    "$(tl_titles "$TL")" "$C $A $B"
+  equals "...with the numbering still total"       "$(tl_orders "$TL")" "0 10 20"
+
+  check "an item that is not on this itinerary"    404 "${OWNER_COOKIE[@]}" "${JSON[@]}" -X POST "$BASE/api/admin/events/$OSLUG/timeline/no-such-item/move" -d '{"direction":"up"}'
+  check "a direction that is not up or down"       400 "${OWNER_COOKIE[@]}" "${JSON[@]}" -X POST "$BASE/api/admin/events/$OSLUG/timeline/$LAST/move" -d '{"direction":"sideways"}'
+
+  # The same verb on the host surface, which is where a planner actually is.
+  check "moveTimelineItem down (host)"             200 "${OWNER_COOKIE[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$OSLUG/timeline/$LAST/move" -d '{"direction":"down"}'
+  equals "...moves it the other way"               "$(tl_titles "$(body "${OWNER_COOKIE[@]}" "$BASE/api/admin/events/$OSLUG/timeline")")" "$A $C $B"
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the OWNER's session to run these"
+fi
 
 echo
 echo "== the trip budget (integer cents, no floats) =="
