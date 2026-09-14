@@ -64,8 +64,14 @@ jobs:
           POSTGRES_PASSWORD: zaeme
           POSTGRES_DB: zaeme
         ports: ['5432:5432']
+        # `-U zaeme -d zaeme` rather than a bare `pg_isready`: without them the
+        # probe connects as the container's own user and Postgres logs
+        # `FATAL: role "root" does not exist` every ten seconds. The check
+        # passes either way — the server answered, which is all it asks — but
+        # the first thing anyone debugging a failure here will read is this
+        # container's log, and it should not open with eight red herrings.
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U zaeme -d zaeme"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
