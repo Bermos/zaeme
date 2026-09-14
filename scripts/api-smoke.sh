@@ -39,12 +39,20 @@
 #   ZAEME_TEST_SESSION_COOKIE   the INSTANCE OWNER's magic-link session
 #   ZAEME_TEST_GUEST_COOKIE     any other account's session (a co-planner, say)
 #
-# Get one by signing in, then reading the value better-auth set:
+# `node scripts/ci-smoke-setup.mjs sign-in` does the whole dance for both
+# accounts (it is what CI runs). By hand, per account:
 #
-#   curl -s -X POST "$BASE/api/auth/sign-in/magic-link" -H 'content-type: application/json' \
+#   # The Origin header is REQUIRED — better-auth's CSRF middleware answers
+#   # 403 MISSING_OR_NULL_ORIGIN without it, and curl does not send one.
+#   curl -s -X POST "$BASE/api/auth/sign-in/magic-link" \
+#     -H 'content-type: application/json' -H "Origin: $BASE" \
 #     -d '{"email":"owner@example.com","name":"Owner","callbackURL":"/host"}'
-#   TOKEN=$(psql "$DATABASE_URL" -tAc \
-#     "select identifier from zaeme_verification order by created_at desc limit 1")
+#   # Match the row by the email inside `value`, NOT by "the newest row": two
+#   # sign-ins in a row are two unconsumed tokens, and newest-wins picks the
+#   # wrong one exactly when you are setting up both cookies.
+#   TOKEN=$(psql "$DATABASE_URL" -tAc "select identifier from zaeme_verification
+#     where value like '%\"email\":\"owner@example.com\"%' and expires_at > now()
+#     order by created_at desc limit 1")
 #   curl -s -c owner.jar "$BASE/api/auth/magic-link/verify?token=$TOKEN&callbackURL=/host"
 #   ZAEME_TEST_SESSION_COOKIE="better-auth.session_token=$(awk '/session_token/ {print $7}' owner.jar)"
 set -uo pipefail

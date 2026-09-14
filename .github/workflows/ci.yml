@@ -40,3 +40,185 @@ jobs:
       # a system that is not in this repository — it has to be caught on push.
       - name: Test
         run: pnpm run test
+
+  # The executed half. Everything in `ci` above is static: the contract test
+  # reads the OpenAPI document and the route tree off disk, the boundary test
+  # greps the source, and neither ever opens a socket. This job boots the
+  # ARTIFACT THAT DEPLOYS against a real Postgres and runs the ~106 checks in
+  # `scripts/api-smoke.sh` at it.
+  #
+  # Booting `.output/server/index.mjs` rather than `pnpm dev` is the whole
+  # point. `pnpm build` exiting 0 says a module resolved at BUILD time; only
+  # the built server answering /healthz says it resolves at BOOT time, which is
+  # the failure mode that takes a deploy down while every static check is green.
+  api:
+    name: api (built server, real database)
+    needs: ci
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: zaeme
+          POSTGRES_PASSWORD: zaeme
+          POSTGRES_DB: zaeme
+        ports: ['5432:5432']
+        # `-U zaeme -d zaeme` rather than a bare `pg_isready`: without them the
+        # probe connects as the container's own user and Postgres logs
+        # `FATAL: role "root" does not exist` every ten seconds. The check
+        # passes either way — the server answered, which is all it asks — but
+        # the first thing anyone debugging a failure here will read is this
+        # container's log, and it should not open with eight red herrings.
+        options: >-
+          --health-cmd "pg_isready -U zaeme -d zaeme"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # An S3-compatible store, so the poster round trip runs instead of
+      # skipping: the upload, the server-side digest check, the 204
+      # short-circuit, and the gate that keeps the bytes inert until a
+      # published event cites them.
+      #
+      # MinIO is what the issue asked for and is no longer an option — the
+      # open-source server was archived, and both its downloads and its Docker
+      # Hub repository are gone. `adobe/s3mock` is the closest thing that still
+      # ships: path-style, in-memory, and deliberately signature-blind, which is
+      # fine here because what is under test is zäme's round trip and not AWS's
+      # signing algorithm.
+      #
+      # No `--health-cmd`: the image carries no curl to run one with. The
+      # "Wait for object storage" step below does the waiting instead.
+      s3:
+        image: adobe/s3mock:5.2.2
+        env:
+          COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: zaeme-ci
+          COM_ADOBE_TESTING_S3MOCK_STORE_REGION: us-east-1
+        ports: ['9090:9090']
+
+    env:
+      DATABASE_URL: postgres://zaeme:zaeme@127.0.0.1:5432/zaeme
+      # The smoke script's own default port, and not 3000: nothing about this
+      # job should collide with a port a dev server might also want.
+      PORT: '3111'
+      BASE_URL: http://127.0.0.1:3111
+      # Throwaway, and named so nobody mistakes it for one that matters. The
+      # length is not decoration — better-auth warns below 32 characters.
+      BETTER_AUTH_SECRET: ci-only-not-a-secret-0123456789abcdef
+      ZAEME_SERVICE_TOKEN: ci-only-service-token
+      ZAEME_ENTERPRISE_OWNER_ID: ci_enterprise_owner
+      S3_ACCESS_KEY_ID: ci
+      S3_SECRET_ACCESS_KEY: ci-secret
+      S3_BUCKET: zaeme-ci
+      S3_ENDPOINT: http://127.0.0.1:9090
+      S3_REGION: us-east-1
+      # The floor the smoke step asserts. 106 is what the suite runs with both
+      # session cookies and object storage present; a bare run manages 78 (it
+      # skips 16 session-gated checks and 12 poster ones). Raise this when the
+      # suite grows — never lower it to make a run go green.
+      MIN_SMOKE_CHECKS: '106'
+      # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
+      # falls through to the dry run, which is what lets the magic-link sign-in
+      # below read its token out of the database instead of out of an inbox.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      # `engines.node` is load-bearing — Kitchen reads it into
+      # `BP_NODE_VERSION` and hands it to the buildpack verbatim. Reading the
+      # same field here is what keeps the Node this job proves the artifact on
+      # and the Node production runs it on from drifting apart silently.
+      - name: Install node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # The same script Kitchen runs as a `task` on the way into a deploy, so a
+      # migration that does not apply fails here rather than there.
+      - name: Migrate
+        run: node scripts/migrate.mjs
+
+      # Two accounts, in a definite order. The first one registered IS the
+      # instance owner (`server/utils/instance.ts`): it is who the machine API
+      # acts as, and who `requireOwner` lets into /api/admin. The second exists
+      # so the 403 half of the admin boundary can be proved at all — with one
+      # account every session is the owner's and that case cannot happen.
+      - name: Seed the owner and one other account
+        run: node scripts/ci-smoke-setup.mjs seed
+
+      - name: Build
+        run: pnpm build
+
+      - name: Wait for object storage
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS "$S3_ENDPOINT/" > /dev/null; then
+              echo "s3mock is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::s3mock never answered at $S3_ENDPOINT"
+          exit 1
+
+      - name: Boot the built server
+        run: |
+          nohup node .output/server/index.mjs > server.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -fsS "$BASE_URL/healthz" > /dev/null; then
+              echo "the built server is healthy"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the built server never answered /healthz"
+          cat server.log
+          exit 1
+
+      # The two session cookies the credential boundary needs and that no
+      # service token can stand in for: a real magic-link sign-in per account.
+      # The script appends them to $GITHUB_ENV itself and masks them on stdout.
+      # Its stdout is deliberately NOT redirected here and must not be: that is
+      # where the `::add-mask::` has to go, and it cannot go to both places.
+      # The mask matters because the runner reprints a step's whole `env` block
+      # in the NEXT step's group header — writing a cookie to the environment
+      # and saying nothing else about it publishes it in the log.
+      - name: Sign in as both accounts
+        run: node scripts/ci-smoke-setup.mjs sign-in
+
+      # `scripts/api-smoke.sh` SKIPS rather than fails when a credential or an
+      # S3_* variable is missing, and still exits 0. So a rename in this file, a
+      # dropped variable, or a differently-spelled export out of
+      # ci-smoke-setup.mjs would quietly take this job from 106 checks to 78
+      # with the pull request page looking identical — which is the exact
+      # silent degradation the job exists to prevent. Asserted, therefore, and
+      # not trusted: no `skip` line, and a count that never goes backwards.
+      - name: Smoke the API
+        run: |
+          set -o pipefail
+          pnpm smoke:api | tee smoke.log
+          if grep -q '^  skip' smoke.log; then
+            echo "::error::the smoke suite skipped checks — a credential or an S3_* variable is missing"
+            grep '^  skip' smoke.log
+            exit 1
+          fi
+          passed=$(sed -n 's/^passed \([0-9]\{1,\}\), failed .*/\1/p' smoke.log)
+          if [ "${passed:-0}" -lt "$MIN_SMOKE_CHECKS" ]; then
+            echo "::error::expected at least $MIN_SMOKE_CHECKS checks, got ${passed:-no count at all}"
+            exit 1
+          fi
+          echo "$passed checks ran, none skipped"
+
+      # A failed check is usually explained by what the server said at the
+      # moment it failed, and that is the one thing the smoke output does not
+      # carry.
+      - name: Server log
+        if: failure()
+        run: cat server.log || true
