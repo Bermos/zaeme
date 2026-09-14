@@ -113,6 +113,11 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
+      # The floor the smoke step asserts. 106 is what the suite runs with both
+      # session cookies and object storage present; a bare run manages 78 (it
+      # skips 16 session-gated checks and 12 poster ones). Raise this when the
+      # suite grows — never lower it to make a run go green.
+      MIN_SMOKE_CHECKS: '106'
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
       # falls through to the dry run, which is what lets the magic-link sign-in
       # below read its token out of the database instead of out of an inbox.
@@ -179,13 +184,37 @@ jobs:
 
       # The two session cookies the credential boundary needs and that no
       # service token can stand in for: a real magic-link sign-in per account.
-      # Written to the environment rather than echoed — a session cookie in a
-      # log is a session cookie in a log, even a throwaway one.
+      # The script appends them to $GITHUB_ENV itself and masks them on stdout.
+      # Its stdout is deliberately NOT redirected here and must not be: that is
+      # where the `::add-mask::` has to go, and it cannot go to both places.
+      # The mask matters because the runner reprints a step's whole `env` block
+      # in the NEXT step's group header — writing a cookie to the environment
+      # and saying nothing else about it publishes it in the log.
       - name: Sign in as both accounts
-        run: node scripts/ci-smoke-setup.mjs sign-in >> "$GITHUB_ENV"
+        run: node scripts/ci-smoke-setup.mjs sign-in
 
+      # `scripts/api-smoke.sh` SKIPS rather than fails when a credential or an
+      # S3_* variable is missing, and still exits 0. So a rename in this file, a
+      # dropped variable, or a differently-spelled export out of
+      # ci-smoke-setup.mjs would quietly take this job from 106 checks to 78
+      # with the pull request page looking identical — which is the exact
+      # silent degradation the job exists to prevent. Asserted, therefore, and
+      # not trusted: no `skip` line, and a count that never goes backwards.
       - name: Smoke the API
-        run: pnpm smoke:api
+        run: |
+          set -o pipefail
+          pnpm smoke:api | tee smoke.log
+          if grep -q '^  skip' smoke.log; then
+            echo "::error::the smoke suite skipped checks — a credential or an S3_* variable is missing"
+            grep '^  skip' smoke.log
+            exit 1
+          fi
+          passed=$(sed -n 's/^passed \([0-9]\{1,\}\), failed .*/\1/p' smoke.log)
+          if [ "${passed:-0}" -lt "$MIN_SMOKE_CHECKS" ]; then
+            echo "::error::expected at least $MIN_SMOKE_CHECKS checks, got ${passed:-no count at all}"
+            exit 1
+          fi
+          echo "$passed checks ran, none skipped"
 
       # A failed check is usually explained by what the server said at the
       # moment it failed, and that is the one thing the smoke output does not

@@ -18,14 +18,18 @@
  *            possible at all — with one account every session is the owner's.
  *
  *   sign-in  after the server answers /healthz. Runs the real magic-link
- *            ceremony for both accounts and prints the two session cookies as
- *            `NAME=value` lines for `>> "$GITHUB_ENV"`. The token is read from
- *            `zaeme_verification` rather than from the dry-run log, because
- *            the log preview truncates it.
+ *            ceremony for both accounts, appends the two session cookies to
+ *            `$GITHUB_ENV` itself and masks them on stdout, so neither reaches
+ *            the build log. The verification token is read from
+ *            `zaeme_verification` rather than from the dry-run log: the log
+ *            holds it (in `links`, untruncated), but matching the row by email
+ *            is the only way two sign-ins cannot be confused for each other.
+ *            Off a runner it falls back to printing `NAME=value`.
  *
  * Plain .mjs, like `scripts/migrate.mjs`, and for the same reason: it leans
  * only on `pg`, a runtime dependency, and needs no compile step.
  */
+import { appendFileSync } from 'node:fs'
 import pg from 'pg'
 
 /** The two accounts. The owner is seeded first and stays first. */
@@ -113,17 +117,56 @@ async function signIn({ email, name }) {
   return session
 }
 
+/**
+ * Escaping for a `::workflow command::` payload. `%` MUST go first and it is
+ * not pedantry: a better-auth cookie is percent-encoded, so an unescaped
+ * `%2B` would reach the runner as a literal `+` and it would then mask a
+ * string that never appears — the mask would look armed and hide nothing.
+ */
+function escapeCommandData(value) {
+  return value.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
+}
+
+/**
+ * Hand one cookie to the job without putting it in the log.
+ *
+ * The mask has to be registered BEFORE the value is first printed, and the
+ * runner reprints a step's whole `env` block in the next step's group header —
+ * so simply writing to `$GITHUB_ENV` and saying nothing publishes it there.
+ * Hence the ordering here: `::add-mask::` on stdout first, the assignment
+ * appended to the `$GITHUB_ENV` FILE second.
+ *
+ * Appending to that file ourselves, rather than letting the workflow redirect
+ * our stdout into it, is the whole trick — stdout is where the workflow
+ * command has to go, and it cannot be both.
+ *
+ * Both the bare token and the whole `name=value` are masked: the value is what
+ * the env block prints, the token is what would leak from anything that
+ * re-spells the cookie.
+ */
+function exportCookie(name, cookie) {
+  const envFile = process.env.GITHUB_ENV
+  if (!envFile) {
+    // Not on a runner: behave as before so `eval "$(… sign-in)"` still works.
+    console.log(`${name}=${cookie}`)
+    return
+  }
+  const token = cookie.slice(cookie.indexOf('=') + 1)
+  console.log(`::add-mask::${escapeCommandData(token)}`)
+  console.log(`::add-mask::${escapeCommandData(cookie)}`)
+  appendFileSync(envFile, `${name}=${cookie}\n`)
+  console.log(`[ci-smoke-setup] ${name} exported and masked`)
+}
+
 const [command] = process.argv.slice(2)
 
 try {
   if (command === 'seed') {
     await seed()
   } else if (command === 'sign-in') {
-    const owner = await signIn(OWNER)
-    const guest = await signIn(GUEST)
     // The smoke script reads both as whole `Cookie:` header values.
-    console.log(`ZAEME_TEST_SESSION_COOKIE=${owner}`)
-    console.log(`ZAEME_TEST_GUEST_COOKIE=${guest}`)
+    exportCookie('ZAEME_TEST_SESSION_COOKIE', await signIn(OWNER))
+    exportCookie('ZAEME_TEST_GUEST_COOKIE', await signIn(GUEST))
   } else {
     console.error('[ci-smoke-setup] usage: node scripts/ci-smoke-setup.mjs <seed|sign-in>')
     process.exitCode = 1
