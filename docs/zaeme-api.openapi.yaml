@@ -539,12 +539,15 @@ paths:
 
   # ---------------------------------------------------------------- timeline --
 
-  # KNOWN GAP, carried across the boundary unchanged: there is no PATCH here.
-  # `layers/events` can add a timeline item and remove one, but never edit one in
-  # place — a typo means remove + re-add, which loses the item's id and any media
-  # attached to it. The operationId `updateTimelineItem` is RESERVED for the fix so
-  # that whoever closes the gap mints the tool under the obvious name rather than
-  # inventing a second one. Do not use that name for anything else.
+  # There is no PATCH on this surface, and that is a CHOICE, not a gap.
+  # Itinerary items ARE editable in place in zäme — the host surface has
+  # `PATCH /api/host/events/{slug}/timeline/{id}`, and a planner edits a typo
+  # without losing the item's id or the media pinned to it. What is withheld is
+  # the machine verb: minting `updateTimelineItem` would add an edit tool to the
+  # XO's vocabulary, and that is its own decision nobody has taken. The
+  # operationId is RESERVED so that whoever takes it mints the tool under the
+  # obvious name rather than inventing a second one. Do not use that name for
+  # anything else.
   /events/{slug}/timeline:
     parameters:
       - $ref: '#/components/parameters/Slug'

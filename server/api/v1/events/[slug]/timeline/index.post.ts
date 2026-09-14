@@ -7,9 +7,12 @@ import { timelineItem } from '#server/utils/v1-shapes'
  * `addTimelineItem` — appended after the existing items unless `sortOrder` says
  * otherwise.
  *
- * There is no PATCH beside this and its DELETE: editing an item in place is a
- * known gap carried across the boundary unchanged (Bermos/zaeme#8). The
- * operationId `updateTimelineItem` is reserved for the fix.
+ * There is no PATCH beside this and its DELETE, and that is deliberate rather
+ * than a gap: itinerary items ARE editable in place on the human surfaces
+ * (`PATCH /api/host/events/{slug}/timeline/{id}`), so nobody loses an item's id
+ * or its pinned media to fix a typo. Withheld here is the machine verb — an
+ * `updateTimelineItem` tool in the XO's vocabulary is its own decision, not yet
+ * taken. The operationId is reserved for whoever takes it.
  */
 const bodySchema = z.object({
   title: z.string().min(1).max(300),

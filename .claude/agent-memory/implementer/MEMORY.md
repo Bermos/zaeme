@@ -15,6 +15,7 @@ Everything after them is earned.
 - 2026-09-14: `pnpm smoke:api` needs no dev server and no `pnpm dev`: the BUILT output boots with `DATABASE_URL`, `PORT`, `BASE_URL`, `BETTER_AUTH_SECRET`, `ZAEME_SERVICE_TOKEN` and `ZAEME_ENTERPRISE_OWNER_ID` and nothing else. Booting the build is the only check that catches a module that resolves at build time and not at boot — `pnpm build` exiting 0 does not.
 - 2026-09-14: `scripts/api-smoke.sh` SKIPS rather than fails, and still exits 0. **16** checks need the session cookies (5 guest-session + 7 owner-admin + 4 non-owner) and **12** need `S3_BUCKET`, so the full suite is 106 and a bare run is **78** — "passed 78, failed 0" and "passed 106, failed 0" are the same shade of green. The `api` job therefore greps for `skip` lines and asserts the trailing count against `MIN_SMOKE_CHECKS`; keep that assertion when you touch the job, and raise the floor rather than lowering it.
 - 2026-09-14: The events domain (~3,400 LOC) has almost no coverage (#9). A change there is as good as the test you write for it.
+- 2026-09-15: `pnpm lint` is `eslint .` through `withNuxt()` and applies **no markdown rules** — a docs-only change passes lint, typecheck and vitest without one assertion touching it. Nothing in CI reads prose, so the only check on a doc is somebody re-reading the code it claims to describe.
 
 ## Boundaries the tests hold, and what they actually assert
 
@@ -24,12 +25,14 @@ Everything after them is earned.
 - 2026-09-14: the instance owner is the first `zaeme_user` by `created_at` (`server/utils/instance.ts`), so a database with ONE account cannot express the 403 half of the admin gate — every session in it is the owner's. Seed two, with explicitly different `created_at` values: rows inserted in one statement can share a timestamp to the microsecond and make the owner whichever one the planner returns that day.
 - 2026-09-14: driving the magic-link sign-in from a script needs an `Origin` header on `POST /api/auth/sign-in/magic-link` — better-auth's CSRF middleware answers `403 MISSING_OR_NULL_ORIGIN` without one, and `fetch` does not send it. The token is `zaeme_verification.identifier` (stored plain) and its `value` carries the email, so match on that rather than on "the newest row".
 - 2026-09-14: the mail dry run's `[email:dry-run]` log prints the magic link twice — the `preview` field truncates the token, the `links` array does NOT. Read `zaeme_verification` anyway, and match the row on the email inside `value`: "newest row wins" picks the wrong token exactly when you are signing in two accounts in a row.
+- 2026-09-14: The contract test polices paths, methods and operationIds and reads **no comments**. `docs/zaeme-api.openapi.yaml` and the `/api/v1` handlers carry long prose that CI cannot falsify, and two comments had been wrong about timeline editing since `bee78a3` (#10 fixed them). Enterprise vendors that YAML, so a stale comment there misinforms another repository — a comment-only diff is safe, and is owed whenever the surface it describes moves.
 - 2026-09-14: `server/middleware/audit.ts` records mutations at the edge; a new route needs no audit code. It must keep returning early for `/api/v1` and `/api/auth` — a change that drops those early returns puts a cookie read next to the machine surface.
 
 ## Deploys, builds and the platform
 
 - 2026-09-14: Merging to `main` ships. Kitchen builds the commit with buildpacks per `kitchen.json` and the `migrate` task runs on the way in; **a failed task stops the deploy**, leaving production on the previous release. The symptom is "my change is not there", not an error page.
 - 2026-09-14: `engines.node` in `package.json` is read into `BP_NODE_VERSION` by Kitchen and handed to the node-engine buildpack verbatim. Dropping it as boilerplate silently upgrades Node on the next build.
+- 2026-09-15: `server/database/drizzle.config.ts`'s header says Kitchen runs `pnpm db:migrate` as the deploy task. It does not — `kitchen.json` runs `node scripts/migrate.mjs`, which is plain .mjs precisely because a production install prunes drizzle-kit away. Trust `kitchen.json`.
 - 2026-09-14: There is no Dockerfile and no workspace — zäme is a single flat package. A change that assumes `packages/*` or a build stage is thinking of the pre-transplant layout or of Enterprise.
 - 2026-09-14: `actions/setup-node` with `node-version-file: package.json` reads `engines.node` — the same field Kitchen turns into `BP_NODE_VERSION`. Use it in any new job rather than hard-coding a major, so CI and the buildpack cannot drift apart silently.
 - 2026-09-14: writing a secret to `$GITHUB_ENV` does NOT keep it out of the build log — the runner reprints a step's whole `env` block in the next step's group header. It needs `::add-mask::` on stdout BEFORE the value is first printed, which means a script whose stdout is redirected into `$GITHUB_ENV` can never mask anything: have it append to the `$GITHUB_ENV` file itself and keep stdout for the workflow command. Escape `%` as `%25` in the mask payload first, or a percent-encoded value (every better-auth cookie) masks a string that never appears.
@@ -41,6 +44,16 @@ Everything after them is earned.
 - 2026-09-14: `AGENT.md` is the style contract for server code: `#server/...` aliases over deep relative imports, `e.method` over `getMethod(e)`, return the query directly, modern Zod (`z.email`, `z.url`, `z.iso.datetime`).
 - 2026-09-14: Domain logic goes in `server/domain/`; handlers stay thin. Cross-event admin reads go in `server/domain/admin.ts` — read the N+1 note at the top of that file before adding one.
 - 2026-09-14: Ask `server/utils/mail-status.ts` whether this instance can send mail. Reading `RESEND_API_KEY` directly misses the mail relay in front of Proton Bridge (`KITCHEN_SERVICE_MAIL`) and the dry run.
+
+## What the app actually is (re-checked against the code at fb99a70, #10)
+
+- 2026-09-15: There are **no `ENABLE_*` feature flags** and no `ADMIN_EMAIL` in the source. A capability is on when it is configured: no storage config → uploads unavailable, no mail transport → `/login` withholds the magic link and says why, no `ZAEME_SERVICE_TOKEN` → every `/api/v1` call 401s. Do not add a flag to turn something off; leave it unconfigured.
+- 2026-09-15: Object storage reads the generic `S3_*` names with `R2_*` as legacy aliases (`server/utils/storage.ts`). The bucket variable is `R2_BUCKET`, never `R2_BUCKET_NAME`, and `R2_PUBLIC_URL` is read nowhere — public poster art goes through `/api/public/poster/{key}`, re-authorised from the events domain on every hit.
+- 2026-09-15: Chat is request/response (`GET`/`POST …/messages` on host, invite and public). No SSE endpoint, no WebSocket, no `replyToId`, no soft delete, no unread indicator — whatever an old roadmap line promises.
+- 2026-09-15: Only four Inngest functions exist (`rsvp.confirmed`, `event.published`, `event.reminder`, `event.cancelled`). `travel.recluster`, `sbb.refresh`, `datepoll.closed` and `packList.seed` were never written, and neither was any SBB/transport client, to-do or pack list, or Anthropic call. There is no `/mcp` route: Enterprise generates its tools from the OpenAPI contract.
+- 2026-09-15: `events_timeline_item.pollId` is a **dead column**, read nowhere outside the schema file. `events_media.caption` is set at `…/media/confirm` and has no edit route afterwards. A column existing is still not the feature existing.
+- 2026-09-15: Timeline reordering is up/down buttons swapping `sortOrder` with two PATCHes (`HostTimelineCard.vue`), not drag-and-drop.
+- 2026-09-15: Event types are `hosted | concert | series | trip | party`. `trip` (itinerary + budget) and `party` (a `core` invite wave polls the date, then `general` goes out — `invite.tier`) are easy to miss because the docs listed only the first three until #10.
 
 ## Rebase and generated files
 
