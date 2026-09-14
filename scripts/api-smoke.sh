@@ -332,6 +332,96 @@ check "shares that exceed the total are refused" 422 "${AUTH[@]}" "${JSON[@]}" -
   -d '{"title":"Bad","amountCents":100,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":500}]}'
 
 echo
+echo "== mixed currencies settle in ONE base (#25) =="
+# The bug this section exists for: `currency` was stored, typed and rendered
+# while `computeBalances` summed `amountCents` across every row whatever it
+# said, so a EUR dinner on a CHF trip went in as EUR-cents-pretending-to-be-CHF.
+# Every assertion here is therefore a VALUE, reconciled by hand, executed
+# against a real Postgres — a test that greps the SQL would survive the bug.
+#
+#   chalet  CHF 300.00, three ways           → base 30000, shares 10000 x3
+#   dinner  EUR 100.00 at 0.9412, three ways → base  9412, shares 3138/3137/3137
+#   taxi    GBP  45.00 at 1.1,    three ways → base  4950, shares  1650 x3
+#
+#   A paid 30000, owes 14788 → +15212      B paid 4950, owes 14787 → -9837
+#   C paid  9412, owes 14787 →  -5375      total 44362
+FXTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke fx $SUFFIX\",\"type\":\"trip\"}")
+FSLUG=$(printf '%s' "$FXTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+SPLIT3='[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"}]'
+
+CHALET=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
+  -d "{\"title\":\"Chalet\",\"amountCents\":30000,\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":$SPLIT3}")
+contains "an expense in the base currency needs no rate" "$CHALET" '"fxRate":"1"'
+contains "...and converts one for one"                   "$CHALET" '"amountBaseCents":30000'
+contains "...recording the base it was settled against"  "$CHALET" '"baseCurrency":"CHF"'
+
+DINNER=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
+  -d "{\"title\":\"Dinner\",\"amountCents\":10000,\"currency\":\"EUR\",\"fxRate\":\"0.9412\",\"paidByName\":\"C\",\"paidByEmail\":\"c@e.com\",\"participants\":$SPLIT3}")
+contains "a foreign expense keeps what was SPENT"        "$DINNER" '"amountCents":10000,"currency":"EUR"'
+contains "...freezes the rate it was recorded at"        "$DINNER" '"fxRate":"0.9412"'
+contains "...and is converted once, at that rate"        "$DINNER" '"amountBaseCents":9412'
+contains "...with the shares apportioned in base too"    "$DINNER" '"amountCents":3334,"amountBaseCents":3138'
+contains "...so the base shares sum to it exactly"       "$DINNER" '"amountCents":3333,"amountBaseCents":3137'
+
+TAXI=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
+  -d "{\"title\":\"Taxi\",\"amountCents\":4500,\"currency\":\"GBP\",\"fxRate\":\"1.1\",\"paidByName\":\"B\",\"paidByEmail\":\"b@e.com\",\"participants\":$SPLIT3}")
+contains "a third currency converts on its own rate"     "$TAXI" '"amountCents":4500,"currency":"GBP"'
+contains "...to its own base figure"                     "$TAXI" '"amountBaseCents":4950'
+
+FXB=$(body "${AUTH[@]}" "$API/events/$FSLUG/budget")
+contains "the budget is labelled with the INSTANCE base" "$FXB" '"currency":"CHF","totalCents":44362'
+contains "A is owed the difference, in base cents"       "$FXB" '"a@e.com","paidCents":30000,"owedCents":14788,"netCents":15212'
+contains "B is down what they fronted less their share"  "$FXB" '"b@e.com","paidCents":4950,"owedCents":14787,"netCents":-9837'
+contains "C likewise, on a different currency again"     "$FXB" '"c@e.com","paidCents":9412,"owedCents":14787,"netCents":-5375'
+contains "the plan clears the smaller debt"              "$FXB" '"toEmail":"a@e.com","amountCents":5375'
+contains "...and the larger one"                         "$FXB" '"toEmail":"a@e.com","amountCents":9837'
+
+DINNER_ID=$(printf '%s' "$DINNER" | grep -o '"id":"[^"]*"' | head -1 | sed 's/^"id":"//;s/"$//')
+check "removing the foreign expense"             200 "${AUTH[@]}" -X DELETE "$API/events/$FSLUG/expenses/$DINNER_ID"
+FXB2=$(body "${AUTH[@]}" "$API/events/$FSLUG/budget")
+contains "...takes exactly its base cents with it"       "$FXB2" '"currency":"CHF","totalCents":34950'
+contains "...leaving the balances still reconciled"      "$FXB2" '"a@e.com","paidCents":30000,"owedCents":11650,"netCents":18350'
+contains "...with no residue from the conversion"        "$FXB2" '"b@e.com","paidCents":4950,"owedCents":11650,"netCents":-6700'
+contains "...for anybody"                                "$FXB2" '"c@e.com","paidCents":0,"owedCents":11650,"netCents":-11650'
+
+# A currency nobody publishes a rate for: the write is refused and NAMES the way
+# through, rather than recording money at a rate nobody chose.
+NORATE="{\"title\":\"Bazaar\",\"amountCents\":1000,\"currency\":\"XXX\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\"}]}"
+check "an unquotable currency is refused"        422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" -d "$NORATE"
+contains "...and asks for the rate by hand"              "$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" -d "$NORATE")" 'Enter the rate yourself'
+BYHAND=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
+  -d "{\"title\":\"Bazaar\",\"amountCents\":1000,\"currency\":\"XXX\",\"fxRate\":\"2\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\"}]}")
+contains "...which is then recorded at that rate"        "$BYHAND" '"amountBaseCents":2000'
+
+echo
+echo "== the base currency is the OWNER's setting (#25, D6) =="
+check "the instance settings need a session"     401 "$BASE/api/admin/settings"
+check "...and a service token is not one"        401 "${AUTH[@]}" "$BASE/api/admin/settings"
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  SET_OWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  check "the owner reads them"                   200 "${SET_OWNER[@]}" "$BASE/api/admin/settings"
+  contains "...and they say what we settle in"           "$(body "${SET_OWNER[@]}" "$BASE/api/admin/settings")" '"baseCurrency":"CHF"'
+  check "the owner writes them"                  200 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"CHF"}'
+  contains "...and the row is now the owner's choice" "$(body "${SET_OWNER[@]}" "$BASE/api/admin/settings")" '"configured":true'
+  check "a code that is not three letters"       400 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"CH"}'
+  # The rule that keeps every balance summable: expenses freeze the base they
+  # were converted into, so the instance base cannot drift away from them.
+  check "changing it under recorded expenses"    409 "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
+  contains "...and says which expenses hold it"          "$(body "${SET_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}')" 'already recorded against a different base currency'
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the OWNER's session to run these"
+fi
+
+if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  GUEST=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
+  check "another account cannot read the settings" 403 "${GUEST[@]}" "$BASE/api/admin/settings"
+  check "...nor change what everyone settles in"   403 "${GUEST[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
+else
+  echo "  skip  set ZAEME_TEST_GUEST_COOKIE to a NON-owner session to run these"
+fi
+
+echo
 echo "== the boundary: money is written by an ACCOUNT, read by the link (#48) =="
 # Reading the budget is still the invite capability URL's; writing an expense
 # moved onto a session plus an RSVP-or-planner row. These are the halves no

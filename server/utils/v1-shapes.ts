@@ -174,7 +174,14 @@ export function contribution(row: object) {
   }
 }
 
-/** `components.schemas.Expense`. */
+/**
+ * `components.schemas.Expense`.
+ *
+ * Two amounts, always: `amountCents` in the currency the money was actually
+ * spent in, and `amountBaseCents` in the instance base currency, frozen at the
+ * `fxRate` this row was recorded at (#25). Only the base figures are ever
+ * summed; the as-spent ones are for showing "€120.00 (CHF 112.40)".
+ */
 export function expense(row: object) {
   const r = asRow(row)
   return {
@@ -183,6 +190,9 @@ export function expense(row: object) {
     category: r.category,
     amountCents: r.amountCents,
     currency: r.currency,
+    amountBaseCents: r.amountBaseCents,
+    baseCurrency: r.baseCurrency,
+    fxRate: r.fxRate,
     note: r.note ?? null,
     paidByName: r.paidByName,
     paidByEmail: r.paidByEmail,
@@ -191,7 +201,13 @@ export function expense(row: object) {
   }
 }
 
-/** `components.schemas.Budget` — integer cents throughout, no floats. */
+/**
+ * `components.schemas.Budget` — integer cents throughout, no floats.
+ *
+ * `currency` is the INSTANCE BASE CURRENCY, and `totalCents`, every balance and
+ * every settlement are in it. It was the first expense row's currency until
+ * #25, which made it a label with no relationship to the numbers beside it.
+ */
 export function budget(row: object) {
   const r = asRow(row)
   return {

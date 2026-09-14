@@ -9,6 +9,8 @@ Everything after them is earned.
 
 ## Checks that prove less than they look
 
+- 2026-09-14: `scripts/api-smoke.sh` RE-RUNS against a database that already has the last run's rows, so a new check must be idempotent: mint your own event, and never assume the instance is in its default state (a check that only passes on a fresh Postgres passes CI and fails the first person who runs it twice).
+- 2026-09-14: The exact number to raise `MIN_SMOKE_CHECKS` by is `git diff scripts/api-smoke.sh | grep -cE '^\+\s*(check|contains|equals) '` — the leading-whitespace form matters, because every check inside an `if [ -n "$ZAEME_TEST_*_COOKIE" ]` block is indented and counts towards the floor too.
 - 2026-09-14: `pnpm test` is vitest, and **vitest does not typecheck**. A type error in a Vue file or a server handler passes the tests and fails `pnpm typecheck` (`nuxt typecheck`, vue-tsc) — which CI runs as its own step. Run both.
 - 2026-09-14: `pnpm smoke:passkey` runs nowhere but a terminal — it drives the real WebAuthn ceremony with a software authenticator (`scripts/webauthn-authenticator.mjs`), and a green pipeline still says nothing about that surface. `pnpm smoke:api` used to be in the same sentence; since #14 the `api` job runs it on every push.
 - 2026-09-14: CI runs **no database** (#14), so anything whose behaviour depends on a real query — an ordering, a correlated sub-select, a cascade, a unique constraint — is proved by nothing in the pipeline. Stand up a scratch Postgres and run it. **Superseded 2026-09-14 by the `api` job** (#14): CI now boots `.output/server/index.mjs` against Postgres and runs all 106 `smoke:api` checks, poster round trip and both session halves of the boundary included. `smoke:passkey` still runs nowhere but a terminal.
@@ -37,6 +39,8 @@ Everything after them is earned.
 
 ## Boundaries the tests hold, and what they actually assert
 
+- 2026-09-14: since #25 the instance base currency is an INVARIANT, not just a default: every expense freezes `base_currency`/`fx_rate`/`amount_base_cents`, balances are the plain sum of the base cents, and `PATCH /api/admin/settings` answers 409 while any expense disagrees with the requested base. Loosening that refusal silently re-labels history — it is the thing that lets `loadBudget` state one currency over a column of sums.
+- 2026-09-14: `suggestSettlements` walks debtors in BALANCE order (the list is sorted by net descending), so the SMALLEST debt is matched first. Any test pinning the plan has to expect that order; it is not "largest first" despite the doc comment's wording.
 - 2026-09-14: `test/api-boundary.test.ts` enforces the three credentials and the admin gate's import boundary in both directions. When it fails, the route is in the wrong place or reads the wrong credential — it is not the test being fussy. It checks *where* code lives and what it imports; it cannot check that the gate you called is the right one for the route.
 - 2026-09-14: `test/api-contract.test.ts` asserts a bijection between the `/api/v1` route tree and `docs/zaeme-api.openapi.yaml`. A route without a spec entry fails it, and so does a spec entry without a route. The bijection is over paths and methods — it says nothing about field names, optionality or status codes, which is exactly where a break for Enterprise hides.
 - 2026-09-14: `docs/zaeme-api.openapi.yaml` carries the string `updateTimelineItem` in a COMMENT reserving the operationId for whoever decides to give the XO that verb. A test asserting the spec "does not mention" a name fails on the reservation — assert on a declared `operationId: <name>` line instead.
@@ -94,6 +98,7 @@ Everything after them is earned.
 
 ## Types that stop guarding
 
+- 2026-09-14: a drizzle `numeric(p, s)` column comes back from Postgres PADDED TO ITS SCALE — `'1'` written to `numeric(20,10)` reads back `'1.0000000000'` — so every string assertion and every rendered rate needs the trailing zeros trimmed on read. Nothing type-checks this: the column is `string` either way.
 - 2026-09-14: A guard typed `(ev: { status: string })` accepts any row with a `status` — an RSVP, an invite — and keeps compiling if a value in `text('status', { enum: [...] })` is renamed out from under it, leaving the comparison matching nothing with `pnpm typecheck` green. Type a schema-value guard `Pick<typeof tables.X.$inferSelect, 'field'>`. Same shape as `events_expense.currency`: a value nothing notices has stopped matching.
 
 ## Style and shape
@@ -115,6 +120,8 @@ Everything after them is earned.
 
 ## Rebase and generated files
 
+- 2026-09-14: `pnpm db:generate` emits `ADD COLUMN <x> integer NOT NULL` with NO default for a `.notNull()` column with no default, which ABORTS on a table that already has rows — and that statement runs as the Kitchen `migrate` task, where a failure strands production on the previous release. Add-with-default → `UPDATE` → `DROP DEFAULT` in the generated file keeps the final shape identical to the snapshot and survives both cases; prove it by replaying 0000..N-1 into a scratch database, inserting a row, and then applying yours.
+- 2026-09-14: a server util that only *calls* `$fetch` inside a function imports cleanly under plain vitest (no Nuxt auto-imports there); one that touches it at module scope does not. Pure helpers can therefore live beside the database code they are used by and still be unit-tested directly.
 - 2026-09-14: Editing only a JSDoc comment on a schema column generates NO migration (`pnpm db:generate` says "No schema changes"), and drizzle's `text('x', { enum: [...] })` renders a plain text column — widening that list is a TypeScript change, not a migration. Both are free ways to keep `server/database/schema/*.ts` honest.
 - 2026-09-14: better-auth's `useSession()` is safe to call on an SSR'd public page (the invite page does), but `data` is null until the client resolves it. Gate any "you need an account" message on `session.value.isPending`, or a signed-in friend sees the refusal for a frame before it is taken back. NOTE the property is BORROWED: it holds because the session atom defaults to pending and fetches only in the browser. `useSession(useFetch)` returns `isPending: false`, and a version bump could seed the session server-side — so never let PRIVACY rest on it, only timing.
 - 2026-09-14: Drizzle migrations are generated (`pnpm db:generate`) and are not mergeable text. After a rebase that brought in another migration, regenerate and re-verify rather than resolving by hand.

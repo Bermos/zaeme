@@ -113,9 +113,8 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
-      # The floor the smoke step asserts. 139 is what the suite runs with both
-      # session cookies and object storage present; a bare run manages 83 (it
-      # skips 44 session-gated checks and 12 poster ones). Raise this when the
+      # The floor the smoke step asserts. 174 is what the suite runs with both
+      # session cookies and object storage present. Raise this when the
       # suite grows — never lower it to make a run go green.
       #
       # 106 -> 117 with #48, which added eleven checks to the credential
@@ -137,11 +136,19 @@ jobs:
       # prove it, and the two-sidedness is the point: labelling the whole of
       # /api/me one way passes half of them.
       #
+      # 139 -> 174 with #25, thirty-five checks that EXECUTE the money
+      # arithmetic: a CHF + EUR + GBP trip whose balances and settlement plan
+      # are reconciled by hand, a delete that takes exactly its own base cents
+      # with it, the refusal-with-a-way-through when no rate can be fetched,
+      # and the owner gate on the instance base currency. They are the only
+      # thing that checks what the budget COMPUTES — `currency` was stored,
+      # typed and rendered for months while nothing summed with it.
+      #
       # Keep this EXACT. A floor that is slack by the width of somebody else's
       # group is a floor that lets that group stop running — which is the silent
       # degradation this assertion exists to prevent, arriving by rebase rather
       # than by rename.
-      MIN_SMOKE_CHECKS: '139'
+      MIN_SMOKE_CHECKS: '174'
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
       # falls through to the dry run, which is what lets the magic-link sign-in
       # below read its token out of the database instead of out of an inbox.

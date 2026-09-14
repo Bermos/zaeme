@@ -29,6 +29,13 @@
       "when": 1789260953154,
       "tag": "0003_passkey",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789391089400,
+      "tag": "0004_fair_stature",
+      "breakpoints": true
     }
   ]
 }

@@ -14,13 +14,18 @@
  * a friend fronted is the convenience that makes the account gate bearable. The
  * list therefore shows BOTH the payer and whoever typed it in.
  */
-interface Share { name: string, email: string, amountCents: number }
+interface Share { name: string, email: string, amountCents: number, amountBaseCents: number }
 interface Expense {
   id: string
   title: string
   category: string
+  /** As spent, in `currency`. */
   amountCents: number
   currency: string
+  /** As settled, in `baseCurrency` — the only figure the balances are built from. */
+  amountBaseCents: number
+  baseCurrency: string
+  fxRate: string
   paidByName: string
   paidByEmail: string
   note: string | null
@@ -32,7 +37,9 @@ interface Budget {
   expenses: Expense[]
   balances: Array<{ name: string, email: string, paidCents: number, owedCents: number, netCents: number }>
   settlements: Array<{ fromName: string, fromEmail: string, toName: string, toEmail: string, amountCents: number }>
+  /** Every expense summed, in base cents. */
   totalCents: number
+  /** The INSTANCE BASE CURRENCY: what every figure outside `expenses` is in. */
   currency: string
 }
 interface Participant { name: string, email: string }
@@ -76,6 +83,24 @@ function francs(cents: number): string {
   return (cents / 100).toLocaleString('en-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+/**
+ * "€120.00" — the amount with its own currency's symbol. An unknown or
+ * half-typed code makes `Intl` throw, so it falls back to the bare code, which
+ * is also what a three-letter currency with no symbol renders as anyway.
+ */
+function money(cents: number, code: string): string {
+  try {
+    return new Intl.NumberFormat('en-CH', { style: 'currency', currency: code }).format(cents / 100)
+  } catch {
+    return `${code} ${francs(cents)}`
+  }
+}
+
+/** Whether this expense was spent in something other than what we settle in. */
+function isForeign(x: Expense): boolean {
+  return x.currency !== x.baseCurrency
+}
+
 const canWrite = computed(() => !!props.viewer && !props.lockedReason)
 
 /** Everyone offerable as the payer — the split list, plus the viewer. */
@@ -113,6 +138,72 @@ watch(() => props.viewer?.email, (email) => {
 const amountCents = computed(() => Math.round(Number.parseFloat(amount.value || '0') * 100))
 const payer = computed(() => payerOptions.value.find(p => p.email === payerEmail.value) ?? props.viewer)
 
+/* ---- the currency this one was spent in ---- */
+
+/**
+ * Money spent abroad. The currency defaults to what the instance settles in, in
+ * which case none of this is on screen; pick something else and the form asks
+ * for a rate, prefilled with today's if one can be fetched and EDITABLE either
+ * way. The rate is frozen onto the expense server-side, so what is shown here
+ * is what the balance will be built from forever.
+ */
+const spentCurrency = ref('')
+const fxRate = ref('')
+const fxAsOf = ref<string | null>(null)
+const fxPending = ref(false)
+const fxUnavailable = ref(false)
+
+watch(() => props.budget.currency, (base) => {
+  if (!spentCurrency.value) spentCurrency.value = base
+}, { immediate: true })
+
+const foreign = computed(() => {
+  const code = spentCurrency.value.trim().toUpperCase()
+  return /^[A-Z]{3}$/.test(code) && code !== props.budget.currency
+})
+
+const convertedCents = computed(() => {
+  const rate = Number.parseFloat(fxRate.value)
+  if (!foreign.value) return amountCents.value
+  if (!Number.isFinite(rate) || rate <= 0) return null
+  return Math.round(amountCents.value * rate)
+})
+
+/**
+ * Ask for today's rate. A failure is not an error state to recover from — the
+ * field simply stays empty and the person types the rate in, which is also the
+ * whole story on an instance with no outbound network.
+ */
+async function quoteRate() {
+  const code = spentCurrency.value.trim().toUpperCase()
+  fxAsOf.value = null
+  fxUnavailable.value = false
+  if (!foreign.value) {
+    fxRate.value = ''
+    return
+  }
+  fxPending.value = true
+  try {
+    const q = await $fetch<{ rate: string | null, asOf: string | null }>('/api/me/fx/rate', { query: { from: code } })
+    if (q.rate) {
+      fxRate.value = q.rate
+      fxAsOf.value = q.asOf
+    } else {
+      fxUnavailable.value = true
+    }
+  } catch {
+    fxUnavailable.value = true
+  } finally {
+    fxPending.value = false
+  }
+}
+
+// A complete code is the trigger; nothing is fetched while somebody is still
+// typing one, and nothing is fetched at all for the base currency.
+watch(spentCurrency, (code) => {
+  if (/^[A-Za-z]{3}$/.test(code.trim())) quoteRate()
+})
+
 async function addExpense() {
   if (!payer.value) return
   if (!title.value || !Number.isFinite(amountCents.value) || amountCents.value <= 0 || !selected.value.length) return
@@ -125,6 +216,10 @@ async function addExpense() {
         title: title.value,
         category: category.value,
         amountCents: amountCents.value,
+        currency: spentCurrency.value.trim().toUpperCase() || props.budget.currency,
+        // Only when there is something to convert, and only when a rate was
+        // actually settled on: an empty field means "fetch one", not "use 0".
+        ...(foreign.value && fxRate.value.trim() ? { fxRate: fxRate.value.trim() } : {}),
         paidByName: payer.value.name,
         paidByEmail: payer.value.email,
         participants
@@ -132,6 +227,10 @@ async function addExpense() {
     })
     title.value = ''
     amount.value = ''
+    spentCurrency.value = props.budget.currency
+    fxRate.value = ''
+    fxAsOf.value = null
+    fxUnavailable.value = false
     adding.value = false
     emit('updated', res.budget)
     toast.add({ title: 'Expense recorded', color: 'success' })
@@ -173,7 +272,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           variant="subtle"
           color="neutral"
         >
-          {{ budget.currency }} {{ francs(budget.totalCents) }}
+          {{ money(budget.totalCents, budget.currency) }}
         </UBadge>
       </div>
     </template>
@@ -198,8 +297,14 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
                 {{ CATEGORY_ICONS[x.category] || '🧾' }} {{ x.title }}
               </p>
               <p class="text-muted">
-                {{ x.paidByName }} paid {{ x.currency }} {{ francs(x.amountCents) }}
+                {{ x.paidByName }} paid {{ money(x.amountCents, x.currency) }}{{ isForeign(x) ? ` (${money(x.amountBaseCents, x.baseCurrency)})` : '' }}
                 · split {{ x.shares.length }} way{{ x.shares.length === 1 ? '' : 's' }}
+              </p>
+              <p
+                v-if="isForeign(x)"
+                class="text-muted text-xs"
+              >
+                converted at {{ x.fxRate }} when it was recorded
               </p>
               <p
                 v-if="x.addedByName && x.addedByEmail !== x.paidByEmail"
@@ -209,7 +314,9 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
               </p>
             </div>
             <div class="flex items-center gap-1">
-              <span class="tabular-nums font-medium">{{ francs(x.amountCents) }}</span>
+              <!-- The base figure, because it is the one the balances below are
+                   built from; the as-spent amount is on the line above. -->
+              <span class="tabular-nums font-medium">{{ francs(x.amountBaseCents) }}</span>
               <UButton
                 v-if="canRemove(x)"
                 size="xs"
@@ -235,7 +342,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           class="flex flex-col gap-1"
         >
           <p class="text-sm font-medium">
-            Balances
+            Balances <span class="text-muted font-normal">· in {{ budget.currency }}</span>
           </p>
           <div
             v-for="b in budget.balances"
@@ -270,7 +377,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           >
             👉 <span class="font-medium text-default">{{ s.fromName }}</span> pays
             <span class="font-medium text-default">{{ s.toName }}</span>
-            {{ budget.currency }} {{ francs(s.amountCents) }}
+            {{ money(s.amountCents, budget.currency) }}
           </p>
         </div>
       </template>
@@ -328,7 +435,41 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
             placeholder="120.00"
             class="w-28"
           />
+          <UInput
+            v-model="spentCurrency"
+            placeholder="CHF"
+            maxlength="3"
+            class="w-20 uppercase"
+          />
         </div>
+
+        <!-- Spent abroad: the rate is asked for, shown, and editable. The form
+             never blocks on the fetch — an unavailable rate just means typing
+             one in. -->
+        <UFormField
+          v-if="foreign"
+          :label="`Rate ${spentCurrency.toUpperCase()} → ${budget.currency}`"
+          size="sm"
+          :help="fxUnavailable
+            ? 'No rate could be fetched just now — enter one and it will be recorded with it.'
+            : fxAsOf ? `ECB reference rate, ${fxAsOf}. Frozen onto this expense.` : 'Frozen onto this expense.'"
+        >
+          <div class="flex items-center gap-2">
+            <UInput
+              v-model="fxRate"
+              type="number"
+              step="0.0001"
+              min="0"
+              placeholder="0.9412"
+              class="w-32"
+              :loading="fxPending"
+            />
+            <span
+              v-if="convertedCents !== null && amountCents > 0"
+              class="text-sm text-muted tabular-nums"
+            >= {{ money(convertedCents, budget.currency) }}</span>
+          </div>
+        </UFormField>
         <UFormField
           label="Paid by"
           size="sm"
@@ -356,7 +497,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
             type="submit"
             size="sm"
             :loading="saving"
-            :disabled="!title || !amount || !selected.length || !payerEmail"
+            :disabled="!title || !amount || !selected.length || !payerEmail || (foreign && !fxRate)"
           >
             Record it
           </UButton>

@@ -8,6 +8,10 @@ const bodySchema = z.object({
   category: z.enum(['travel', 'accommodation', 'food', 'tickets', 'other']).optional(),
   amountCents: z.number().int().positive(),
   currency: z.string().length(3).optional(),
+  // The manual override (#25). Present means "do not fetch a rate" — which is
+  // both the correction of a wrong one and the only way in on an instance with
+  // no outbound network.
+  fxRate: z.string().regex(/^\d+(\.\d+)?$/).optional(),
   note: z.string().max(500).optional().nullable(),
   paidByName: z.string().min(1).max(200),
   paidByEmail: z.string().email(),
