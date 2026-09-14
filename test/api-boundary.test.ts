@@ -307,8 +307,14 @@ describe('the account surface is a session, and the invite link never becomes on
   it('the two expense write gates agree about `logistics`', () => {
     // `addExpenseAsPlanner` refuses a logistics planner on the host surface. If
     // the participant surface accepted one, the same account would be 403'd on
-    // /api/host and 200'd on /api/me for the same verb — which is how a role
-    // restriction stops meaning anything.
+    // /api/host and 200'd on /api/me for the same verb.
+    //
+    // This pins the ROLE SETS and nothing else. The two surfaces still differ on
+    // the event LIFECYCLE on purpose — `assertEventOpenToGuests` is a guest-side
+    // rule, so a co-planner may budget a draft trip on /api/host and /api/v1
+    // while a participant may not on /api/me. That asymmetry is deliberate and
+    // is named in #52; do not read this test as asserting the two gates agree
+    // about everything.
     const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
     const writers = /const EXPENSE_WRITERS[^=]*=\s*\[([^\]]*)\]/.exec(expenses)?.[1] ?? ''
     expect(writers).toMatch(/'participant'/)
@@ -318,6 +324,30 @@ describe('the account surface is a session, and the invite link never becomes on
 
     const plannerGate = /assertPlanner\(ev\.id, userId, \{ roles: \[([^\]]*)\] \}\)/.exec(expenses)?.[1] ?? ''
     expect(plannerGate).toBe('\'owner\', \'co_planner\'')
+  })
+
+  it('the invite link can say a budget EXISTS without saying what is in it', () => {
+    // Two different questions, and this line has already moved twice. Who may
+    // WRITE is `viewer` + `lockedReason`; who may READ THE FIGURES is
+    // `showAmounts`. Collapsing them renders the expense list, the balances and
+    // the settlement plan to anybody a link was forwarded to — no new
+    // capability (the budget was always in the payload and `GET
+    // /api/invites/[token]/budget` was always open) but a change in what the
+    // page says by default to somebody who has typed nothing.
+    const card = readFileSync(join(ROOT, 'app', 'components', 'BudgetCard.vue'), 'utf8')
+    expect(card).toMatch(/showAmounts: boolean/)
+    // Required, not optional: a new caller has to decide rather than inherit.
+    expect(card).not.toMatch(/showAmounts\?:/)
+
+    const template = /<template>([\s\S]*)<\/template>\s*$/.exec(card)?.[1] ?? ''
+    expect(template).toMatch(/<template v-if="showAmounts">/)
+    // The running total is a figure too, and it lives outside that block.
+    expect(template).toMatch(/v-if="showAmounts"[\s\S]{0,200}budget\.totalCents/)
+
+    // …and the guest page keeps the figures exactly where they were before #48:
+    // behind an identified visitor, never behind the mere presence of a link.
+    const invitePage = readFileSync(join(ROOT, 'app', 'pages', 'i', '[token].vue'), 'utf8')
+    expect(invitePage).toMatch(/:show-amounts="complete \|\| !!account"/)
   })
 
   it('records the account surface in the audit, like every other human one', () => {

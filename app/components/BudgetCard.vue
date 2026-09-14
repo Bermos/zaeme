@@ -46,6 +46,17 @@ const props = defineProps<{
   participants: Participant[]
   /** The signed-in account, or null when nobody is signed in. */
   viewer: Participant | null
+  /**
+   * Whether to render the NUMBERS — the expense list, the balances, the
+   * settlement plan and the running total.
+   *
+   * Separate from `viewer` and from `lockedReason` on purpose, and required
+   * rather than defaulted so a new caller has to decide. Who may WRITE and who
+   * may READ the figures are different questions: an invite link forwarded into
+   * a group chat should be able to say "there is a budget here, sign in" without
+   * also saying "Ana owes Matthew CHF 300" to somebody who has typed nothing.
+   */
+  showAmounts: boolean
   /** Why writing is unavailable right now — rendered instead of the form. */
   lockedReason?: string | null
   /** Where to send somebody who needs to sign in first. */
@@ -158,6 +169,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           </p>
         </div>
         <UBadge
+          v-if="showAmounts"
           variant="subtle"
           color="neutral"
         >
@@ -167,96 +179,101 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
     </template>
 
     <div class="flex flex-col gap-4">
-      <!-- Expenses -->
-      <div
-        v-if="budget.expenses.length"
-        class="flex flex-col gap-1"
-      >
+      <!-- The figures. `<template>` rather than a wrapper element: these are
+           direct children of a `flex flex-col gap-4`, and a real div would
+           collapse them into one gapless item. -->
+      <template v-if="showAmounts">
+        <!-- Expenses -->
         <div
-          v-for="x in budget.expenses"
-          :key="x.id"
-          class="flex items-start justify-between gap-2 py-2 border-b border-default last:border-b-0 text-sm"
+          v-if="budget.expenses.length"
+          class="flex flex-col gap-1"
         >
-          <div>
-            <p class="font-medium">
-              {{ CATEGORY_ICONS[x.category] || '🧾' }} {{ x.title }}
-            </p>
-            <p class="text-muted">
-              {{ x.paidByName }} paid {{ x.currency }} {{ francs(x.amountCents) }}
-              · split {{ x.shares.length }} way{{ x.shares.length === 1 ? '' : 's' }}
-            </p>
-            <p
-              v-if="x.addedByName && x.addedByEmail !== x.paidByEmail"
-              class="text-muted text-xs"
-            >
-              added by {{ x.addedByName }}
-            </p>
-          </div>
-          <div class="flex items-center gap-1">
-            <span class="tabular-nums font-medium">{{ francs(x.amountCents) }}</span>
-            <UButton
-              v-if="canRemove(x)"
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              @click="removeExpense(x.id)"
-            >
-              ✕
-            </UButton>
-          </div>
-        </div>
-      </div>
-      <p
-        v-else
-        class="text-sm text-muted"
-      >
-        No expenses yet.
-      </p>
-
-      <!-- Balances -->
-      <div
-        v-if="budget.balances.length"
-        class="flex flex-col gap-1"
-      >
-        <p class="text-sm font-medium">
-          Balances
-        </p>
-        <div
-          v-for="b in budget.balances"
-          :key="b.email"
-          class="flex items-center justify-between text-sm py-1"
-        >
-          <span>{{ b.name }}<span
-            v-if="viewer && b.email === viewer.email"
-            class="text-muted"
-          > (you)</span></span>
-          <span
-            class="tabular-nums font-medium"
-            :class="b.netCents > 0 ? 'text-success' : b.netCents < 0 ? 'text-error' : 'text-muted'"
+          <div
+            v-for="x in budget.expenses"
+            :key="x.id"
+            class="flex items-start justify-between gap-2 py-2 border-b border-default last:border-b-0 text-sm"
           >
-            {{ b.netCents > 0 ? '+' : '' }}{{ francs(b.netCents) }}
-          </span>
+            <div>
+              <p class="font-medium">
+                {{ CATEGORY_ICONS[x.category] || '🧾' }} {{ x.title }}
+              </p>
+              <p class="text-muted">
+                {{ x.paidByName }} paid {{ x.currency }} {{ francs(x.amountCents) }}
+                · split {{ x.shares.length }} way{{ x.shares.length === 1 ? '' : 's' }}
+              </p>
+              <p
+                v-if="x.addedByName && x.addedByEmail !== x.paidByEmail"
+                class="text-muted text-xs"
+              >
+                added by {{ x.addedByName }}
+              </p>
+            </div>
+            <div class="flex items-center gap-1">
+              <span class="tabular-nums font-medium">{{ francs(x.amountCents) }}</span>
+              <UButton
+                v-if="canRemove(x)"
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                @click="removeExpense(x.id)"
+              >
+                ✕
+              </UButton>
+            </div>
+          </div>
         </div>
-      </div>
-
-      <!-- Settle up -->
-      <div
-        v-if="budget.settlements.length"
-        class="flex flex-col gap-1"
-      >
-        <p class="text-sm font-medium">
-          To settle up
-        </p>
         <p
-          v-for="(s, i) in budget.settlements"
-          :key="i"
+          v-else
           class="text-sm text-muted"
         >
-          👉 <span class="font-medium text-default">{{ s.fromName }}</span> pays
-          <span class="font-medium text-default">{{ s.toName }}</span>
-          {{ budget.currency }} {{ francs(s.amountCents) }}
+          No expenses yet.
         </p>
-      </div>
+
+        <!-- Balances -->
+        <div
+          v-if="budget.balances.length"
+          class="flex flex-col gap-1"
+        >
+          <p class="text-sm font-medium">
+            Balances
+          </p>
+          <div
+            v-for="b in budget.balances"
+            :key="b.email"
+            class="flex items-center justify-between text-sm py-1"
+          >
+            <span>{{ b.name }}<span
+              v-if="viewer && b.email === viewer.email"
+              class="text-muted"
+            > (you)</span></span>
+            <span
+              class="tabular-nums font-medium"
+              :class="b.netCents > 0 ? 'text-success' : b.netCents < 0 ? 'text-error' : 'text-muted'"
+            >
+              {{ b.netCents > 0 ? '+' : '' }}{{ francs(b.netCents) }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Settle up -->
+        <div
+          v-if="budget.settlements.length"
+          class="flex flex-col gap-1"
+        >
+          <p class="text-sm font-medium">
+            To settle up
+          </p>
+          <p
+            v-for="(s, i) in budget.settlements"
+            :key="i"
+            class="text-sm text-muted"
+          >
+            👉 <span class="font-medium text-default">{{ s.fromName }}</span> pays
+            <span class="font-medium text-default">{{ s.toName }}</span>
+            {{ budget.currency }} {{ francs(s.amountCents) }}
+          </p>
+        </div>
+      </template>
 
       <!-- Money needs an account: say so, and never offer a sign-in that cannot complete -->
       <UAlert

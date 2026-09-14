@@ -36,8 +36,15 @@ interface AssertPlannerOpts {
  * link, so it lives here now and both paths call it.
  *
  * `completed` deliberately still passes: settling up happens after the trip.
+ *
+ * The parameter is the SCHEMA's status union, not `{ status: string }`. Widened
+ * to `string` this compiles against any row that happens to have a `status` —
+ * an RSVP, an invite — and, worse, renaming a value in
+ * `text('status', { enum: [...] })` would leave the comparisons below matching
+ * nothing with `pnpm typecheck` still green. That is the `events_expense.currency`
+ * shape exactly: a guard nobody notices has stopped guarding.
  */
-export function assertEventOpenToGuests(ev: { status: string }): void {
+export function assertEventOpenToGuests(ev: Pick<typeof tables.event.$inferSelect, 'status'>): void {
   if (ev.status === 'draft' || ev.status === 'cancelled') {
     throw createError({ statusCode: 403, message: 'Event is not currently accepting RSVPs' })
   }

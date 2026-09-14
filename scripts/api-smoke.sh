@@ -277,10 +277,13 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$DRAFT/status" -d '{"status":"published"}' > /dev/null
   body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$DRAFT/status" -d '{"status":"cancelled"}' > /dev/null
   check "a CANCELLED event takes no expense"       403 "${PLANNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$DRAFT/expenses" -d "$NEW"
-  # …but a finished trip must still settle up.
+  # …but a finished trip must still settle up. This LEAVES $TSLUG completed, and
+  # has to: `STATUS_TRANSITIONS.completed` is `[]` (`server/domain/events-data.ts`),
+  # so `completed` is terminal and there is no legal way back to `published`. A
+  # restore here would 409 into /dev/null and read as if it had worked — so any
+  # check appended below must mint its own event rather than assume this one.
   body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSLUG/status" -d '{"status":"completed"}' > /dev/null
   check "a COMPLETED event still settles up"       200 "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW"
-  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSLUG/status" -d '{"status":"published"}' > /dev/null
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
 fi

@@ -309,7 +309,10 @@ const errorMessage = computed(() => {
         @updated="refresh"
       />
 
-      <!-- Trip budget & splitting -->
+      <!-- Trip budget & splitting. Two gates, not one: the card appears for an
+           unidentified visitor so it can say "there is a budget here, sign in",
+           and `show-amounts` decides separately whether it says any NUMBERS —
+           which stays exactly where it was before #48, behind `complete`. -->
       <BudgetCard
         v-if="budget && (complete || account || !!budgetLockedReason)"
         :budget="budget"
@@ -317,6 +320,7 @@ const errorMessage = computed(() => {
         :expenses-base="`/api/me/events/${page.event.slug}/expenses`"
         :participants="splitParticipants"
         :viewer="account"
+        :show-amounts="complete || !!account"
         :locked-reason="budgetLockedReason"
         :sign-in-to="budgetSignInTo"
         @updated="onBudgetUpdated"
