@@ -488,8 +488,14 @@ sentence that caused it is issue #12, and wants its own table.
   over the source, and unit-tests the constant-time comparison.
 - `scripts/api-smoke.sh` (`pnpm smoke:api`) exercises the whole surface against a
   running server with a real database — including both directions of the
-  boundary with a genuine session and a genuine service token. It does not run
-  in CI.
+  boundary with a genuine session and a genuine service token. Since #14 it runs
+  in CI too, in the `api` job: service containers for Postgres and an
+  S3-compatible store, then the BUILT server (`.output/server/index.mjs`, not
+  `pnpm dev`) waited for on `/healthz`. The job fails if any check *skips*, so a
+  missing credential degrades it loudly rather than quietly proving less.
+- `scripts/passkey-smoke.mjs` (`pnpm smoke:passkey`) runs the real WebAuthn
+  ceremony with a software authenticator, and runs **nowhere but a terminal** —
+  a green pipeline says nothing about the passkey surface.
 
 -----
 

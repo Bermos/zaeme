@@ -174,7 +174,7 @@ pnpm lint
 pnpm typecheck
 pnpm test
 
-# smoke tests (need a running server; neither runs in CI)
+# smoke tests (need a running server; only smoke:api runs in CI)
 pnpm smoke:api     # the whole /api/v1 surface, both sides of the credential wall
 pnpm smoke:passkey # the real WebAuthn ceremony with a software authenticator
 
