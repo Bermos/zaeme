@@ -44,17 +44,39 @@ const SURFACE_ITEMS = [
   { label: 'Admin', value: 'admin' },
   { label: 'Host', value: 'host' },
   { label: 'Invite links', value: 'invite' },
-  { label: 'My invites', value: 'me' },
+  // `me` stopped being only "my invites" when expense writes moved onto it
+  // (#48): it is the ACCOUNT surface, and the filter should say so.
+  { label: 'Account', value: 'me' },
   { label: 'Enterprise', value: 'machine' }
 ]
+/**
+ * Every value `actorKind` can hold. A kind missing from this list is a category
+ * the page silently stops being able to show — which is how `participant`
+ * spent its first hours (#51).
+ */
 const ACTOR_ITEMS = [
   { label: 'Anyone', value: '' },
   { label: 'Owner', value: 'owner' },
   { label: 'Planner', value: 'planner' },
+  { label: 'Participant', value: 'participant' },
   { label: 'Guest', value: 'guest' },
   { label: 'Enterprise', value: 'service' },
   { label: 'Unauthenticated', value: 'anonymous' }
 ]
+
+/**
+ * Planner and participant are the two the log used to conflate, so they must not
+ * look alike at a glance — the whole point of #51 is that "who was this" is
+ * readable from the badge.
+ */
+const ACTOR_COLORS: Record<string, 'primary' | 'secondary' | 'info' | 'neutral'> = {
+  owner: 'primary',
+  planner: 'primary',
+  participant: 'secondary',
+  guest: 'primary',
+  service: 'info',
+  anonymous: 'neutral'
+}
 
 function statusColor(status: number | null): 'success' | 'warning' | 'error' | 'neutral' {
   if (status === null) return 'neutral'
@@ -172,7 +194,7 @@ function statusColor(status: number | null): 'success' | 'warning' | 'error' | '
                 <UBadge
                   size="sm"
                   variant="subtle"
-                  :color="entry.actorKind === 'service' ? 'info' : entry.actorKind === 'anonymous' ? 'neutral' : 'primary'"
+                  :color="ACTOR_COLORS[entry.actorKind] ?? 'primary'"
                 >
                   {{ entry.actorKind }}
                 </UBadge>

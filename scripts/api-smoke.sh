@@ -99,6 +99,22 @@ equals() {
   fi
 }
 
+# `audit_await <url> <needle>` — the audit row is written from the response's
+# `finish` hook, AFTER the body is on the wire, so a read issued straight
+# afterwards can legitimately beat it. Poll briefly rather than sleep blindly,
+# and return whatever the last read said so a failure still prints something.
+audit_await() {
+  local url="$1" needle="$2" out=''
+  local i=0
+  while [ "$i" -lt 20 ]; do
+    out=$(body -H "Cookie: $ZAEME_TEST_SESSION_COOKIE" "$url")
+    case "$out" in *"$needle"*) printf '%s' "$out"; return 0 ;; esac
+    sleep 0.25
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
 # The three fields of an itinerary, in the order the API returned them. No jq:
 # this script runs wherever curl and sed do.
 tl_titles() { printf '%s' "$1" | grep -o '"title":"[^"]*"' | sed 's/^"title":"//;s/"$//' | tr '\n' ' ' | sed 's/ $//'; }
@@ -358,6 +374,65 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   check "a COMPLETED event still settles up"       200 "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW"
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
+
+echo
+echo "== the audit tells a participant from a planner (Bermos/zaeme#51) =="
+# The ONE thing that proves #51, and no unit test can: a real participant write
+# on /api/me, executed, and then the kind the audit actually RECORDED for it.
+# Every structural check passes just as happily with the old
+# `owner-or-planner` line in place — the label is computed at the edge and read
+# back by a query, so the only honest assertion runs both halves.
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  OWNER_COOKIE=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  GUEST=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
+
+  # A trip of its own: $TSLUG above is left `completed` and cannot come back
+  # (`STATUS_TRANSITIONS.completed` is `[]`), and an invite token only resolves
+  # on a live event.
+  ATRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke audit trip $SUFFIX\",\"type\":\"trip\"}" \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$ATRIP/status" -d '{"status":"published"}' > /dev/null
+  ATOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$ATRIP/invites" -d '{"label":"Audit smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+
+  # The second account's OWN address, asked of better-auth rather than guessed:
+  # a participant is an RSVP whose guestEmail is the account's email, so the
+  # whole check turns on getting that string right.
+  GEMAIL=$(body "${GUEST[@]}" "$BASE/api/auth/get-session" | grep -o '"email":"[^"]*"' | head -1 | sed 's/^"email":"//;s/"$//')
+  body "${JSON[@]}" -X POST "$BASE/api/invites/$ATOK/rsvp" \
+    -d "{\"status\":\"yes\",\"guestName\":\"CI Guest\",\"guestEmail\":\"$GEMAIL\"}" > /dev/null
+
+  # No planner row on this trip, an RSVP and nothing else — which is exactly the
+  # caller #48 created and #51 was mislabelling.
+  check "a participant with an RSVP may write an expense" 200 "${GUEST[@]}" "${JSON[@]}" \
+    -X POST "$BASE/api/me/events/$ATRIP/expenses" -d "$NEW"
+  APART=$(audit_await "$BASE/api/admin/audit?actorKind=participant&surface=me&eventSlug=$ATRIP&limit=10" '"actorKind":"participant"')
+  contains "...and the audit files it as a participant" "$APART" '"actorKind":"participant"'
+  contains "...against the account that wrote it"       "$APART" "\"actorLabel\":\"$GEMAIL\""
+
+  # …and a NON-owner who really does plan the event is still a planner on the
+  # same surface. This is the half that the cheap fix — labelling all of
+  # /api/me `participant` — would have got wrong, so it is asserted rather than
+  # assumed. The second account plans its own trip, which is the only way to
+  # come by a planner row without being the instance owner.
+  GTRIP=$(body "${GUEST[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events" \
+    -d "{\"title\":\"Smoke guest trip $SUFFIX\",\"type\":\"trip\"}" \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${GUEST[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$GTRIP/status" -d '{"status":"published"}' > /dev/null
+  check "a planner who is not the owner may write there too" 200 "${GUEST[@]}" "${JSON[@]}" \
+    -X POST "$BASE/api/me/events/$GTRIP/expenses" -d "$NEW"
+  APLAN=$(audit_await "$BASE/api/admin/audit?actorKind=planner&surface=me&eventSlug=$GTRIP&limit=10" '"surface":"me"')
+  contains "...and the audit still calls them a planner" "$APLAN" "\"actorLabel\":\"$GEMAIL\""
+
+  # …while the same surface, written by the instance owner, is still the owner's.
+  # Labelling the whole of /api/me `participant` would have passed the check
+  # above and broken this one.
+  body "${OWNER_COOKIE[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$ATRIP/expenses" -d "$NEW" > /dev/null
+  AOWN=$(audit_await "$BASE/api/admin/audit?actorKind=owner&surface=me&eventSlug=$ATRIP&limit=10" '"surface":"me"')
+  contains "...and the owner's own write is still the owner's" "$AOWN" '"surface":"me"'
+else
+  echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
 fi
 
 echo

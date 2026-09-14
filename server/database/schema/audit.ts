@@ -29,8 +29,23 @@ import { index, integer, jsonb, pgTable, text, timestamp } from 'drizzle-orm/pg-
 export const auditLog = pgTable('zaeme_audit_log', {
   id: text('id').primaryKey(),
   at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
-  /** Which credential acted: the owner's session, another planner's, a guest's link, Enterprise. */
-  actorKind: text('actor_kind', { enum: ['owner', 'planner', 'guest', 'service', 'anonymous'] }).notNull(),
+  /**
+   * Which credential acted, and in what standing: the instance owner's session,
+   * a planner's, a participant acting for themselves on `/api/me`, a guest's
+   * invite link, Enterprise's service token, or nobody at all.
+   *
+   * `participant` arrived with #51. Before it, every session that was not the
+   * owner's was filed as `planner`, which was true only while every
+   * session-bearing surface was `/api/host/**`; expense writes moved to
+   * `/api/me/**` in #48 and a friend splitting an Airbnb has an RSVP and no
+   * planner row. Existing `planner` rows were left as they were — the kind is
+   * a label on an act that already happened, not a fact to be corrected after.
+   *
+   * Widening this list is a TypeScript change and NOT a migration: drizzle
+   * renders `text(..., { enum })` as a plain `text` column with no CHECK. Run
+   * `pnpm db:generate` to confirm it still says there is nothing to migrate.
+   */
+  actorKind: text('actor_kind', { enum: ['owner', 'planner', 'participant', 'guest', 'service', 'anonymous'] }).notNull(),
   /** The account id, the invite id, or null when the request never authenticated. */
   actorId: text('actor_id'),
   /** Something human-readable: an email, an invite label, "Enterprise". */

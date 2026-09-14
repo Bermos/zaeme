@@ -148,3 +148,29 @@ export async function assertParticipant(eventId: string, userId: string): Promis
 
   throw createError({ statusCode: 403, message: 'You are not on this event — RSVP first, then you can add expenses' })
 }
+
+/**
+ * Does this account hold a PLANNER row on the event named by `slug` — and which
+ * one? The audit recorder's question (#51), and deliberately not
+ * `assertParticipant`'s.
+ *
+ * `/api/me` is the ACCOUNT surface: the caller may be a planner of the event in
+ * the path, or a friend who merely RSVP'd, and until this existed the audit
+ * called both of them planners. The distinction the log needs is exactly the
+ * one word above — planner or not — so this asks it in ONE indexed statement,
+ * joined on the slug rather than loading the event first, instead of paying
+ * `assertParticipant`'s four lookups for an answer it would then throw away.
+ *
+ * It never throws and it never 403s. A missing event, an unknown slug and an
+ * account with no standing all answer `null`: this decides a LABEL, not access,
+ * and refusing the request is the handler's job a few milliseconds later.
+ */
+export async function findPlannerRoleBySlug(slug: string, userId: string): Promise<PlannerRole | null> {
+  const [row] = await useDb()
+    .select({ role: tables.eventPlanner.role })
+    .from(tables.eventPlanner)
+    .innerJoin(tables.event, eq(tables.event.id, tables.eventPlanner.eventId))
+    .where(and(eq(tables.event.slug, slug), eq(tables.eventPlanner.userId, userId)))
+    .limit(1)
+  return row ? row.role as PlannerRole : null
+}

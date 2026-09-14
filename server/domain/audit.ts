@@ -12,7 +12,18 @@ import { auditLog } from '../database/schema/audit'
  * completed action for a lost one. Everything here catches and logs.
  */
 
-export type AuditActorKind = 'owner' | 'planner' | 'guest' | 'service' | 'anonymous'
+/**
+ * The standing the actor held, not merely which door they came through.
+ *
+ * `owner` is the instance owner (the first account registered) whatever surface
+ * they used; `planner` holds a planner row on the event they touched;
+ * `participant` is a signed-in account acting for itself on `/api/me` with no
+ * planner row on that event — a friend on the trip (#51). `guest` is an invite
+ * capability URL, `service` is Enterprise's token and `anonymous` is a request
+ * that never authenticated. The kind says what the caller WAS; `status` says
+ * whether they were let through.
+ */
+export type AuditActorKind = 'owner' | 'planner' | 'participant' | 'guest' | 'service' | 'anonymous'
 export type AuditSurface = 'admin' | 'host' | 'me' | 'invite' | 'machine'
 
 export interface AuditEntry {
