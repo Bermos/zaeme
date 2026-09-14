@@ -2,6 +2,7 @@ import { eq, sql } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
+import { assertEventOpenToGuests } from './permissions'
 
 /**
  * Invite/RSVP credentials and resolution. Extracted from `layers/events/server/
@@ -48,9 +49,7 @@ export async function resolveInviteToken(token: string): Promise<ResolvedInvite>
   if (inv.maxUses !== null && inv.usedCount >= inv.maxUses) {
     throw createError({ statusCode: 410, message: 'This invite has reached its usage limit' })
   }
-  if (ev.status === 'draft' || ev.status === 'cancelled') {
-    throw createError({ statusCode: 403, message: 'Event is not currently accepting RSVPs' })
-  }
+  assertEventOpenToGuests(ev)
 
   return { invite: inv, event: ev }
 }

@@ -24,6 +24,25 @@ interface AssertPlannerOpts {
   roles?: readonly PlannerRole[]
 }
 
+/**
+ * An event that is not open to the people invited to it. `draft` has not been
+ * shown to anybody yet and `cancelled` is over; neither may take a guest-side
+ * write.
+ *
+ * This lived INSIDE `resolveInviteToken` (`server/domain/invite.ts`) and was
+ * reachable only by going through a token — so moving expense writes off the
+ * capability URL silently dropped it, and an expense could be recorded against
+ * a cancelled trip (#48 review). It is a rule about the EVENT, not about the
+ * link, so it lives here now and both paths call it.
+ *
+ * `completed` deliberately still passes: settling up happens after the trip.
+ */
+export function assertEventOpenToGuests(ev: { status: string }): void {
+  if (ev.status === 'draft' || ev.status === 'cancelled') {
+    throw createError({ statusCode: 403, message: 'Event is not currently accepting RSVPs' })
+  }
+}
+
 export async function loadEventBySlug(slug: string) {
   const [row] = await useDb().select().from(tables.event).where(eq(tables.event.slug, slug)).limit(1)
   if (!row) {
@@ -81,6 +100,13 @@ export async function addPlanner(eventId: string, userId: string, role: PlannerR
  * onto an account (#48): the link no longer buys the right to record money, but
  * a trip participant is not a planner either, so neither existing gate fits.
  * Reads over the invite link are untouched.
+ *
+ * It answers the STRONGEST standing, and `logistics` is the weakest — it is the
+ * one planner role that does not by itself say the holder is on the trip, and
+ * the one the host surface already refuses an expense write. So a logistics
+ * planner who ALSO RSVP'd comes back `participant` rather than being turned away
+ * by their own planner row; only a logistics planner with no RSVP comes back
+ * `logistics`, and the caller decides what that is worth.
  */
 export async function assertParticipant(eventId: string, userId: string): Promise<ParticipantRole> {
   const db = useDb()
@@ -90,7 +116,9 @@ export async function assertParticipant(eventId: string, userId: string): Promis
     .from(tables.eventPlanner)
     .where(and(eq(tables.eventPlanner.eventId, eventId), eq(tables.eventPlanner.userId, userId)))
     .limit(1)
-  if (planner) return planner.role as PlannerRole
+
+  const plannerRole = planner ? planner.role as PlannerRole : null
+  if (plannerRole === 'owner' || plannerRole === 'co_planner') return plannerRole
 
   const [account] = await db
     .select({ email: guestUser.email })
@@ -108,6 +136,8 @@ export async function assertParticipant(eventId: string, userId: string): Promis
       .limit(1)
     if (rsvp) return 'participant'
   }
+
+  if (plannerRole) return plannerRole
 
   throw createError({ statusCode: 403, message: 'You are not on this event — RSVP first, then you can add expenses' })
 }

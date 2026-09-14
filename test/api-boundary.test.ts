@@ -286,6 +286,40 @@ describe('the account surface is a session, and the invite link never becomes on
     expect(expenses).not.toMatch(/guestEmail\?:/)
   })
 
+  it('the participant write path re-checks the event lifecycle', () => {
+    // The `draft`/`cancelled` refusal used to come free with
+    // `resolveInviteToken`. Moving the write off the token dropped it, and an
+    // expense recorded happily against a CANCELLED trip. The rule is about the
+    // event, not the link, so both paths call one guard.
+    const permissions = readFileSync(join(ROOT, 'server', 'domain', 'permissions.ts'), 'utf8')
+    expect(permissions).toMatch(/export function assertEventOpenToGuests/)
+    expect(permissions).toMatch(/'draft'.*'cancelled'/s)
+
+    const invite = readFileSync(join(ROOT, 'server', 'domain', 'invite.ts'), 'utf8')
+    expect(invite).toMatch(/assertEventOpenToGuests\(ev\)/)
+    // …and the check exists in exactly one place, not two that can drift.
+    expect(invite).not.toMatch(/status === 'draft'/)
+
+    const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
+    expect(expenses).toMatch(/assertEventOpenToGuests\(ev\)/)
+  })
+
+  it('the two expense write gates agree about `logistics`', () => {
+    // `addExpenseAsPlanner` refuses a logistics planner on the host surface. If
+    // the participant surface accepted one, the same account would be 403'd on
+    // /api/host and 200'd on /api/me for the same verb — which is how a role
+    // restriction stops meaning anything.
+    const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
+    const writers = /const EXPENSE_WRITERS[^=]*=\s*\[([^\]]*)\]/.exec(expenses)?.[1] ?? ''
+    expect(writers).toMatch(/'participant'/)
+    expect(writers).toMatch(/'owner'/)
+    expect(writers).toMatch(/'co_planner'/)
+    expect(writers).not.toMatch(/'logistics'/)
+
+    const plannerGate = /assertPlanner\(ev\.id, userId, \{ roles: \[([^\]]*)\] \}\)/.exec(expenses)?.[1] ?? ''
+    expect(plannerGate).toBe('\'owner\', \'co_planner\'')
+  })
+
   it('records the account surface in the audit, like every other human one', () => {
     const middleware = readFileSync(join(ROOT, 'server', 'middleware', 'audit.ts'), 'utf8')
     expect(middleware).toMatch(/'\/api\/me\/'/)

@@ -3,7 +3,7 @@ import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
 import { guestUser } from '../database/schema/auth'
-import { assertParticipant, assertPlanner, loadEventBySlug } from './permissions'
+import { assertEventOpenToGuests, assertParticipant, assertPlanner, loadEventBySlug, type ParticipantRole } from './permissions'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
@@ -347,6 +347,33 @@ export async function removeExpenseAsPlanner(userId: string, slug: string, expen
 /* ------------------------- participant-scoped shape ------------------------ */
 
 /**
+ * Who may move money on the participant surface. `logistics` is absent on
+ * purpose: `addExpenseAsPlanner` already refuses it on the host surface, and
+ * two gates disagreeing about one verb is how a role restriction stops meaning
+ * anything. A logistics planner who is genuinely on the trip has an RSVP, and
+ * `assertParticipant` answers `participant` for them.
+ */
+const EXPENSE_WRITERS: readonly ParticipantRole[] = ['participant', 'owner', 'co_planner']
+
+/**
+ * The standing every participant-surface expense write needs: the event is open
+ * to the people invited to it, and this account is one of them.
+ *
+ * The lifecycle half used to come free with `resolveInviteToken`; it does not
+ * come free here, and without it an expense records happily against a cancelled
+ * trip (#48 review).
+ */
+async function assertMayWriteExpenses(slug: string, actor: ParticipantActor) {
+  const ev = await loadEventBySlug(slug)
+  assertEventOpenToGuests(ev)
+  const role = await assertParticipant(ev.id, actor.id)
+  if (!EXPENSE_WRITERS.includes(role)) {
+    throw createError({ statusCode: 403, message: 'Your role on this event does not cover the budget' })
+  }
+  return { ev, role }
+}
+
+/**
  * Record an expense as a signed-in PARTICIPANT of the event (#48). The gate is
  * `assertParticipant`, not `assertPlanner`: a friend on a trip is not a
  * planner, and the invite link is no longer a licence to write money.
@@ -356,15 +383,13 @@ export async function removeExpenseAsPlanner(userId: string, slug: string, expen
  * `createdByUserId` records who actually typed it.
  */
 export async function addExpenseAsParticipant(actor: ParticipantActor, slug: string, input: AddExpenseInput) {
-  const ev = await loadEventBySlug(slug)
-  await assertParticipant(ev.id, actor.id)
+  const { ev } = await assertMayWriteExpenses(slug, actor)
   return addExpense(ev.id, input, { userId: actor.id })
 }
 
 /** Remove an expense you recorded or paid; a planner of the event may remove any. */
 export async function removeExpenseAsParticipant(actor: ParticipantActor, slug: string, expenseId: string) {
-  const ev = await loadEventBySlug(slug)
-  const role = await assertParticipant(ev.id, actor.id)
+  const { ev, role } = await assertMayWriteExpenses(slug, actor)
   await removeExpense(ev.id, expenseId, {
     userId: actor.id,
     email: actor.email,

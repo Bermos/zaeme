@@ -261,11 +261,26 @@ else
 fi
 
 if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  PLANNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
   # The owner planned this trip (the machine API acts as them), so they pass
   # `assertParticipant` as a planner and the write goes through.
-  PAID=$(body -H "Cookie: $ZAEME_TEST_SESSION_COOKIE" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW")
+  PAID=$(body "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW")
   contains "a planner's account may write"          "$PAID" '"expenses"'
   contains "...and the row records WHO added it"    "$PAID" '"addedByName"'
+
+  # The event LIFECYCLE check used to come free with `resolveInviteToken`.
+  # Moving the write off the token dropped it, and an expense recorded happily
+  # against a cancelled trip; `assertEventOpenToGuests` is that rule, shared.
+  DRAFT=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke draft trip $SUFFIX\",\"type\":\"trip\"}" \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  check "a DRAFT event takes no expense"           403 "${PLANNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$DRAFT/expenses" -d "$NEW"
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$DRAFT/status" -d '{"status":"published"}' > /dev/null
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$DRAFT/status" -d '{"status":"cancelled"}' > /dev/null
+  check "a CANCELLED event takes no expense"       403 "${PLANNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$DRAFT/expenses" -d "$NEW"
+  # …but a finished trip must still settle up.
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSLUG/status" -d '{"status":"completed"}' > /dev/null
+  check "a COMPLETED event still settles up"       200 "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW"
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSLUG/status" -d '{"status":"published"}' > /dev/null
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
 fi

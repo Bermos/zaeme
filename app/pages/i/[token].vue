@@ -80,10 +80,16 @@ const account = computed(() => {
  * budget — and only in the browser, so the SSR'd invite page stays one query.
  */
 const mailReady = ref<boolean | null>(null)
+let mailProbed = false
 watch([budget, account], async ([b, acct]) => {
-  if (!import.meta.client || !b || acct || mailReady.value !== null) return
+  if (!import.meta.client || !b || acct || mailProbed) return
+  mailProbed = true
   const status = await $fetch<{ emailConfigured: boolean }>('/api/setup/status').catch(() => null)
-  mailReady.value = status?.emailConfigured ?? true
+  // `?? null` on purpose: a failed probe leaves this UNKNOWN, and the unknown
+  // copy promises nothing. Defaulting to `true` here would tell a signed-out
+  // friend on a dry-run instance that a link is coming, which is the one thing
+  // CLAUDE.md and #48 forbid this screen to do.
+  mailReady.value = status?.emailConfigured ?? null
 }, { immediate: true })
 
 const budgetLockedReason = computed(() => {
@@ -305,7 +311,7 @@ const errorMessage = computed(() => {
 
       <!-- Trip budget & splitting -->
       <BudgetCard
-        v-if="budget"
+        v-if="budget && (complete || account || !!budgetLockedReason)"
         :budget="budget"
         :add-url="`/api/me/events/${page.event.slug}/expenses`"
         :expenses-base="`/api/me/events/${page.event.slug}/expenses`"
