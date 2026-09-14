@@ -476,7 +476,7 @@ export async function updateTimelineItem(
 ) {
   const ev = await loadEventBySlug(slug)
   await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
-  return applyTimelineItemUpdate(ev.id, itemId, input)
+  return applyTimelineItemUpdate({ eventId: ev.id, itemId, input })
 }
 
 /**
@@ -486,12 +486,19 @@ export async function updateTimelineItem(
  * whether you plan this event, and `updateTimelineItemAsOwner` in `admin.ts`
  * asks whether you own this instance. Nothing in here checks anything — never
  * call it from a route handler that has not already asked one of those.
+ *
+ * The two ids arrive NAMED, not positional. Both are strings, so a call site
+ * that swapped them would type-check, pass every test in the suite, and 404
+ * every timeline PATCH in production — a silent total regression that nothing
+ * structural can see. A parameter object is the only thing here that can.
  */
-export async function applyTimelineItemUpdate(
-  eventId: string,
-  itemId: string,
+export interface ApplyTimelineItemUpdate {
+  eventId: string
+  itemId: string
   input: UpdateTimelineItemInput
-) {
+}
+
+export async function applyTimelineItemUpdate({ eventId, itemId, input }: ApplyTimelineItemUpdate) {
   const updates: Record<string, unknown> = {}
   if (input.title !== undefined) updates.title = input.title
   if (input.description !== undefined) updates.description = input.description
@@ -520,6 +527,104 @@ export async function applyTimelineItemUpdate(
     .returning()
   if (!updated) throw createError({ statusCode: 404, message: 'Timeline item not found' })
   return updated
+}
+
+export type TimelineMove = 'up' | 'down'
+
+/** Move an itinerary item one place (owner/co-planner only). */
+export async function moveTimelineItem(userId: string, slug: string, itemId: string, direction: TimelineMove) {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+  return applyTimelineItemMove({ eventId: ev.id, itemId, direction })
+}
+
+export interface ApplyTimelineItemMove {
+  eventId: string
+  itemId: string
+  direction: TimelineMove
+}
+
+/**
+ * Re-order an itinerary in ONE statement, and hand back the new order.
+ *
+ * This exists because the obvious client-side version is broken in a way that
+ * cannot be seen. Both editors used to move an item by PATCHing two
+ * `sortOrder`s in sequence — give the item its neighbour's number, give the
+ * neighbour the item's. If the second PATCH does not land, the two rows are
+ * left SHARING a number, and from then on every further attempt computes
+ * `a === b`, writes the same value to both, returns 200 twice, and moves
+ * nothing. The arrows go dead for that pair, silently and permanently.
+ *
+ * A tie does not even need a failure to arise: `/api/v1`'s `addTimelineItem`
+ * accepts an explicit `sortOrder`, so Enterprise can create two items on the
+ * same number by itself.
+ *
+ * So reordering is one operation. The statement below RENUMBERS the whole
+ * itinerary from its current display order — `row_number()`, times ten, `id`
+ * as the final tiebreak so the numbering is total — with the moved item and
+ * its neighbour transposed. Three properties follow, and the middle one is the
+ * fix:
+ *
+ *  - it cannot half-apply, so it can never CREATE a tie;
+ *  - it renumbers unconditionally, so it REMOVES any tie already there,
+ *    whoever made it — including on a move it refuses;
+ *  - a move off either end is a no-op rather than an error (the arrows are
+ *    disabled there), and still normalises.
+ *
+ * `is distinct from` keeps `updated_at` still on the rows that did not move.
+ * Columns are spelled out rather than interpolated for the reason the top of
+ * `admin.ts` gives at length: Drizzle renders an interpolated column
+ * unqualified inside a `sql` template, and Postgres then resolves it against
+ * the wrong table without erroring.
+ */
+export async function applyTimelineItemMove({ eventId, itemId, direction }: ApplyTimelineItemMove) {
+  const db = useDb()
+  const [item] = await db
+    .select({ id: tables.timelineItem.id })
+    .from(tables.timelineItem)
+    .where(and(eq(tables.timelineItem.id, itemId), eq(tables.timelineItem.eventId, eventId)))
+    .limit(1)
+  if (!item) throw createError({ statusCode: 404, message: 'Timeline item not found' })
+
+  const delta = direction === 'up' ? -1 : 1
+  await db.execute(sql`
+    with ordered as (
+      select id,
+             (row_number() over (order by sort_order, starts_at nulls last, created_at, id) - 1)::int as idx
+        from events_timeline_item
+       where event_id = ${eventId}
+    ),
+    moved as (select idx from ordered where id = ${itemId}),
+    target as (
+      select case
+               when (select idx from moved) + ${delta} between 0 and (select max(idx) from ordered)
+                 then (select idx from moved) + ${delta}
+             end as idx
+    ),
+    renumbered as (
+      select o.id,
+             case
+               when (select idx from target) is null then o.idx
+               when o.id = ${itemId} then (select idx from target)
+               when o.idx = (select idx from target) then (select idx from moved)
+               else o.idx
+             end as idx
+        from ordered o
+    )
+    update events_timeline_item t
+       set sort_order = renumbered.idx * 10,
+           updated_at = now()
+      from renumbered
+     where t.id = renumbered.id
+       and t.event_id = ${eventId}
+       and t.sort_order is distinct from renumbered.idx * 10
+  `)
+
+  return db
+    .select()
+    .from(tables.timelineItem)
+    .where(eq(tables.timelineItem.eventId, eventId))
+    .orderBy(tables.timelineItem.sortOrder, tables.timelineItem.startsAt, tables.timelineItem.createdAt)
 }
 
 /** Remove an itinerary item (owner/co-planner only). */

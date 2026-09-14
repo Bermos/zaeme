@@ -67,7 +67,60 @@ describe('an itinerary item can be corrected, not only created and destroyed', (
     // The planner-scoped entry point keeps its planner check…
     expect(data).toMatch(/assertPlanner\(ev\.id, userId, \{ roles: \['owner', 'co_planner'\] \}\)\n\s*return applyTimelineItemUpdate/)
     // …and the owner-scoped one reuses the write rather than copying it.
-    expect(admin).toMatch(/applyTimelineItemUpdate\(ev\.id, itemId, input\)/)
+    expect(admin).toMatch(/applyTimelineItemUpdate\(\{ eventId: ev\.id, itemId, input \}\)/)
+  })
+
+  it('takes its two ids by name, where swapping them cannot type-check', () => {
+    // `applyTimelineItemUpdate(eventId, itemId, …)` positionally is two strings
+    // in a row: a call site that transposed them would satisfy vue-tsc AND this
+    // whole suite while 404ing every timeline PATCH in production. A regex
+    // pinning the call site cannot see a swap it was not written to expect, so
+    // the shape does the work instead.
+    const data = readFileSync(join(ROOT, 'server', 'domain', 'events-data.ts'), 'utf8')
+    expect(data).toMatch(/export interface ApplyTimelineItemUpdate/)
+    expect(data).toMatch(/applyTimelineItemUpdate\(\{ eventId, itemId, input \}: ApplyTimelineItemUpdate\)/)
+    expect(data).toMatch(/applyTimelineItemMove\(\{ eventId, itemId, direction \}: ApplyTimelineItemMove\)/)
+  })
+})
+
+/**
+ * Re-ordering is ONE operation, and this is the half of #8 that bites hardest
+ * on the admin surface.
+ *
+ * Both editors used to move an item with two `sortOrder` PATCHes — take the
+ * neighbour's number, give it yours. Lose the second request and the two rows
+ * share a number; every attempt after that writes the same number to both,
+ * answers 200 twice and moves nothing, so the arrows die for that pair in
+ * silence. `/admin` has no add and no delete and `/host` 403s the non-planning
+ * owner, so on that surface there is no way back.
+ */
+describe('re-ordering an itinerary cannot half-apply', () => {
+  const data = readFileSync(join(ROOT, 'server', 'domain', 'events-data.ts'), 'utf8')
+
+  it('is a verb of its own on both human surfaces', () => {
+    expect(existsSync(join(API_ROOT, 'host', 'events', '[slug]', 'timeline', '[id]', 'move.post.ts'))).toBe(true)
+    const adminMove = join(API_ROOT, 'admin', 'events', '[slug]', 'timeline', '[id]', 'move.post.ts')
+    expect(existsSync(adminMove)).toBe(true)
+    expect(readFileSync(adminMove, 'utf8')).toMatch(/requireOwner\(/)
+  })
+
+  it('renumbers the whole itinerary in a single statement', () => {
+    const move = data.slice(data.indexOf('export async function applyTimelineItemMove'))
+    expect(move).toMatch(/row_number\(\) over \(order by sort_order/)
+    // One `update`, so it cannot leave two rows on the same number.
+    expect(move.match(/update events_timeline_item/g) ?? []).toHaveLength(1)
+  })
+
+  it('leaves neither editor swapping sortOrder from the browser', () => {
+    // The regression this replaces lived in the components, not the domain, and
+    // was copied from one to the other. `sortOrder` stays patchable — it is
+    // what makes an item movable at all — but no editor may drive a reorder
+    // with it.
+    for (const c of ['AdminEventTimeline.vue', 'HostTimelineCard.vue']) {
+      const src = readFileSync(join(ROOT, 'app', 'components', c), 'utf8')
+      expect(src).not.toMatch(/body: \{ sortOrder/)
+      expect(src).toMatch(/\/move`?,?\s*\{?\s*\n?\s*method: 'POST'/)
+    }
   })
 })
 

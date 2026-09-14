@@ -109,21 +109,24 @@ async function saveEdit(id: string) {
 }
 
 /**
- * Move an item by swapping `sortOrder` with its neighbour — the list is served
- * in that order, so this is the whole of reordering.
+ * Moving is ONE request, and the server renumbers the itinerary.
+ *
+ * It used to be two `sortOrder` PATCHes from here — swap the item's number with
+ * its neighbour's. When the second one did not land the pair was left sharing a
+ * number, and every attempt after that wrote the same number to both, answered
+ * 200 twice and moved nothing: the arrows died for that pair without a word.
+ * With no add and no delete on this surface, and `/host` 403ing the very owner
+ * who needs it, there was nothing to recover with.
  */
 const moving = ref<string | null>(null)
-async function move(index: number, delta: number) {
-  const item = items.value[index]
-  const neighbour = items.value[index + delta]
-  if (!item || !neighbour) return
-  const a = item.sortOrder ?? index * 10
-  const b = neighbour.sortOrder ?? (index + delta) * 10
-  moving.value = item.id
+async function move(id: string, direction: 'up' | 'down') {
+  moving.value = id
   try {
-    await $fetch(`/api/admin/events/${props.slug}/timeline/${item.id}`, { method: 'PATCH', body: { sortOrder: b } })
-    await $fetch(`/api/admin/events/${props.slug}/timeline/${neighbour.id}`, { method: 'PATCH', body: { sortOrder: a } })
-    await load()
+    const res = await $fetch(`/api/admin/events/${props.slug}/timeline/${id}/move`, {
+      method: 'POST',
+      body: { direction }
+    })
+    items.value = res.timeline as unknown as TimelineItem[]
   } catch (e) {
     toast.add({ title: message(e, 'Could not reorder'), color: 'error' })
   } finally {
@@ -229,7 +232,7 @@ async function move(index: number, delta: number) {
             variant="ghost"
             :disabled="index === 0 || moving === item.id"
             aria-label="Move up"
-            @click="move(index, -1)"
+            @click="move(item.id, 'up')"
           >
             ↑
           </UButton>
@@ -239,7 +242,7 @@ async function move(index: number, delta: number) {
             variant="ghost"
             :disabled="index === items.length - 1 || moving === item.id"
             aria-label="Move down"
-            @click="move(index, 1)"
+            @click="move(item.id, 'down')"
           >
             ↓
           </UButton>

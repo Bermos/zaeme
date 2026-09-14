@@ -1,7 +1,7 @@
 import { and, asc, count, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
-import { applyTimelineItemUpdate, type UpdateTimelineItemInput } from './events-data'
+import { applyTimelineItemMove, applyTimelineItemUpdate, type TimelineMove, type UpdateTimelineItemInput } from './events-data'
 import { loadEventBySlug } from './permissions'
 import { guestSession, guestUser } from '../database/schema/auth'
 
@@ -257,7 +257,21 @@ export async function eventTimelineAsOwner(slug: string) {
  */
 export async function updateTimelineItemAsOwner(slug: string, itemId: string, input: UpdateTimelineItemInput) {
   const ev = await loadEventBySlug(slug)
-  return applyTimelineItemUpdate(ev.id, itemId, input)
+  return applyTimelineItemUpdate({ eventId: ev.id, itemId, input })
+}
+
+/**
+ * Move one itinerary item on any event, as the instance owner.
+ *
+ * Reordering is ONE operation rather than two `sortOrder` PATCHes — see
+ * `applyTimelineItemMove` for why the two-PATCH version silently bricks a pair
+ * of items. It matters more here than on `/host`: this surface deliberately
+ * has no add and no delete, and the owner who needs it is by definition the one
+ * `/host` answers 403, so there would be nothing to recover with.
+ */
+export async function moveTimelineItemAsOwner(slug: string, itemId: string, direction: TimelineMove) {
+  const ev = await loadEventBySlug(slug)
+  return applyTimelineItemMove({ eventId: ev.id, itemId, direction })
 }
 
 /* ------------------------------ series overview ---------------------------- */
