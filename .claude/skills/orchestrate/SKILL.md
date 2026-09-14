@@ -28,8 +28,10 @@ concurrency limit (default 3).
   by rebase, never by merge, and force-push with lease — the branch is yours, not a
   person's.
 - **There is no release process to hold, and that is the risk, not the relief.**
-  Nothing tags, nothing cuts a changelog: Kitchen builds `main` with buildpacks and
-  deploys it. **Merging is shipping**, and the `migrate` task in `kitchen.json` runs
+  Nothing tags, nothing cuts a changelog: Kitchen builds this repository with
+  buildpacks and deploys it, and the branch its production environment tracks is
+  `main` — confirm that on the instance rather than assuming it, once, at the start
+  of a run. **Merging is shipping**, and the `migrate` task in `kitchen.json` runs
   on every deploy — a task that fails stops the deploy, so a bad migration does not
   half-land, it strands production on the previous release. Land migrations early in
   a wave and alone, never behind three other merges you are also watching.
