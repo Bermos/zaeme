@@ -345,6 +345,21 @@ export const expense = pgTable('events_expense', {
    * arithmetic is a plain sum and history cannot drift.
    */
   amountBaseCents: integer('amount_base_cents').notNull(),
+  /**
+   * How the total was divided (#26): evenly, by exact per-person amounts, by
+   * percentage, or by weight ("Ana counts double").
+   *
+   * A RECORD OF INTENT, not an instruction. The shares are already materialised
+   * below, so no read re-derives anything from this column; it exists so an
+   * edit can re-split without the person re-typing what they meant, and so the
+   * screen can say "split by weight" instead of showing four numbers with no
+   * explanation.
+   *
+   * No DEFAULT, for the same reason as the three conversion columns above:
+   * `addExpense` always writes it, and an insert that forgets it should abort
+   * rather than claim an even split nothing ever checked.
+   */
+  splitMode: text('split_mode', { enum: ['even', 'exact', 'percentage', 'weight'] }).notNull(),
   /** Who fronted the money — same name+email identity as RSVPs. */
   paidByName: text('paid_by_name').notNull(),
   paidByEmail: text('paid_by_email').notNull(),
@@ -370,8 +385,8 @@ export const expense = pgTable('events_expense', {
 
 /**
  * One participant's slice of an expense. Shares are materialised amounts (the
- * even-split remainder distribution happens at write time), so balances are a
- * plain sum — no split-mode arithmetic at read time.
+ * remainder distribution happens at write time, whatever the split mode was),
+ * so balances are a plain sum — no split-mode arithmetic at read time.
  */
 export const expenseShare = pgTable('events_expense_share', {
   id: text('id').primaryKey(),
@@ -380,6 +395,17 @@ export const expenseShare = pgTable('events_expense_share', {
   name: text('name').notNull(),
   email: text('email').notNull(),
   amountCents: integer('amount_cents').notNull(),
+  /**
+   * What this person had ENTERED for them under a `percentage` or `weight`
+   * split — `33.33` or `2` — and null under `even` and `exact`, where the
+   * amounts are the whole of what was meant (#26).
+   *
+   * Kept only so an edit can re-split from the same intent. `amount_cents`
+   * stays the source of truth for every balance: nothing reads this column to
+   * compute money, which is why a row whose weight says 2 and whose amount says
+   * otherwise is a display problem and never a wrong settlement.
+   */
+  weight: numeric('weight', { precision: 12, scale: 4 }),
   /**
    * The same slice in BASE cents, apportioned at write time so the base shares
    * sum to the expense's `amount_base_cents` EXACTLY (largest remainder, same

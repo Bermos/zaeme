@@ -3,7 +3,11 @@
  * The trip budget: expenses, per-person balances, and the "who pays whom"
  * settlement plan. Amounts travel as integer cents; this component renders
  * CHF-style francs. Adding an expense splits it across the selected
- * participants (evenly, remainder handled server-side).
+ * participants — evenly, by exact amounts, by percentage or by weight (#26),
+ * with the remainder always handed out server-side so the shares sum to the
+ * total exactly. The form shows the running total against the expense amount,
+ * so a percentage split that adds up to 99 is visible before saving and not
+ * after.
  *
  * Writing needs an ACCOUNT (#48). The card never decides that itself — it
  * renders the form when it is given a `viewer` and no `lockedReason`, and
@@ -14,7 +18,7 @@
  * a friend fronted is the convenience that makes the account gate bearable. The
  * list therefore shows BOTH the payer and whoever typed it in.
  */
-interface Share { name: string, email: string, amountCents: number, amountBaseCents: number }
+interface Share { name: string, email: string, amountCents: number, amountBaseCents: number, weight: string | null }
 interface Expense {
   id: string
   title: string
@@ -26,6 +30,8 @@ interface Expense {
   amountBaseCents: number
   baseCurrency: string
   fxRate: string
+  /** How the total was divided: even, exact, percentage or weight. */
+  splitMode: string
   paidByName: string
   paidByEmail: string
   note: string | null
@@ -204,12 +210,133 @@ watch(spentCurrency, (code) => {
   if (/^[A-Za-z]{3}$/.test(code.trim())) quoteRate()
 })
 
+/* ---- how the total is divided (#26) ---- */
+
+/**
+ * The mode, and one entered value per person — a percentage, a weight, or an
+ * amount in whole currency units, depending which mode is on. Keyed by email so
+ * changing who is in the split does not shuffle what was typed.
+ *
+ * Nothing here works out anybody's share: the server resolves the mode to cents
+ * and hands out the remainder, and it is the only thing that does. What this
+ * side owes the person is the RUNNING TOTAL — telling them their percentages
+ * come to 99 while they can still fix it, rather than after a refused save.
+ */
+const splitMode = ref<'even' | 'exact' | 'percentage' | 'weight'>('even')
+const splitValues = ref<Record<string, string>>({})
+
+const SPLIT_ITEMS = [
+  { label: 'Evenly', value: 'even' },
+  { label: 'Exact amounts', value: 'exact' },
+  { label: 'By percentage', value: 'percentage' },
+  { label: 'By weight', value: 'weight' }
+]
+
+/** How an already-recorded expense says it was split. `even` says nothing. */
+const SPLIT_LABELS: Record<string, string> = {
+  exact: 'by exact amounts', percentage: 'by percentage', weight: 'by weight'
+}
+
+// A percentage is not a weight is not an amount: carrying numbers across a mode
+// change would leave a plausible-looking total nobody typed.
+watch(splitMode, () => {
+  splitValues.value = {}
+})
+
+/** Everybody currently in the split, in the order the rows render. */
+const splitPeople = computed(() => props.participants.filter(p => selected.value.includes(p.email)))
+
+/**
+ * A typed value as an integer at four decimal places — the scale the server
+ * stores a percentage or a weight at. Integer arithmetic, because `0.1 + 0.2`
+ * is not `0.3`, and "your percentages come to 99.99999999" would be a worse
+ * message than the one it replaces. `null` means "not a number yet".
+ */
+function scaleEntered(raw: string | undefined): number | null {
+  const trimmed = (raw ?? '').trim()
+  if (!/^\d{1,8}(\.\d{1,4})?$/.test(trimmed)) return null
+  const [whole, frac = ''] = trimmed.split('.')
+  return Number(whole) * 10000 + Number(`${frac}0000`.slice(0, 4))
+}
+
+/** The same string as cents, for the `exact` rows, which are typed in francs. */
+function enteredCents(raw: string | undefined): number | null {
+  const trimmed = (raw ?? '').trim()
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null
+  return Math.round(Number.parseFloat(trimmed) * 100)
+}
+
+const splitEntries = computed(() => splitPeople.value.map(p => ({
+  name: p.name,
+  email: p.email,
+  raw: (splitValues.value[p.email] ?? '').trim(),
+  scaled: scaleEntered(splitValues.value[p.email]),
+  cents: enteredCents(splitValues.value[p.email])
+})))
+
+const allEntered = computed(() => splitEntries.value.every(
+  e => (splitMode.value === 'exact' ? e.cents !== null : e.scaled !== null)
+))
+
+/** Entered so far: cents under `exact`, hundredths of a percent otherwise. */
+const splitTotal = computed(() => splitEntries.value.reduce(
+  (sum, e) => sum + (splitMode.value === 'exact' ? (e.cents ?? 0) : (e.scaled ?? 0)), 0
+))
+
+/** `333300` back to `33.33` — how a running total is shown. */
+function unscale(value: number): string {
+  const frac = `${value % 10000}`.padStart(4, '0').replace(/0+$/, '')
+  return frac ? `${Math.floor(value / 10000)}.${frac}` : `${Math.floor(value / 10000)}`
+}
+
+/**
+ * What the form says under the rows, and whether that is a complaint. `weight`
+ * has no target to miss — 2/1/1 is a complete answer — so it states the total
+ * and never objects.
+ */
+const splitStatus = computed<{ text: string, off: boolean } | null>(() => {
+  if (splitMode.value === 'even' || !splitEntries.value.length) return null
+  if (!allEntered.value) {
+    return {
+      text: splitMode.value === 'exact'
+        ? 'Give everybody an amount.'
+        : 'Give everybody a number — 0 leaves them out of this one.',
+      off: true
+    }
+  }
+  if (splitMode.value === 'weight') {
+    return splitTotal.value > 0
+      ? { text: `Total weight ${unscale(splitTotal.value)} — shares are worked out from it.`, off: false }
+      : { text: 'At least one person needs a weight above zero.', off: true }
+  }
+  if (splitMode.value === 'percentage') {
+    return { text: `${unscale(splitTotal.value)}% of 100%`, off: splitTotal.value !== 1_000_000 }
+  }
+  const code = spentCurrency.value.trim().toUpperCase() || props.budget.currency
+  return {
+    text: `${money(splitTotal.value, code)} of ${money(Math.max(amountCents.value || 0, 0), code)}`,
+    off: splitTotal.value !== amountCents.value
+  }
+})
+
+const splitReady = computed(() => splitMode.value === 'even'
+  || (!!splitEntries.value.length && !splitStatus.value?.off))
+
+/** The `participants` array the write expects, which is mode-shaped. */
+function splitParticipantsBody() {
+  if (splitMode.value === 'even') return splitPeople.value.map(p => ({ name: p.name, email: p.email }))
+  if (splitMode.value === 'exact') {
+    return splitEntries.value.map(e => ({ name: e.name, email: e.email, amountCents: e.cents ?? 0 }))
+  }
+  return splitEntries.value.map(e => ({ name: e.name, email: e.email, weight: e.raw }))
+}
+
 async function addExpense() {
   if (!payer.value) return
   if (!title.value || !Number.isFinite(amountCents.value) || amountCents.value <= 0 || !selected.value.length) return
+  if (!splitReady.value) return
   saving.value = true
   try {
-    const participants = props.participants.filter(p => selected.value.includes(p.email))
     const res = await $fetch<{ budget: Budget }>(props.addUrl, {
       method: 'POST',
       body: {
@@ -222,11 +349,14 @@ async function addExpense() {
         ...(foreign.value && fxRate.value.trim() ? { fxRate: fxRate.value.trim() } : {}),
         paidByName: payer.value.name,
         paidByEmail: payer.value.email,
-        participants
+        splitMode: splitMode.value,
+        participants: splitParticipantsBody()
       }
     })
     title.value = ''
     amount.value = ''
+    splitMode.value = 'even'
+    splitValues.value = {}
     spentCurrency.value = props.budget.currency
     fxRate.value = ''
     fxAsOf.value = null
@@ -298,7 +428,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
               </p>
               <p class="text-muted">
                 {{ x.paidByName }} paid {{ money(x.amountCents, x.currency) }}{{ isForeign(x) ? ` (${money(x.amountBaseCents, x.baseCurrency)})` : '' }}
-                · split {{ x.shares.length }} way{{ x.shares.length === 1 ? '' : 's' }}
+                · split {{ x.shares.length }} way{{ x.shares.length === 1 ? '' : 's' }}{{ SPLIT_LABELS[x.splitMode] ? `, ${SPLIT_LABELS[x.splitMode]}` : '' }}
               </p>
               <p
                 v-if="isForeign(x)"
@@ -492,12 +622,59 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
             class="w-full"
           />
         </UFormField>
+        <UFormField
+          label="How"
+          size="sm"
+          help="Evenly is the usual one. Weight is for “Ana counts double” — 2, 1, 1."
+        >
+          <USelect
+            v-model="splitMode"
+            :items="SPLIT_ITEMS"
+            class="w-full"
+          />
+        </UFormField>
+
+        <!-- One row per person, and the running total under them, so a split
+             that comes to 99% is visible here rather than in a refusal. -->
+        <div
+          v-if="splitMode !== 'even' && splitEntries.length"
+          class="flex flex-col gap-1"
+        >
+          <div
+            v-for="p in splitEntries"
+            :key="p.email"
+            class="flex items-center justify-between gap-2 text-sm"
+          >
+            <span class="truncate">{{ p.name }}</span>
+            <div class="flex items-center gap-1">
+              <UInput
+                :model-value="splitValues[p.email] ?? ''"
+                type="number"
+                :step="splitMode === 'exact' ? '0.05' : splitMode === 'percentage' ? '0.01' : '1'"
+                min="0"
+                :placeholder="splitMode === 'exact' ? '40.00' : splitMode === 'percentage' ? '33.33' : '1'"
+                size="sm"
+                class="w-28"
+                @update:model-value="splitValues[p.email] = String($event)"
+              />
+              <span class="text-muted w-4">{{ splitMode === 'percentage' ? '%' : splitMode === 'weight' ? '×' : '' }}</span>
+            </div>
+          </div>
+          <p
+            v-if="splitStatus"
+            class="text-sm tabular-nums"
+            :class="splitStatus.off ? 'text-error' : 'text-muted'"
+          >
+            {{ splitStatus.text }}
+          </p>
+        </div>
+
         <div class="flex gap-2">
           <UButton
             type="submit"
             size="sm"
             :loading="saving"
-            :disabled="!title || !amount || !selected.length || !payerEmail || (foreign && !fxRate)"
+            :disabled="!title || !amount || !selected.length || !payerEmail || (foreign && !fxRate) || !splitReady"
           >
             Record it
           </UButton>

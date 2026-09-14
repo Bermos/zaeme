@@ -491,6 +491,110 @@ else
 fi
 
 echo
+echo "== a total can be split by percentage, by weight or by exact amounts (#26) =="
+# The shares are materialised at write time whichever mode was asked for, so a
+# balance stays a plain sum and nothing downstream knows there is more than one
+# mode. What has to be proved is therefore the ARITHMETIC, executed: every
+# assertion below reads the cents out of a real write. A check that inspected
+# `resolveShares` would survive the mode being ignored outright.
+#
+# The fixtures are lopsided ON PURPOSE. An even split of 100.00 across 4 is
+# 25/25/25/25 — which is also what weights of 1/1/1/1 give — so a tidy fixture
+# proves nothing about weights. Every split below is one the default could not
+# have produced.
+SPLITTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke splits $SUFFIX\",\"type\":\"trip\"}")
+PSLUG=$(printf '%s' "$SPLITTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+
+PLAIN=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d "{\"title\":\"Fondue\",\"amountCents\":10000,\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"participants\":$SPLIT3}")
+contains "an expense with no splitMode is recorded as even" "$PLAIN" '"splitMode":"even"'
+contains "...and nobody carries a weight nobody typed"      "$PLAIN" '"amountCents":3334,"amountBaseCents":3334,"weight":null'
+
+# "Ana counts double": 2/1/1 of CHF 100.00 is 50/25/25. An even split would be
+# 3334/3333/3333, so 5000 is a number only the weight can produce.
+WGT=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Chalet","amountCents":10000,"splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"2"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"}]}')
+contains "a weighted split gives the double share double" "$WGT" '"amountCents":5000,"amountBaseCents":5000,"weight":"2"'
+contains "...and a quarter each to the other two"         "$WGT" '"amountCents":2500,"amountBaseCents":2500,"weight":"1"'
+contains "...recording the mode it was split by"          "$WGT" '"splitMode":"weight"'
+
+# A weight of 0 is "not in this one" — and it is the ONLY part of this fixture
+# an even split would get wrong, which is why it is the thing asserted.
+ZERO=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Lift pass","amountCents":10000,"splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"1"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"},{"name":"D","email":"d@e.com","weight":"0"}]}')
+contains "a weight of 0 leaves somebody out of this one"  "$ZERO" '"email":"d@e.com","amountCents":0,"amountBaseCents":0,"weight":"0"'
+contains "...and the remaining three carry the whole lot" "$ZERO" '"email":"a@e.com","amountCents":3334'
+check "a split where everybody is weighted out"  422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Nobody","amountCents":10000,"splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"0"},{"name":"B","email":"b@e.com","weight":"0"}]}'
+
+# By percentage. 50/30/20 of 100.00; an even three-way split cannot make 3000.
+PCT=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Groceries","amountCents":10000,"splitMode":"percentage","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"50"},{"name":"B","email":"b@e.com","weight":"30"},{"name":"C","email":"c@e.com","weight":"20"}]}')
+contains "a percentage split follows the percentages"     "$PCT" '"amountCents":3000,"amountBaseCents":3000,"weight":"30"'
+contains "...down to the smallest of them"                "$PCT" '"amountCents":2000,"amountBaseCents":2000,"weight":"20"'
+contains "...and keeps what was entered, for the next edit" "$PCT" '"weight":"50"'
+
+# 99 and 101 are refused, and the refusal SAYS WHICH — "that does not add up"
+# leaves the person to find the typo among seven numbers.
+NINETYNINE='{"title":"Off by one","amountCents":10000,"splitMode":"percentage","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"33"},{"name":"B","email":"b@e.com","weight":"33"},{"name":"C","email":"c@e.com","weight":"33"}]}'
+HUNDREDONE='{"title":"Off the other way","amountCents":10000,"splitMode":"percentage","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"34"},{"name":"B","email":"b@e.com","weight":"34"},{"name":"C","email":"c@e.com","weight":"33"}]}'
+check "percentages that come to 99 are refused"  422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" -d "$NINETYNINE"
+contains "...and the message says 99"                     "$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" -d "$NINETYNINE")" 'add up to 99%, not 100%'
+check "...and ones that come to 101"             422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" -d "$HUNDREDONE"
+contains "...with a message that says 101"                "$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" -d "$HUNDREDONE")" 'add up to 101%, not 100%'
+
+# Exact per-person amounts: nothing is inferred, so a typo is refused rather
+# than landing quietly on whoever had no amount.
+EXACT=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Train tickets","amountCents":10000,"splitMode":"exact","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":6000},{"name":"B","email":"b@e.com","amountCents":3000},{"name":"C","email":"c@e.com","amountCents":1000}]}')
+contains "an exact split takes the amounts as given"      "$EXACT" '"amountCents":6000,"amountBaseCents":6000'
+contains "...including the smallest of them"              "$EXACT" '"amountCents":1000,"amountBaseCents":1000'
+check "an exact split that leaves a gap"         422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Short","amountCents":10000,"splitMode":"exact","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":6000},{"name":"B","email":"b@e.com","amountCents":3000}]}'
+check "...and one that names nobody's amount"    422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Vague","amountCents":10000,"splitMode":"exact","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":10000},{"name":"B","email":"b@e.com"}]}'
+
+# Two sources of truth for one share is a refusal, not a preference.
+check "a weight beside an amount is refused"     422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Both","amountCents":10000,"splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"1","amountCents":5000},{"name":"B","email":"b@e.com","weight":"1"}]}'
+check "...and a weight on an even split too"     422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PSLUG/expenses" \
+  -d '{"title":"Stray","amountCents":10000,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"1"},{"name":"B","email":"b@e.com"}]}'
+
+# Seven people and 100.00 — the acceptance case, on its own trip so the balances
+# are the whole story. 14.28 x3 + 14.29 x4 is exactly 100, and 1428/1429 is a
+# split no even division of this total produces for everybody.
+SEVENTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke seven $SUFFIX\",\"type\":\"trip\"}")
+VSLUG=$(printf '%s' "$SEVENTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+SEVEN=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$VSLUG/expenses" \
+  -d '{"title":"Dinner for seven","amountCents":10000,"splitMode":"percentage","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"14.28"},{"name":"B","email":"b@e.com","weight":"14.28"},{"name":"C","email":"c@e.com","weight":"14.28"},{"name":"D","email":"d@e.com","weight":"14.29"},{"name":"E","email":"e@e.com","weight":"14.29"},{"name":"F","email":"f@e.com","weight":"14.29"},{"name":"G","email":"g@e.com","weight":"14.29"}]}')
+contains "seven ways by percentage, to the cent"          "$SEVEN" '"amountCents":1429,"amountBaseCents":1429,"weight":"14.29"'
+contains "...and the smaller slices beside them"          "$SEVEN" '"amountCents":1428,"amountBaseCents":1428,"weight":"14.28"'
+SEVENB=$(body "${AUTH[@]}" "$API/events/$VSLUG/budget")
+# The two balances below are REVERSED from what an even split of this total
+# gives. `splitEvenlyCents` hands the four leftover cents to the FIRST four
+# people (1429 x4 then 1428 x3); these percentages give the larger slice to the
+# LAST four. Asserting the head and the tail therefore fails in both directions
+# if the mode is ignored, rather than passing on a number both modes produce.
+contains "...so the payer owes the smaller slice, not the larger" "$SEVENB" '"a@e.com","paidCents":10000,"owedCents":1428,"netCents":8572'
+contains "...and the last person owes the larger one"     "$SEVENB" '"g@e.com","paidCents":0,"owedCents":1429,"netCents":-1429'
+
+# A weighted split of a FOREIGN expense: the shares have to sum exactly in BOTH
+# currencies, and the base ones are NOT in the 2:1:1 ratio the euros are — which
+# is the whole reason shares are converted as a group.
+#
+#   EUR 100.00 at 0.8367 → CHF 83.67
+#   spent 5000/2500/2500   base 4183/2092/2092 (sum 8367)
+FXWTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke fx-weight $SUFFIX\",\"type\":\"trip\"}")
+WSLUG=$(printf '%s' "$FXWTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+FXW=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$WSLUG/expenses" \
+  -d '{"title":"Dinner in Milan","amountCents":10000,"currency":"EUR","fxRate":"0.8367","splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"2"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"}]}')
+contains "a weighted foreign split sums in what was SPENT" "$FXW" '"amountCents":5000,"amountBaseCents":4183'
+contains "...and in the base it settles for"               "$FXW" '"amountCents":2500,"amountBaseCents":2092'
+FXWB=$(body "${AUTH[@]}" "$API/events/$WSLUG/budget")
+contains "...to the last cent of the converted total"      "$FXWB" '"currency":"CHF","totalCents":8367'
+contains "...with the balances reconciled in base cents"   "$FXWB" '"a@e.com","paidCents":8367,"owedCents":4183,"netCents":4184'
+
+echo
 echo "== the boundary: money is written by an ACCOUNT, read by the link (#48) =="
 # Reading the budget is still the invite capability URL's; writing an expense
 # moved onto a session plus an RSVP-or-planner row. These are the halves no

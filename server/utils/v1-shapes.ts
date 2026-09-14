@@ -181,6 +181,10 @@ export function contribution(row: object) {
  * spent in, and `amountBaseCents` in the instance base currency, frozen at the
  * `fxRate` this row was recorded at (#25). Only the base figures are ever
  * summed; the as-spent ones are for showing "€120.00 (CHF 112.40)".
+ *
+ * `splitMode`, and the `weight` on each share, say how the total was divided
+ * (#26). Both are a record of intent — the shares are materialised, so a client
+ * that ignores them gets every figure it got before they existed.
  */
 export function expense(row: object) {
   const r = asRow(row)
@@ -193,6 +197,7 @@ export function expense(row: object) {
     amountBaseCents: r.amountBaseCents,
     baseCurrency: r.baseCurrency,
     fxRate: r.fxRate,
+    splitMode: r.splitMode,
     note: r.note ?? null,
     paidByName: r.paidByName,
     paidByEmail: r.paidByEmail,

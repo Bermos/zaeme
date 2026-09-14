@@ -15,10 +15,15 @@ const bodySchema = z.object({
   note: z.string().max(500).optional().nullable(),
   paidByName: z.string().min(1).max(200),
   paidByEmail: z.string().email(),
+  // How the total is divided (#26). Omitted means `even`, which is what every
+  // expense recorded before this field existed did.
+  splitMode: z.enum(['even', 'exact', 'percentage', 'weight']).optional(),
   participants: z.array(z.object({
     name: z.string().min(1).max(200),
     email: z.string().email(),
-    amountCents: z.number().int().min(0).optional()
+    amountCents: z.number().int().min(0).optional(),
+    // The percentage or the share count as entered, for those two modes.
+    weight: z.string().regex(/^\d{1,8}(\.\d{1,4})?$/).optional()
   })).min(1).max(50)
 })
 

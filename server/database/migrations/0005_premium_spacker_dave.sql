@@ -1,0 +1,33 @@
+-- Split an expense by percentage or by weight (#26).
+--
+-- Two additive columns, and one hand-made adjustment to the generated file:
+-- `split_mode` is created WITH a default and then has the default DROPPED, so
+-- the column ends in exactly the shape `meta/0005_snapshot.json` describes
+-- (NOT NULL, no default) while the statement also survives a table that
+-- already has rows.
+--
+-- Why the adjustment: `ADD COLUMN … NOT NULL` with no default aborts on a
+-- non-empty table, and this file runs as the Kitchen `migrate` task, where a
+-- failed task strands production on the previous release. `'even'` is the
+-- correct value for every row that predates this change — splitting the
+-- remainder evenly is the only thing the code could do until now — so the
+-- default backfills the truth rather than a placeholder, and no UPDATE is
+-- needed after it.
+--
+-- Why the default does not survive the migration: a permanent default on a NOT
+-- NULL column is how a forgetful insert silently looks populated. A future
+-- write that resolves shares by weight and forgets to say so would be recorded
+-- as `even`, and the expense would then explain itself wrongly to whoever
+-- edits it next. Without the default such an insert aborts, which is the
+-- failure anybody would rather have. `server/domain/expenses.ts` always sets
+-- the column, so nothing relies on a default today.
+--
+-- `weight` is nullable and needs no backfill: NULL is exactly right for every
+-- existing row and for every future `even`/`exact` share — nobody entered a
+-- percentage for them, and 0 would be a claim that somebody did.
+--
+-- drizzle's migrator wraps the whole pending set in one transaction, so this
+-- file cannot half-apply.
+ALTER TABLE "events_expense" ADD COLUMN "split_mode" text DEFAULT 'even' NOT NULL;--> statement-breakpoint
+ALTER TABLE "events_expense" ALTER COLUMN "split_mode" DROP DEFAULT;--> statement-breakpoint
+ALTER TABLE "events_expense_share" ADD COLUMN "weight" numeric(12, 4);
