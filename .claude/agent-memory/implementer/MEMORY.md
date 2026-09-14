@@ -17,6 +17,14 @@ Everything after them is earned.
 - 2026-09-14: The events domain (~3,400 LOC) has almost no coverage (#9). A change there is as good as the test you write for it.
 - 2026-09-15: `pnpm lint` is `eslint .` through `withNuxt()` and applies **no markdown rules** — a docs-only change passes lint, typecheck and vitest without one assertion touching it. Nothing in CI reads prose, so the only check on a doc is somebody re-reading the code it claims to describe.
 
+## Moving a route between credentials
+
+- 2026-09-14: MOVING A ROUTE OFF THE INVITE TOKEN SILENTLY DROPS EVERY CHECK `resolveInviteToken` DID — revocation, expiry, the use-count limit AND the `draft`/`cancelled` lifecycle refusal (`server/domain/invite.ts`). #48 moved expense writes onto a session and lost the lifecycle rule: an expense recorded happily against a cancelled trip, and no test noticed. Before moving a handler off a credential, read what the old resolver enforced BESIDES identity, and decide each one explicitly. `assertEventOpenToGuests` in `server/domain/permissions.ts` is now that rule, shared by both paths.
+- 2026-09-14: The same move also drops revocation as a control surface for good: standing becomes "an RSVP row exists with my email", and an RSVP row OUTLIVES the link that produced it. Revoking an invite no longer withdraws anything the account can do. That is a consequence to name for the owner, not to paper over.
+- 2026-09-14: When two gates answer the same verb (`addExpenseAsPlanner` on `/api/host`, `addExpenseAsParticipant` on `/api/me`), make their role sets AGREE and pin it with a test that reads both. #48 shipped a review round where `logistics` was 403'd on one surface and 200'd on the other. Take the narrower side: widening a role later is additive, un-widening after it ships is not.
+- 2026-09-14: Gating a WRITE behind an account forces a decision about the READ that nobody asks for: the screen must tell an unidentified visitor why they cannot write, and the cheap way to do that — one condition for "show the card" — silently starts rendering the DATA to them too. Keep "who may write" and "who may see the figures" as separate props, and make the second one required so the next caller has to decide. A capability that did not move can still change what the page says by default.
+- 2026-09-14: A gate that returns "the strongest standing" must not let a weak row short-circuit a stronger one. `assertParticipant` returned `logistics` on the planner row and never looked for the RSVP, so a logistics planner genuinely on the trip was refused by their own planner row.
+
 ## Boundaries the tests hold, and what they actually assert
 
 - 2026-09-14: `test/api-boundary.test.ts` enforces the three credentials and the admin gate's import boundary in both directions. When it fails, the route is in the wrong place or reads the wrong credential — it is not the test being fussy. It checks *where* code lives and what it imports; it cannot check that the gate you called is the right one for the route.
@@ -26,7 +34,17 @@ Everything after them is earned.
 - 2026-09-14: driving the magic-link sign-in from a script needs an `Origin` header on `POST /api/auth/sign-in/magic-link` — better-auth's CSRF middleware answers `403 MISSING_OR_NULL_ORIGIN` without one, and `fetch` does not send it. The token is `zaeme_verification.identifier` (stored plain) and its `value` carries the email, so match on that rather than on "the newest row".
 - 2026-09-14: the mail dry run's `[email:dry-run]` log prints the magic link twice — the `preview` field truncates the token, the `links` array does NOT. Read `zaeme_verification` anyway, and match the row on the email inside `value`: "newest row wins" picks the wrong token exactly when you are signing in two accounts in a row.
 - 2026-09-14: The contract test polices paths, methods and operationIds and reads **no comments**. `docs/zaeme-api.openapi.yaml` and the `/api/v1` handlers carry long prose that CI cannot falsify, and two comments had been wrong about timeline editing since `bee78a3` (#10 fixed them). Enterprise vendors that YAML, so a stale comment there misinforms another repository — a comment-only diff is safe, and is owed whenever the surface it describes moves.
+- 2026-09-14: `/api/me/**` is the ACCOUNT surface — a session, no planner row required — and since #48 it holds expense writes as well as the `/me` aggregation. The gate is `assertParticipant` in `server/domain/permissions.ts` (planner row, or an RSVP whose `guestEmail` is the account's lowercased email). Guest-surface writes that need an identity belong here, never in `server/api/invites/**`.
 - 2026-09-14: `server/middleware/audit.ts` records mutations at the edge; a new route needs no audit code. It must keep returning early for `/api/v1` and `/api/auth` — a change that drops those early returns puts a cookie read next to the machine surface.
+
+## Running things locally (smoke scripts, a scratch database)
+
+- 2026-09-14: There is no docker daemon in the agent environment, but Postgres 16 binaries are: `su postgres -c "/usr/lib/postgresql/16/bin/initdb -D <dir> -U zaeme --auth=trust"` then `pg_ctl -D <dir> -o '-p <port> -k /tmp' start`. That is enough to run `scripts/migrate.mjs` and a full `pnpm smoke:api`.
+- 2026-09-14: CONCURRENT AGENTS STEAL PORTS. A sibling worktree's smoke server on the same port answers your requests with its own token and database, and `pnpm smoke:api` then reports ~100 failures that look exactly like your change broke everything. Check `ss -ltnp` and `tr '\0' '\n' < /proc/<pid>/environ` before believing a red smoke run; pick a port nobody else would guess.
+- 2026-09-14: A background server started from a tool call is killed when the call's process group goes away. `setsid nohup <script> > log 2>&1 < /dev/null &` survives; a bare `&` does not.
+- 2026-09-14: `.claude/agent-memory/implementer/MEMORY.md` is the file that CONFLICTS on rebase — every concurrent implementer appends to it. Resolve by keeping BOTH sides (the lessons are additive), never by taking one.
+- 2026-09-14: `STATUS_TRANSITIONS.completed` and `.cancelled` are `[]` (`server/domain/events-data.ts`) — both are TERMINAL. A smoke line that "restores" a completed event to `published` 409s into `/dev/null` and reads as if it worked; any check that needs a live event must mint its own.
+- 2026-09-14: An invite token only resolves on a LIVE event — `resolveInviteToken` 403s on `draft` and `cancelled` (`server/domain/invite.ts`). Any smoke check against `/api/invites/**` must publish the event first, or it fails for a reason that has nothing to do with what it is testing.
 
 ## Deploys, builds and the platform
 
@@ -37,6 +55,10 @@ Everything after them is earned.
 - 2026-09-14: `actions/setup-node` with `node-version-file: package.json` reads `engines.node` — the same field Kitchen turns into `BP_NODE_VERSION`. Use it in any new job rather than hard-coding a major, so CI and the buildpack cannot drift apart silently.
 - 2026-09-14: writing a secret to `$GITHUB_ENV` does NOT keep it out of the build log — the runner reprints a step's whole `env` block in the next step's group header. It needs `::add-mask::` on stdout BEFORE the value is first printed, which means a script whose stdout is redirected into `$GITHUB_ENV` can never mask anything: have it append to the `$GITHUB_ENV` file itself and keep stdout for the workflow command. Escape `%` as `%25` in the mask payload first, or a percent-encoded value (every better-auth cookie) masks a string that never appears.
 - 2026-09-14: MinIO is gone as a CI dependency — the open-source server was archived, `dl.min.io` answers `410 Gone` and the `minio/minio` Docker Hub repo is unauthorized. The `api` job uses `adobe/s3mock` instead: path-style, in-memory, signature-blind, and it takes its bucket from `COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS` with no command arguments, which is what lets it be a plain `services:` entry.
+
+## Types that stop guarding
+
+- 2026-09-14: A guard typed `(ev: { status: string })` accepts any row with a `status` — an RSVP, an invite — and keeps compiling if a value in `text('status', { enum: [...] })` is renamed out from under it, leaving the comparison matching nothing with `pnpm typecheck` green. Type a schema-value guard `Pick<typeof tables.X.$inferSelect, 'field'>`. Same shape as `events_expense.currency`: a value nothing notices has stopped matching.
 
 ## Style and shape
 
@@ -57,4 +79,6 @@ Everything after them is earned.
 
 ## Rebase and generated files
 
+- 2026-09-14: Editing only a JSDoc comment on a schema column generates NO migration (`pnpm db:generate` says "No schema changes"), and drizzle's `text('x', { enum: [...] })` renders a plain text column — widening that list is a TypeScript change, not a migration. Both are free ways to keep `server/database/schema/*.ts` honest.
+- 2026-09-14: better-auth's `useSession()` is safe to call on an SSR'd public page (the invite page does), but `data` is null until the client resolves it. Gate any "you need an account" message on `session.value.isPending`, or a signed-in friend sees the refusal for a frame before it is taken back. NOTE the property is BORROWED: it holds because the session atom defaults to pending and fetches only in the browser. `useSession(useFetch)` returns `isPending: false`, and a version bump could seed the session server-side — so never let PRIVACY rest on it, only timing.
 - 2026-09-14: Drizzle migrations are generated (`pnpm db:generate`) and are not mergeable text. After a rebase that brought in another migration, regenerate and re-verify rather than resolving by hand.

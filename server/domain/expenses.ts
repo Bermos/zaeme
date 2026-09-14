@@ -2,7 +2,8 @@ import { and, asc, eq, inArray } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
-import { assertPlanner, loadEventBySlug } from './permissions'
+import { guestUser } from '../database/schema/auth'
+import { assertEventOpenToGuests, assertParticipant, assertPlanner, loadEventBySlug, type ParticipantRole } from './permissions'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
@@ -42,6 +43,14 @@ export interface ExpenseView {
   paidByEmail: string
   note: string | null
   createdAt: Date
+  /**
+   * The ACCOUNT that typed it in, which is not always the person who paid —
+   * recording on a friend's behalf is the convenience that makes the account
+   * gate bearable (#48). The screen shows both; hiding the recorder would
+   * throw away the accountability the account was required for.
+   */
+  addedByName: string | null
+  addedByEmail: string | null
   shares: Array<{ name: string, email: string, amountCents: number }>
 }
 
@@ -187,8 +196,13 @@ export async function loadBudget(eventId: string): Promise<{
 }> {
   const db = useDb()
   const rows = await db
-    .select()
+    .select({
+      expense: tables.expense,
+      addedByName: guestUser.name,
+      addedByEmail: guestUser.email
+    })
     .from(tables.expense)
+    .leftJoin(guestUser, eq(tables.expense.createdByUserId, guestUser.id))
     .where(eq(tables.expense.eventId, eventId))
     .orderBy(asc(tables.expense.createdAt))
 
@@ -196,10 +210,10 @@ export async function loadBudget(eventId: string): Promise<{
     ? await db
         .select()
         .from(tables.expenseShare)
-        .where(inArray(tables.expenseShare.expenseId, rows.map(r => r.id)))
+        .where(inArray(tables.expenseShare.expenseId, rows.map(r => r.expense.id)))
     : []
 
-  const expenses: ExpenseView[] = rows.map(r => ({
+  const expenses: ExpenseView[] = rows.map(({ expense: r, addedByName, addedByEmail }) => ({
     id: r.id,
     title: r.title,
     category: r.category as ExpenseCategory,
@@ -209,6 +223,8 @@ export async function loadBudget(eventId: string): Promise<{
     paidByEmail: r.paidByEmail,
     note: r.note,
     createdAt: r.createdAt,
+    addedByName,
+    addedByEmail: addedByEmail?.toLowerCase() ?? null,
     shares: shares
       .filter(s => s.expenseId === r.id)
       .map(s => ({ name: s.name, email: s.email, amountCents: s.amountCents }))
@@ -226,11 +242,19 @@ export async function loadBudget(eventId: string): Promise<{
 
 /* --------------------------------- writes --------------------------------- */
 
+/**
+ * Who is recording this. Always an ACCOUNT since #48 — the invite capability
+ * URL no longer writes money, so there is no longer an email-only actor and
+ * `created_by_guest_email` is never written again.
+ */
 export interface ExpenseActor {
-  /** A planner's user id (host side) … */
-  userId?: string
-  /** … or a guest's email (guest side, via their invite token). */
-  guestEmail?: string
+  userId: string
+}
+
+/** A signed-in account writing on the participant surface (`/api/me/**`). */
+export interface ParticipantActor {
+  id: string
+  email: string
 }
 
 /** Record an expense with materialised shares, in one transaction. */
@@ -253,8 +277,8 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
       paidByName: input.paidByName,
       paidByEmail: input.paidByEmail.toLowerCase(),
       note: input.note ?? null,
-      createdByUserId: by.userId ?? null,
-      createdByGuestEmail: by.guestEmail?.toLowerCase() ?? null
+      createdByUserId: by.userId,
+      createdByGuestEmail: null
     })
     await tx.insert(tables.expenseShare).values(resolved.map(share => ({
       id: createId(),
@@ -273,13 +297,13 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
 }
 
 /**
- * Remove an expense — the person who recorded it (by email), or a planner.
- * Its shares cascade away.
+ * Remove an expense — the account that recorded it, the person it says paid,
+ * or a planner. Its shares cascade away.
  */
 export async function removeExpense(
   eventId: string,
   expenseId: string,
-  by: { email?: string, asPlanner?: boolean }
+  by: { userId?: string, email?: string, asPlanner?: boolean }
 ) {
   const db = useDb()
   const [row] = await db
@@ -289,10 +313,10 @@ export async function removeExpense(
     .limit(1)
   if (!row) throw createError({ statusCode: 404, message: 'Expense not found' })
 
-  const isRecorder = !!by.email
-    && (row.createdByGuestEmail === by.email.toLowerCase() || row.paidByEmail === by.email.toLowerCase())
-  if (!isRecorder && !by.asPlanner) {
-    throw createError({ statusCode: 403, message: 'Only the person who recorded this expense can remove it' })
+  const isRecorder = !!by.userId && row.createdByUserId === by.userId
+  const isPayer = !!by.email && row.paidByEmail === by.email.toLowerCase()
+  if (!isRecorder && !isPayer && !by.asPlanner) {
+    throw createError({ statusCode: 403, message: 'Only the person who recorded this expense — or who paid it — can remove it' })
   }
   await db.delete(tables.expense).where(eq(tables.expense.id, expenseId))
 }
@@ -318,4 +342,58 @@ export async function removeExpenseAsPlanner(userId: string, slug: string, expen
   const ev = await loadEventBySlug(slug)
   await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
   return removeExpense(ev.id, expenseId, { asPlanner: true })
+}
+
+/* ------------------------- participant-scoped shape ------------------------ */
+
+/**
+ * Who may move money on the participant surface. `logistics` is absent on
+ * purpose: `addExpenseAsPlanner` already refuses it on the host surface, and
+ * two gates disagreeing about one verb is how a role restriction stops meaning
+ * anything. A logistics planner who is genuinely on the trip has an RSVP, and
+ * `assertParticipant` answers `participant` for them.
+ */
+const EXPENSE_WRITERS: readonly ParticipantRole[] = ['participant', 'owner', 'co_planner']
+
+/**
+ * The standing every participant-surface expense write needs: the event is open
+ * to the people invited to it, and this account is one of them.
+ *
+ * The lifecycle half used to come free with `resolveInviteToken`; it does not
+ * come free here, and without it an expense records happily against a cancelled
+ * trip (#48 review).
+ */
+async function assertMayWriteExpenses(slug: string, actor: ParticipantActor) {
+  const ev = await loadEventBySlug(slug)
+  assertEventOpenToGuests(ev)
+  const role = await assertParticipant(ev.id, actor.id)
+  if (!EXPENSE_WRITERS.includes(role)) {
+    throw createError({ statusCode: 403, message: 'Your role on this event does not cover the budget' })
+  }
+  return { ev, role }
+}
+
+/**
+ * Record an expense as a signed-in PARTICIPANT of the event (#48). The gate is
+ * `assertParticipant`, not `assertPlanner`: a friend on a trip is not a
+ * planner, and the invite link is no longer a licence to write money.
+ *
+ * `input.paidBy*` is deliberately free of the actor — "Ana paid €40, I'm
+ * entering it" is the convenience that keeps the gate from being annoying, and
+ * `createdByUserId` records who actually typed it.
+ */
+export async function addExpenseAsParticipant(actor: ParticipantActor, slug: string, input: AddExpenseInput) {
+  const { ev } = await assertMayWriteExpenses(slug, actor)
+  return addExpense(ev.id, input, { userId: actor.id })
+}
+
+/** Remove an expense you recorded or paid; a planner of the event may remove any. */
+export async function removeExpenseAsParticipant(actor: ParticipantActor, slug: string, expenseId: string) {
+  const { ev, role } = await assertMayWriteExpenses(slug, actor)
+  await removeExpense(ev.id, expenseId, {
+    userId: actor.id,
+    email: actor.email,
+    asPlanner: role === 'owner' || role === 'co_planner'
+  })
+  return loadBudget(ev.id)
 }

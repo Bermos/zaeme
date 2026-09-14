@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
+import { guestUser } from '../database/schema/auth'
 
 /**
  * Event access control. Extracted from `layers/events/server/utils/
@@ -12,9 +13,41 @@ import { tables, useDb } from './db'
 
 export type PlannerRole = 'owner' | 'co_planner' | 'logistics'
 
+/**
+ * How an ACCOUNT belongs to an event: as one of its planners, or as somebody
+ * who was invited and answered. See `assertParticipant`.
+ */
+export type ParticipantRole = PlannerRole | 'participant'
+
 interface AssertPlannerOpts {
   /** If provided, only these roles pass the check. Default: any role. */
   roles?: readonly PlannerRole[]
+}
+
+/**
+ * An event that is not open to the people invited to it. `draft` has not been
+ * shown to anybody yet and `cancelled` is over; neither may take a guest-side
+ * write.
+ *
+ * This lived INSIDE `resolveInviteToken` (`server/domain/invite.ts`) and was
+ * reachable only by going through a token — so moving expense writes off the
+ * capability URL silently dropped it, and an expense could be recorded against
+ * a cancelled trip (#48 review). It is a rule about the EVENT, not about the
+ * link, so it lives here now and both paths call it.
+ *
+ * `completed` deliberately still passes: settling up happens after the trip.
+ *
+ * The parameter is the SCHEMA's status union, not `{ status: string }`. Widened
+ * to `string` this compiles against any row that happens to have a `status` —
+ * an RSVP, an invite — and, worse, renaming a value in
+ * `text('status', { enum: [...] })` would leave the comparisons below matching
+ * nothing with `pnpm typecheck` still green. That is the `events_expense.currency`
+ * shape exactly: a guard nobody notices has stopped guarding.
+ */
+export function assertEventOpenToGuests(ev: Pick<typeof tables.event.$inferSelect, 'status'>): void {
+  if (ev.status === 'draft' || ev.status === 'cancelled') {
+    throw createError({ statusCode: 403, message: 'Event is not currently accepting RSVPs' })
+  }
 }
 
 export async function loadEventBySlug(slug: string) {
@@ -60,4 +93,58 @@ export async function addPlanner(eventId: string, userId: string, role: PlannerR
     .limit(1)
   if (existing) return
   await db.insert(tables.eventPlanner).values({ id: createId(), eventId, userId, role })
+}
+
+/**
+ * The account-scoped counterpart of `assertPlanner`: is this signed-in account
+ * ON this event at all? A planner row passes, and so does an RSVP whose
+ * `guestEmail` is the account's email — because in zäme a person IS their
+ * lowercased email address (`server/domain/guest.ts`), and an account is the
+ * same person having proved they hold that address. There is deliberately no
+ * second identity model; matching the email is the whole of it.
+ *
+ * This exists because expense WRITES moved off the invite capability URL and
+ * onto an account (#48): the link no longer buys the right to record money, but
+ * a trip participant is not a planner either, so neither existing gate fits.
+ * Reads over the invite link are untouched.
+ *
+ * It answers the STRONGEST standing, and `logistics` is the weakest — it is the
+ * one planner role that does not by itself say the holder is on the trip, and
+ * the one the host surface already refuses an expense write. So a logistics
+ * planner who ALSO RSVP'd comes back `participant` rather than being turned away
+ * by their own planner row; only a logistics planner with no RSVP comes back
+ * `logistics`, and the caller decides what that is worth.
+ */
+export async function assertParticipant(eventId: string, userId: string): Promise<ParticipantRole> {
+  const db = useDb()
+
+  const [planner] = await db
+    .select({ role: tables.eventPlanner.role })
+    .from(tables.eventPlanner)
+    .where(and(eq(tables.eventPlanner.eventId, eventId), eq(tables.eventPlanner.userId, userId)))
+    .limit(1)
+
+  const plannerRole = planner ? planner.role as PlannerRole : null
+  if (plannerRole === 'owner' || plannerRole === 'co_planner') return plannerRole
+
+  const [account] = await db
+    .select({ email: guestUser.email })
+    .from(guestUser)
+    .where(eq(guestUser.id, userId))
+    .limit(1)
+
+  if (account) {
+    // RSVP emails are stored lowercased on write; lowercase this side too
+    // rather than trusting the stored casing.
+    const [rsvp] = await db
+      .select({ id: tables.rsvp.id })
+      .from(tables.rsvp)
+      .where(and(eq(tables.rsvp.eventId, eventId), eq(tables.rsvp.guestEmail, account.email.toLowerCase())))
+      .limit(1)
+    if (rsvp) return 'participant'
+  }
+
+  if (plannerRole) return plannerRole
+
+  throw createError({ statusCode: 403, message: 'You are not on this event — RSVP first, then you can add expenses' })
 }

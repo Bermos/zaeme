@@ -235,6 +235,60 @@ check "shares that exceed the total are refused" 422 "${AUTH[@]}" "${JSON[@]}" -
   -d '{"title":"Bad","amountCents":100,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":500}]}'
 
 echo
+echo "== the boundary: money is written by an ACCOUNT, read by the link (#48) =="
+# Reading the budget is still the invite capability URL's; writing an expense
+# moved onto a session plus an RSVP-or-planner row. These are the halves no
+# structural test can prove — that the routes actually answer this way.
+# An invite link only resolves on a live event (a draft 403s), so publish first.
+body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSLUG/status" -d '{"status":"published"}' > /dev/null
+ITOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSLUG/invites" -d '{"label":"Budget smoke"}' \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+MEEXP="$BASE/api/me/events/$TSLUG/expenses"
+NEW='{"title":"Coffee","amountCents":900,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"}]}'
+
+check "the budget still reads over the invite link" 200 "$BASE/api/invites/$ITOK/budget"
+check "the invite link no longer WRITES an expense" 404 "${JSON[@]}" -X POST "$BASE/api/invites/$ITOK/expenses" -d "$NEW"
+check "...not even holding a valid token"           404 "${JSON[@]}" -X DELETE "$BASE/api/invites/$ITOK/expenses/whatever"
+check "an anonymous expense write is refused"       401 "${JSON[@]}" -X POST "$MEEXP" -d "$NEW"
+check "a service token is not an account either"    401 "${AUTH[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW"
+
+if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  # Signed in and real, but with no RSVP and no planner row on this trip —
+  # 403, not 401: the credential is fine, the standing is not.
+  check "an account that is not on the event"       403 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW"
+else
+  echo "  skip  set ZAEME_TEST_GUEST_COOKIE to a NON-participant session to run this"
+fi
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  PLANNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  # The owner planned this trip (the machine API acts as them), so they pass
+  # `assertParticipant` as a planner and the write goes through.
+  PAID=$(body "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW")
+  contains "a planner's account may write"          "$PAID" '"expenses"'
+  contains "...and the row records WHO added it"    "$PAID" '"addedByName"'
+
+  # The event LIFECYCLE check used to come free with `resolveInviteToken`.
+  # Moving the write off the token dropped it, and an expense recorded happily
+  # against a cancelled trip; `assertEventOpenToGuests` is that rule, shared.
+  DRAFT=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke draft trip $SUFFIX\",\"type\":\"trip\"}" \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  check "a DRAFT event takes no expense"           403 "${PLANNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$DRAFT/expenses" -d "$NEW"
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$DRAFT/status" -d '{"status":"published"}' > /dev/null
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$DRAFT/status" -d '{"status":"cancelled"}' > /dev/null
+  check "a CANCELLED event takes no expense"       403 "${PLANNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$DRAFT/expenses" -d "$NEW"
+  # …but a finished trip must still settle up. This LEAVES $TSLUG completed, and
+  # has to: `STATUS_TRANSITIONS.completed` is `[]` (`server/domain/events-data.ts`),
+  # so `completed` is terminal and there is no legal way back to `published`. A
+  # restore here would 409 into /dev/null and read as if it had worked — so any
+  # check appended below must mint its own event rather than assume this one.
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSLUG/status" -d '{"status":"completed"}' > /dev/null
+  check "a COMPLETED event still settles up"       200 "${PLANNER[@]}" "${JSON[@]}" -X POST "$MEEXP" -d "$NEW"
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
+
+echo
 echo "== the series (the movie-night path) =="
 SER=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke cinema $SUFFIX\",\"type\":\"series\",\"cadence\":\"every second Friday\"}")
 SSLUG=$(printf '%s' "$SER" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')

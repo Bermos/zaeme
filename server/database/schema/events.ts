@@ -311,7 +311,16 @@ export const expense = pgTable('events_expense', {
   paidByName: text('paid_by_name').notNull(),
   paidByEmail: text('paid_by_email').notNull(),
   note: text('note'),
-  /** Who recorded it: a planner's userId, or a guest's email. */
+  /**
+   * Who recorded it. Always an ACCOUNT since #48 — writing an expense needs a
+   * session, so `created_by_user_id` is set on every new row and is what the
+   * screen attributes ("paid by Ana · added by Matthew").
+   *
+   * `created_by_guest_email` is the email-only author of the old invite-link
+   * write path and is NEVER WRITTEN AGAIN. It is still here because dropping a
+   * column is a migration and this change deliberately carries none; the next
+   * expense migration should take it with it.
+   */
   createdByUserId: text('created_by_user_id'),
   createdByGuestEmail: text('created_by_guest_email'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

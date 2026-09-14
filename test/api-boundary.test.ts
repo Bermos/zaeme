@@ -49,6 +49,7 @@ const machineHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/v1
 const guestHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/invites/'))
 const hostHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/host/'))
 const adminHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/admin/'))
+const accountHandlers = allHandlers.filter(f => rel(f).startsWith('server/api/me/'))
 
 describe('the machine surface never touches the guest or host authenticator', () => {
   it('found the surfaces it is meant to be checking', () => {
@@ -94,8 +95,8 @@ describe('the machine surface never touches the guest or host authenticator', ()
     expect(credentialHalf).not.toMatch(/resolveInstancePlanner|useDb|await/)
   })
 
-  it('no guest or host handler imports the service token', () => {
-    const offenders = [...guestHandlers, ...hostHandlers].filter(f =>
+  it('no guest, host or account handler imports the service token', () => {
+    const offenders = [...guestHandlers, ...hostHandlers, ...accountHandlers].filter(f =>
       /service-auth|requireServiceCaller|ZAEME_SERVICE_TOKEN/.test(readFileSync(f, 'utf8')))
     expect(offenders.map(rel)).toEqual([])
   })
@@ -189,6 +190,170 @@ describe('the admin surface is the owner\'s, and only the owner\'s', () => {
 
     delete process.env.ZAEME_SERVICE_TOKEN
     expect(serviceCredentialStatus()).toMatchObject({ configured: false, fingerprint: null })
+  })
+})
+
+/**
+ * `/api/me/**` is the ACCOUNT surface: the host session, with no planner row
+ * required. It has always held the cross-event aggregation; #48 moved expense
+ * WRITES onto it, because the owner decided money is recorded against a person
+ * rather than against whoever holds a link.
+ *
+ * That move is the reason this block exists, and it cuts in two directions.
+ *
+ * INWARD: everything here is a session, every time. A route that forgot
+ * `requireGuestUser` would be an unauthenticated write to the budget, and a
+ * route that accepted a capability token instead would put the link back in
+ * charge of the money by the back door.
+ *
+ * OUTWARD — and this is the one the move could have broken — `/api/invites/**`
+ * must stay exactly what it was: the link IS the credential, and no handler
+ * there may read a session. Writing the expense gate INTO an invite handler is
+ * the shortcut this file exists to refuse; the surfaces are separate on
+ * purpose, so the guest page can still READ the budget over the link while the
+ * write needs an account.
+ *
+ * The runtime half — an anonymous POST answered 401, a signed-in non-participant
+ * answered 403 — is executed by `scripts/api-smoke.sh` against a real server.
+ */
+describe('the account surface is a session, and the invite link never becomes one', () => {
+  const inviteExpenseWrites = guestHandlers.filter(f => /\/expenses\//.test(rel(f)))
+
+  it('found the account routes it is meant to be checking', () => {
+    expect(accountHandlers.length).toBeGreaterThan(1)
+  })
+
+  it('every /api/me handler requires a signed-in account', () => {
+    const offenders = accountHandlers.filter(f => !/requireGuestUser\(/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('no /api/me handler accepts a capability token instead', () => {
+    // `[slug]` on this surface names an EVENT; a `token` router param would be
+    // an invite link being read as an identity, which it is not.
+    const offenders = accountHandlers.filter(f => /getRouterParam\(\s*e[^)]*,\s*'token'\s*\)/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('no /api/invites handler reads a session', () => {
+    // The whole point of the capability URL is that there is no account behind
+    // it. A session check here would mean the link had quietly stopped being
+    // sufficient for something it still appears to offer.
+    const offenders = guestHandlers.filter(f =>
+      /requireGuestUser|getGuestSession|utils\/auth|assertParticipant|assertPlanner/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
+  it('the invite link no longer writes an expense, and still reads the budget', () => {
+    // #48: writes moved to /api/me/events/<slug>/expenses. Reading was NOT
+    // narrowed — the guest page renders the budget for anybody holding the link.
+    expect(inviteExpenseWrites.map(rel)).toEqual([])
+    expect(existsSync(join(API_ROOT, 'invites', '[token]', 'budget.get.ts'))).toBe(true)
+
+    const expensePost = join(API_ROOT, 'me', 'events', '[slug]', 'expenses', 'index.post.ts')
+    const expenseDelete = join(API_ROOT, 'me', 'events', '[slug]', 'expenses', '[id].delete.ts')
+    expect(existsSync(expensePost)).toBe(true)
+    expect(existsSync(expenseDelete)).toBe(true)
+    for (const f of [expensePost, expenseDelete]) {
+      expect(readFileSync(f, 'utf8')).toMatch(/AsParticipant/)
+    }
+  })
+
+  it('the participant gate is decided in the domain, never in a handler', () => {
+    // `assertParticipant` reads the database to answer "is this account on this
+    // event". Like `assertPlanner`, it belongs beside the operation it guards,
+    // so a route cannot accidentally call the write without it. Importing or
+    // CALLING it is the offence — naming it in a comment, as the two expense
+    // handlers do to say where their gate lives, is not.
+    const offenders = allHandlers.filter((f) => {
+      const src = readFileSync(f, 'utf8')
+      return /import[^\n]*\bassertParticipant\b/.test(src) || /\bassertParticipant\s*\(/.test(src)
+    })
+    expect(offenders.map(rel)).toEqual([])
+
+    const permissions = readFileSync(join(ROOT, 'server', 'domain', 'permissions.ts'), 'utf8')
+    expect(permissions).toMatch(/export async function assertParticipant/)
+    const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
+    expect(expenses).toMatch(/assertParticipant\(ev\.id, actor\.id\)/)
+  })
+
+  it('an expense write records the account that made it, not a typed-in email', () => {
+    // The accountability the account gate buys is `created_by_user_id`. If a
+    // write could still name its own author, the gate would have bought nothing.
+    const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
+    expect(expenses).toMatch(/createdByUserId: by\.userId\b/)
+    expect(expenses).toMatch(/createdByGuestEmail: null/)
+    expect(expenses).not.toMatch(/guestEmail\?:/)
+  })
+
+  it('the participant write path re-checks the event lifecycle', () => {
+    // The `draft`/`cancelled` refusal used to come free with
+    // `resolveInviteToken`. Moving the write off the token dropped it, and an
+    // expense recorded happily against a CANCELLED trip. The rule is about the
+    // event, not the link, so both paths call one guard.
+    const permissions = readFileSync(join(ROOT, 'server', 'domain', 'permissions.ts'), 'utf8')
+    expect(permissions).toMatch(/export function assertEventOpenToGuests/)
+    expect(permissions).toMatch(/'draft'.*'cancelled'/s)
+
+    const invite = readFileSync(join(ROOT, 'server', 'domain', 'invite.ts'), 'utf8')
+    expect(invite).toMatch(/assertEventOpenToGuests\(ev\)/)
+    // …and the check exists in exactly one place, not two that can drift.
+    expect(invite).not.toMatch(/status === 'draft'/)
+
+    const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
+    expect(expenses).toMatch(/assertEventOpenToGuests\(ev\)/)
+  })
+
+  it('the two expense write gates agree about `logistics`', () => {
+    // `addExpenseAsPlanner` refuses a logistics planner on the host surface. If
+    // the participant surface accepted one, the same account would be 403'd on
+    // /api/host and 200'd on /api/me for the same verb.
+    //
+    // This pins the ROLE SETS and nothing else. The two surfaces still differ on
+    // the event LIFECYCLE on purpose — `assertEventOpenToGuests` is a guest-side
+    // rule, so a co-planner may budget a draft trip on /api/host and /api/v1
+    // while a participant may not on /api/me. That asymmetry is deliberate and
+    // is named in #52; do not read this test as asserting the two gates agree
+    // about everything.
+    const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
+    const writers = /const EXPENSE_WRITERS[^=]*=\s*\[([^\]]*)\]/.exec(expenses)?.[1] ?? ''
+    expect(writers).toMatch(/'participant'/)
+    expect(writers).toMatch(/'owner'/)
+    expect(writers).toMatch(/'co_planner'/)
+    expect(writers).not.toMatch(/'logistics'/)
+
+    const plannerGate = /assertPlanner\(ev\.id, userId, \{ roles: \[([^\]]*)\] \}\)/.exec(expenses)?.[1] ?? ''
+    expect(plannerGate).toBe('\'owner\', \'co_planner\'')
+  })
+
+  it('the invite link can say a budget EXISTS without saying what is in it', () => {
+    // Two different questions, and this line has already moved twice. Who may
+    // WRITE is `viewer` + `lockedReason`; who may READ THE FIGURES is
+    // `showAmounts`. Collapsing them renders the expense list, the balances and
+    // the settlement plan to anybody a link was forwarded to — no new
+    // capability (the budget was always in the payload and `GET
+    // /api/invites/[token]/budget` was always open) but a change in what the
+    // page says by default to somebody who has typed nothing.
+    const card = readFileSync(join(ROOT, 'app', 'components', 'BudgetCard.vue'), 'utf8')
+    expect(card).toMatch(/showAmounts: boolean/)
+    // Required, not optional: a new caller has to decide rather than inherit.
+    expect(card).not.toMatch(/showAmounts\?:/)
+
+    const template = /<template>([\s\S]*)<\/template>\s*$/.exec(card)?.[1] ?? ''
+    expect(template).toMatch(/<template v-if="showAmounts">/)
+    // The running total is a figure too, and it lives outside that block.
+    expect(template).toMatch(/v-if="showAmounts"[\s\S]{0,200}budget\.totalCents/)
+
+    // …and the guest page keeps the figures exactly where they were before #48:
+    // behind an identified visitor, never behind the mere presence of a link.
+    const invitePage = readFileSync(join(ROOT, 'app', 'pages', 'i', '[token].vue'), 'utf8')
+    expect(invitePage).toMatch(/:show-amounts="complete \|\| !!account"/)
+  })
+
+  it('records the account surface in the audit, like every other human one', () => {
+    const middleware = readFileSync(join(ROOT, 'server', 'middleware', 'audit.ts'), 'utf8')
+    expect(middleware).toMatch(/'\/api\/me\/'/)
+    expect(eventSlugFromPath('/api/me/events/lugano-weekend/expenses')).toBe('lugano-weekend')
   })
 })
 
