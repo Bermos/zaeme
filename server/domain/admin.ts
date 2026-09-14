@@ -1,6 +1,8 @@
 import { and, asc, count, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
+import { applyTimelineItemMove, applyTimelineItemUpdate, type TimelineMove, type UpdateTimelineItemInput } from './events-data'
+import { loadEventBySlug } from './permissions'
 import { guestSession, guestUser } from '../database/schema/auth'
 
 /**
@@ -197,6 +199,7 @@ export async function listAllEvents(filter: AdminEventFilter = {}) {
       rsvpCount: sql<number>`(select count(*)::int from events_rsvp r where r.event_id = events_event.id)`,
       inviteCount: sql<number>`(select count(*)::int from events_invite i where i.event_id = events_event.id and i.revoked_at is null)`,
       mediaCount: sql<number>`(select count(*)::int from events_media m where m.event_id = events_event.id and m.status = 'ready')`,
+      timelineCount: sql<number>`(select count(*)::int from events_timeline_item t where t.event_id = events_event.id)`,
       plannerCount: sql<number>`(select count(*)::int from events_event_planner p where p.event_id = events_event.id)`
     })
     .from(e)
@@ -211,6 +214,72 @@ export async function listAllEvents(filter: AdminEventFilter = {}) {
     .where(where.length ? and(...where) : undefined)
 
   return { events: rows, total: totals?.total ?? 0, limit, offset }
+}
+
+/* ----------------------------- one itinerary ------------------------------- */
+
+/**
+ * One event's itinerary, by slug and by slug alone.
+ *
+ * `listTimeline` in `events-data.ts` asks whether the caller plans the event,
+ * which is right for the host surface and wrong here for exactly the reason
+ * `revokeInviteAsOwner` below exists: the owner administering the instance is
+ * not necessarily a planner of the event with the typo in it, and "I can see it
+ * but not fix it" is not an admin surface. The authorisation is the owner gate,
+ * applied by the route.
+ *
+ * This is a DRILL-DOWN, not a column: the cross-event list carries a
+ * `timelineCount` so the owner knows which rows are worth opening, and this
+ * runs once for the one row they opened. Calling it per row would be the N+1
+ * the top of this file forbids.
+ */
+export async function eventTimelineAsOwner(slug: string) {
+  const ev = await loadEventBySlug(slug)
+  return useDb()
+    .select()
+    .from(tables.timelineItem)
+    .where(eq(tables.timelineItem.eventId, ev.id))
+    .orderBy(
+      tables.timelineItem.sortOrder,
+      tables.timelineItem.startsAt,
+      tables.timelineItem.createdAt,
+      // The same last tiebreak `applyTimelineItemMove` renumbers by. Drop it and
+      // a tied itinerary is listed in one order and renumbered in another, so
+      // the first click on the arrows moves the wrong row.
+      tables.timelineItem.id
+    )
+}
+
+/**
+ * Correct one itinerary item on any event, as the instance owner.
+ *
+ * The write is `applyTimelineItemUpdate` — the same one the host surface runs
+ * (issue #8), so an item corrected from `/admin` and one corrected from `/host`
+ * are the same operation with two different answers to "who may". `sortOrder`
+ * is patchable here too: an item that cannot move can only be deleted and
+ * rebuilt, which is the bug that issue is about.
+ *
+ * Deliberately still absent from `/api/v1`: the machine surface has no
+ * `updateTimelineItem` operation, and the owner reaching one over the admin
+ * surface does not mint one for the XO.
+ */
+export async function updateTimelineItemAsOwner(slug: string, itemId: string, input: UpdateTimelineItemInput) {
+  const ev = await loadEventBySlug(slug)
+  return applyTimelineItemUpdate({ eventId: ev.id, itemId, input })
+}
+
+/**
+ * Move one itinerary item on any event, as the instance owner.
+ *
+ * Reordering is ONE operation rather than two `sortOrder` PATCHes — see
+ * `applyTimelineItemMove` for why the two-PATCH version silently bricks a pair
+ * of items. It matters more here than on `/host`: this surface deliberately
+ * has no add and no delete, and the owner who needs it is by definition the one
+ * `/host` answers 403, so there would be nothing to recover with.
+ */
+export async function moveTimelineItemAsOwner(slug: string, itemId: string, direction: TimelineMove) {
+  const ev = await loadEventBySlug(slug)
+  return applyTimelineItemMove({ eventId: ev.id, itemId, direction })
 }
 
 /* ------------------------------ series overview ---------------------------- */

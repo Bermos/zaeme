@@ -115,20 +115,20 @@ async function saveEdit(id: string) {
 }
 
 /**
- * Move an item by swapping `sortOrder` with its neighbour — the list is served
- * in that order, so this is the whole of reordering.
+ * Moving is ONE request, and the server renumbers the itinerary.
+ *
+ * It used to be two `sortOrder` PATCHes from here. If the second one did not
+ * land, the item and its neighbour were left sharing a number — and every
+ * attempt after that computed the same number for both, answered 200 twice and
+ * moved nothing, so the arrows went dead for that pair with no error to show
+ * for it. `applyTimelineItemMove` renumbers in one statement, which cannot
+ * half-apply and clears any tie already there.
  */
 const moving = ref<string | null>(null)
-async function move(index: number, delta: number) {
-  const item = props.timeline[index]
-  const neighbour = props.timeline[index + delta]
-  if (!item || !neighbour) return
-  const a = item.sortOrder ?? index * 10
-  const b = neighbour.sortOrder ?? (index + delta) * 10
-  moving.value = item.id
+async function move(id: string, direction: 'up' | 'down') {
+  moving.value = id
   try {
-    await $fetch(`/api/host/events/${props.slug}/timeline/${item.id}`, { method: 'PATCH', body: { sortOrder: b } })
-    await $fetch(`/api/host/events/${props.slug}/timeline/${neighbour.id}`, { method: 'PATCH', body: { sortOrder: a } })
+    await $fetch(`/api/host/events/${props.slug}/timeline/${id}/move`, { method: 'POST', body: { direction } })
     emit('updated')
   } catch {
     toast.add({ title: 'Could not reorder', color: 'error' })
@@ -237,7 +237,7 @@ function when(iso: string | Date | null): string | null {
               variant="ghost"
               :disabled="index === 0 || moving === item.id"
               aria-label="Move up"
-              @click="move(index, -1)"
+              @click="move(item.id, 'up')"
             >
               ↑
             </UButton>
@@ -247,7 +247,7 @@ function when(iso: string | Date | null): string | null {
               variant="ghost"
               :disabled="index === timeline.length - 1 || moving === item.id"
               aria-label="Move down"
-              @click="move(index, 1)"
+              @click="move(item.id, 'down')"
             >
               ↓
             </UButton>
