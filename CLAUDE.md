@@ -65,3 +65,14 @@ shell, with the opposite design discipline:
   surfaces at the edge and `defineServiceHandler` records the machine one; a new
   route needs no audit code of its own, and the middleware must keep returning
   early for `/api/v1` (no cookie near that surface) and `/api/auth`.
+
+## Working through subagents
+
+`/orchestrate` (`.claude/skills/orchestrate/SKILL.md`) is the playbook for running a
+batch of issues through subagents; the roles it dispatches — `implementer`,
+`reviewer`, `dependency-mapper` — live in `.claude/agents/` and keep what they learn
+in `.claude/agent-memory/<name>/MEMORY.md`, which is checked in and grows with each
+run. It is adapted from the same skill in `Bermos/Kitchen`, with the parts that are
+this repo's own: merging to `main` deploys (there is no release to hold), a `/api/v1`
+change is unfinished until Enterprise's vendored spec has moved, and the two smoke
+scripts run nowhere but a person's terminal.
