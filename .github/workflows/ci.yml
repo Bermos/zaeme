@@ -13,6 +13,15 @@ name: ci
 # the second cancels the first. Expect to see a cancelled run beside the green
 # one on such a commit — both were pointed at the same SHA and the survivor is
 # whichever started later.
+#
+# THE PRICE, so that it is not discovered on a bad day: every head SHA of such a
+# branch carries THREE `cancelled` check runs (one per job in the run that lost
+# the race) beside its three green ones, and GitHub reports the pull request as
+# `mergeable_state: unstable` because of them. Harmless while nothing is
+# required — nobody is blocked and the green runs are the complete ones — but it
+# reads as flaky CI, and the day auto-merge or a required check is switched on
+# it stops being cosmetic. The fix then is to drop `push:` to
+# `branches: [main]`, which costs branches with no pull request their checks.
 on:
   push:
   pull_request:
@@ -671,6 +680,16 @@ jobs:
       # deleting every expense it can reach through `/api/v1`, so that it can
       # prove the base-currency setting on a database a previous run left
       # behind. It would take the previous release's money with it.
+      #
+      # That deletion loop is also the one part of this job that `api` never
+      # exercises: on the fresh database `api` hands it, it finds nothing and
+      # does nothing, while here it has to delete the ~29 expenses the previous
+      # release wrote before the base-currency block can run at all. Its
+      # `DELETE`s are unchecked (`scripts/api-smoke.sh`, the `CLEAN_SLUG` loop),
+      # so if a future gate ever refuses one, THIS job goes red in the settings
+      # block, several hundred checks later, for a reason that has nothing to do
+      # with a migration. If that is what you are looking at, the expense is
+      # still there and the refusal is the bug.
       - name: Read and write the previous release's rows
         run: node scripts/ci-upgrade-check.mjs verify "$RUNNER_TEMP/previous.json"
 

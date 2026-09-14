@@ -37,6 +37,20 @@
  * produce a consistent ledger, and proving the arithmetic of a particular
  * backfill is that migration's own job.
  *
+ * THIS FILE SPEAKS TWO RELEASES' `/api/v1` AT ONCE, and that is a maintenance
+ * obligation rather than an accident. `canaryExpenses` below has to be accepted
+ * by the PREVIOUS release's `POST /api/v1/events/{slug}/expenses`, and `verify`
+ * reads the shapes the NEW one answers with — `sameCategory` already carries
+ * one such transition, the `other` -> `Uncategorised` rename #61 made.
+ *
+ * So a breaking change to that surface has a third file to move (after the
+ * routes and `docs/zaeme-api.openapi.yaml`), and for the one release that
+ * straddles the change this file has to accept both spellings. That is why
+ * every request it makes either aborts with the response and a line saying
+ * which side of the migration it was talking to, or asserts on a field it has
+ * checked is there: whoever hits it will be mid-rename, and the job's job is to
+ * say so rather than to fail as if the migration were wrong.
+ *
  * Plain .mjs with no imports beyond node, like `scripts/migrate.mjs` and
  * `scripts/ci-smoke-setup.mjs`: it runs before and after a build, against two
  * different releases, and must not need either one's dependency tree.
@@ -59,12 +73,30 @@ const HEADERS = {
 }
 
 /**
- * The floor, in the spirit of `MIN_SMOKE_CHECKS`. The canary alone produces
- * more than this on its own, so it holds even on a run where the smoke suite
- * left nothing else behind — and it is what stops `verify` from reporting
- * success because it found nothing to look at.
+ * The floor, in the spirit of `MIN_SMOKE_CHECKS`: what stops `verify` from
+ * reporting success because it found nothing to look at.
+ *
+ * It is EXACTLY what the canary produces, counted from `verify` below rather
+ * than estimated, because the canary is the one event `snapshot` guarantees:
+ *
+ *   1   the budget still loads
+ *  12   two expenses x six (survived, amount as spent, carries its lines, sums
+ *       to zero, every line has an account, still filed under its category)
+ *   2   everybody who had a balance still has one; the balances still close
+ *   4   the write block: readable, recorded, filed under Food, total moved
+ *  ---
+ *  19
+ *
+ * `snapshot` refuses to write a file unless the canary came back with both of
+ * those expenses AND a category on each, so every one of the 19 is reachable —
+ * the producer's guarantee and this consumer's floor are the same statement,
+ * which is the bug this number had when it was 24 against a canary worth 20.
+ *
+ * Whatever a run finds BEYOND the canary is the smoke suite's leftovers, and
+ * this deliberately does not depend on how many of those there are: that file
+ * is free to change what it leaves behind.
  */
-const MIN_ASSERTIONS = 24
+const MIN_ASSERTIONS = 19
 
 let pass = 0
 let fail = 0
@@ -202,15 +234,25 @@ async function snapshot(file) {
     })
   }
 
+  // What `verify`'s floor rests on, asserted HERE, where the previous release
+  // is still up and can say what went wrong. Both expenses, each with the
+  // category it was filed under: those two facts are what make all 19 of that
+  // floor's assertions reachable, so if this release reports its budget
+  // differently the run stops at the producer rather than at the consumer with
+  // a count nobody can explain.
   const canary = events.find(e => e.slug === canarySlug)
   if (!canary || canary.expenses.length !== 2) {
     abort(`the canary trip ${canarySlug} came back with ${canary?.expenses.length ?? 'no'} expenses, not 2`)
   }
-  const money = events.reduce((n, e) => n + e.expenses.length, 0)
-  if (money < 2) {
-    abort(`the previous release holds ${money} expenses — there is nothing here for a migration to migrate`)
+  if (!canary.expenses.every(e => e.category)) {
+    abort(
+      `the canary trip ${canarySlug} came back with an expense carrying no category: `
+      + `${JSON.stringify(canary.expenses.map(e => [e.title, e.category]))}. `
+      + 'The previous release answers a shape this script does not read any more — update it.'
+    )
   }
 
+  const money = events.reduce((n, e) => n + e.expenses.length, 0)
   writeFileSync(file, JSON.stringify({ canarySlug, events }, null, 2))
   console.log(
     `[upgrade-check] snapshot: ${events.length} event(s) holding ${money} expense(s), canary ${canarySlug} -> ${file}`
@@ -305,16 +347,14 @@ async function verify(file) {
       }
     }
 
-    const debits = sum(
-      (after.expenses ?? []).flatMap(e => (e.lines ?? []).filter(l => l.accountKind === 'category' && l.amountCents > 0))
-        .map(l => l.amountBaseCents)
-    )
-    assert(
-      `${before.slug}: the trip total is the sum of its category debits`,
-      after.totalCents === debits,
-      `total ${after.totalCents}, debits ${debits}`
-    )
-
+    // There WAS an assertion here that `totalCents` equals the sum of the
+    // debits into category accounts. It could not fail: `computeTotalCents`
+    // (`server/domain/expenses.ts`) computes the total by summing exactly those
+    // lines out of exactly this response, so the check restated the answer it
+    // was checking and still counted towards the floor above. The honest
+    // version of it is in the write block at the bottom of this function, where
+    // the total has to move by an amount THIS script chose — which is what went
+    // red when the chart of accounts was not seeded.
     const nowBalances = new Map((after.balances ?? []).map(b => [b.email, b.netCents]))
     const lost = before.balances.map(b => b.email).filter(email => !nowBalances.has(email))
     assert(
@@ -378,8 +418,9 @@ async function verify(file) {
   }
   if (pass < MIN_ASSERTIONS) {
     console.error(
-      `::error::[upgrade-check] only ${pass} assertions ran, fewer than the ${MIN_ASSERTIONS} the canary alone `
-      + 'produces — this run proved almost nothing and is not a pass'
+      `::error::[upgrade-check] ${pass} assertions ran, fewer than the ${MIN_ASSERTIONS} the canary alone accounts `
+      + 'for — a check above was removed or the budget response has changed shape, so this run did not look at what '
+      + 'it says it looked at. Recount the arithmetic at MIN_ASSERTIONS in this file rather than lowering it.'
     )
     process.exit(1)
   }
