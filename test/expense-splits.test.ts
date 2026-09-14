@@ -278,12 +278,19 @@ describe('every mode, at the boundaries', () => {
   })
 })
 
-describe('a split sums exactly in BOTH currencies', () => {
+describe('a split sums exactly in what was SPENT, at every size and rate', () => {
   /**
-   * The guarantee #25 established for even splits, held for the new modes: the
-   * shares add up to what was SPENT, and their conversions add up to what it
-   * SETTLES FOR. Neither needs the other to be tidy, and no share is ever
-   * converted on its own.
+   * Every mode resolves to cents that add up to the total exactly — that is the
+   * guarantee `resolveShares` gives, and it is the balance check the ledger's
+   * as-spent column rests on (#61).
+   *
+   * `apportionCents` is the machinery, and the two assertions below are about
+   * it directly. NOTE that the write path no longer uses it to convert shares
+   * into base cents: since #61 each share converts on its own, so what one
+   * person owes is explicable without reference to the others, and the cents
+   * that leaves over post to the event's `Rounding` account rather than being
+   * handed to the largest fractional remainder. `test/expense-ledger.test.ts`
+   * is where that half lives.
    */
   it('for six rates, forty split sizes and a dozen totals', () => {
     const rates = ['1', '0.9412', '1.1', '0.836719', '1.0000000001', '123.456789']
@@ -303,10 +310,14 @@ describe('a split sums exactly in BOTH currencies', () => {
     }
   })
 
-  it('for a percentage split of a EUR dinner settled in CHF', () => {
+  it('for a percentage split of a EUR dinner, apportioned as a group', () => {
     // EUR 100.00 at 0.8367 is CHF 83.67. 50/25/25 of the euros is
-    // 5000/2500/2500; the francs do not divide the same way, and the
-    // apportionment is what makes them add up anyway.
+    // 5000/2500/2500; the francs do not divide the same way, and apportioning
+    // as a group is what would make them add up to the converted total. The
+    // ledger does NOT do this any more — 4183 is 5000 x 0.8367 rounded DOWN,
+    // which is a cent less than that person actually owes — and the difference
+    // between these figures and the per-share conversions is exactly the cent
+    // that now posts to `Rounding`.
     const spent = cents(resolveShares(10000, people(3, [50, 25, 25]), 'percentage'))
     expect(spent).toEqual([5000, 2500, 2500])
     const converted = convertCents(10000, '0.8367')

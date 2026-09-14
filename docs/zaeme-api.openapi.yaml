@@ -846,13 +846,18 @@ paths:
       tags: [budget]
       summary: Read a trip's budget.
       description: >-
-        Get a trip/event's budget: every expense with its shares, per-person
-        balances (paid vs owed), and the suggested "who pays whom" settlement plan.
-        Amounts are integer cents. Each expense carries BOTH what was spent
-        (amountCents in its own currency) and what it settles for
-        (amountBaseCents in the instance base currency, frozen at the fxRate it
-        was recorded at); `currency` on the budget is the instance base currency,
-        and totalCents, every balance and every settlement are in it.
+        Get a trip/event's budget: every expense with its shares AND its ledger
+        lines, the event's accounts, per-person balances (paid vs owed), and the
+        suggested "who pays whom" settlement plan. Amounts are integer cents.
+        Each expense carries BOTH what was spent (amountCents in its own
+        currency) and what it settles for (amountBaseCents in the instance base
+        currency, frozen at the fxRate it was recorded at); `currency` on the
+        budget is the instance base currency, and totalCents, every balance and
+        every settlement are in it.
+
+        The budget is a double-entry ledger: each expense is an entry whose
+        lines post signed amounts to member, category and rounding accounts and
+        sum to zero. totalCents is the sum of debits into category accounts.
       responses:
         '200':
           description: Expenses, balances and the settlement plan.
@@ -886,6 +891,14 @@ paths:
         the market does. Pass fxRate to pin that conversion yourself; omit it and
         the rate is fetched. If no rate can be fetched the call answers 422 and
         names fxRate, rather than recording money at a rate nobody chose.
+
+        The expense is recorded as a balanced journal entry: the payer is
+        credited, the category account is debited what it cost and credited what
+        was pushed back out to the people, and each person is debited their own
+        share converted at that frozen rate. Where those conversions do not add
+        up to the converted total, the difference posts to the event's Rounding
+        account rather than being absorbed by somebody's share. Leave category
+        and accountId out and the cost lands in Uncategorised.
       requestBody:
         required: true
         content:
@@ -898,7 +911,21 @@ paths:
                 title: { type: string, minLength: 1, maxLength: 200 }
                 category:
                   type: string
-                  enum: [travel, accommodation, food, tickets, other]
+                  maxLength: 60
+                  description: >-
+                    Where the cost lands, by the NAME of one of the event's
+                    category accounts, matched case-insensitively. No longer an
+                    enum — categories are per-event accounts now — but the five
+                    old values still resolve: food finds Food, other finds
+                    Uncategorised. A name the event has no account for is a 422
+                    naming it, rather than a silent Uncategorised. Omit it and
+                    the cost lands in Uncategorised, which is the ordinary case.
+                accountId:
+                  type: string
+                  maxLength: 64
+                  description: >-
+                    The category account outright, from the budget's accounts
+                    list. Wins over category when both are given.
                 amountCents:
                   type: integer
                   minimum: 1
@@ -2166,16 +2193,33 @@ components:
 
     Expense:
       type: object
-      required: [id, title, amountCents, currency, amountBaseCents, baseCurrency, fxRate, shares]
+      required: [id, title, amountCents, currency, amountBaseCents, baseCurrency, fxRate, shares, lines]
       description: >-
-        Two amounts, always. amountCents/currency is what was handed over;
-        amountBaseCents/baseCurrency is what it settles for, converted once at
-        fxRate when it was recorded and frozen there. Only the base figures are
-        ever summed.
+        One JOURNAL ENTRY. Two amounts, always: amountCents/currency is what was
+        handed over; amountBaseCents/baseCurrency is what it settles for,
+        converted once at fxRate when it was recorded and frozen there. Only the
+        base figures are ever summed.
+
+        `lines` is the entry itself — every posting, credits included, summing to
+        zero. `shares` is the member DEBIT lines of that same entry, the shape
+        this schema has always had.
       properties:
         id: { type: string }
         title: { type: string }
-        category: { type: string, enum: [travel, accommodation, food, tickets, other] }
+        category:
+          type: string
+          description: >-
+            The NAME of the category account this cost was debited to — "Food",
+            "Accommodation", "Uncategorised", or anything the group has added.
+            NO LONGER AN ENUM: categories are per-event accounts that can be
+            added and removed, so the five fixed values are gone. The old values
+            still resolve on the way IN (food finds Food, other finds
+            Uncategorised); what comes back is the account's name.
+        categoryAccountId:
+          type: [string, 'null']
+          description: >-
+            The account that name belongs to. Summing the debits into one of
+            these is what "what did accommodation cost" means.
         amountCents: { type: integer, description: 'As spent, in `currency`.' }
         currency: { type: string, description: 'What was actually spent.' }
         amountBaseCents:
@@ -2213,8 +2257,13 @@ components:
               amountBaseCents:
                 type: integer
                 description: >-
-                  The same slice in base cents, apportioned so the shares sum to
-                  amountBaseCents exactly.
+                  This person's OWN slice converted at fxRate — what they owe,
+                  explicable on its own. It is no longer apportioned against the
+                  expense total, so on a foreign expense these need not sum to
+                  amountBaseCents; the cents between the two are posted to the
+                  event's Rounding account and appear in `lines` and in the
+                  budget's `accounts`. Balances still sum to zero exactly,
+                  because the payer is credited what the group severally owes.
               weight:
                 type: [string, 'null']
                 description: >-
@@ -2222,21 +2271,51 @@ components:
                   percentage or weight split, kept so those two modes can be
                   re-split from the same numbers. null under even and exact,
                   where the amounts are the whole of what was meant.
+        lines:
+          type: array
+          description: >-
+            Every posting of this entry: signed amounts into accounts, debit
+            positive and credit negative, summing to zero in amountCents and in
+            amountBaseCents independently. One expense is the payer's credit, a
+            debit and a credit on its category account, one debit per person,
+            and a rounding line when converting the split left cents over.
+          items:
+            type: object
+            required: [accountId, accountName, accountKind, amountCents, amountBaseCents]
+            properties:
+              accountId: { type: string }
+              accountName: { type: string }
+              accountKind: { type: string, enum: [member, category, rounding] }
+              accountEmail:
+                type: [string, 'null']
+                description: 'Set on member lines; null on category and rounding lines.'
+              amountCents: { type: integer, description: 'Signed, as spent.' }
+              amountBaseCents: { type: integer, description: 'Signed, in the base currency.' }
 
     Budget:
       type: object
-      required: [expenses, balances, settlements, currency]
+      required: [expenses, balances, settlements, currency, accounts]
       description: >-
-        All amounts are integer cents; there is no floating point anywhere in this
-        payload. Everything outside the expense list is denominated in `currency`,
-        the instance base currency.
+        A DOUBLE-ENTRY LEDGER. All amounts are integer cents; there is no
+        floating point anywhere in this payload. Everything outside the expense
+        list is denominated in `currency`, the instance base currency.
+
+        Every figure here is a sum over accounts. totalCents is the sum of
+        debits into category accounts, so a member-to-member transfer — which
+        touches no category account — is excluded by its shape rather than by a
+        flag. Balances are per member account and sum to zero exactly.
       properties:
         currency:
           type: string
           description: >-
             The INSTANCE BASE CURRENCY — what totalCents, every balance and every
             settlement below are in. Not the currency of any particular expense.
-        totalCents: { type: integer, description: 'Every expense summed, in base cents.' }
+        totalCents:
+          type: integer
+          description: >-
+            What the event cost, in base cents: the sum of DEBITS into its
+            category accounts. Not the accounts' net, which is a cent of
+            conversion residual away from zero by design.
         expenses:
           type: array
           items: { $ref: '#/components/schemas/Expense' }
@@ -2266,6 +2345,38 @@ components:
               toName: { type: string }
               toEmail: { type: string }
               amountCents: { type: integer }
+        accounts:
+          type: array
+          description: >-
+            The event's chart of accounts with what has been posted to each. A
+            member account per person, a category account per kind of cost
+            (Uncategorised always present, and the default destination), and one
+            rounding account carrying the cents that converting a split leaves
+            over. totalCents is the sum of debitCents over the category accounts.
+          items:
+            type: object
+            required: [id, kind, name, isSystem, debitCents, creditCents, netCents, lineCount]
+            properties:
+              id: { type: string }
+              kind: { type: string, enum: [member, category, rounding] }
+              name: { type: string }
+              email:
+                type: [string, 'null']
+                description: 'The member''s address; null on category and rounding accounts.'
+              isSystem:
+                type: boolean
+                description: >-
+                  Uncategorised and Rounding. A system account is never
+                  deletable; no account of any kind can be deleted while it
+                  holds lines.
+              debitCents:
+                type: integer
+                description: 'Base cents posted INTO the account. On a category, what it cost.'
+              creditCents: { type: integer, description: 'Base cents posted OUT of it.' }
+              netCents:
+                type: integer
+                description: 'creditCents - debitCents. On a member, their balance.'
+              lineCount: { type: integer }
 
     SeriesMember:
       type: object

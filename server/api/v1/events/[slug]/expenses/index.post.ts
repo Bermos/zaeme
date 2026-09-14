@@ -24,7 +24,16 @@ import { expense } from '#server/utils/v1-shapes'
  */
 const bodySchema = z.object({
   title: z.string().min(1).max(200),
-  category: z.enum(['travel', 'accommodation', 'food', 'tickets', 'other']).optional(),
+  /**
+   * Where the cost lands, by NAME and case-insensitively (#61): "Food", or the
+   * old lower-case enum value `food`, which still resolves to the same account.
+   * `other` means `Uncategorised`, which is also what leaving it out means — and
+   * leaving it out is the ordinary case, because a group that does not care
+   * about categories should never be asked.
+   */
+  category: z.string().min(1).max(60).optional(),
+  /** The category account outright, from the budget's `accounts`. Wins over `category`. */
+  accountId: z.string().min(1).max(64).optional(),
   amountCents: z.number().int().min(1),
   currency: z.string().min(3).max(3).optional(),
   fxRate: z.string().regex(/^\d{1,9}(\.\d{1,10})?$/).optional(),

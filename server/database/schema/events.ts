@@ -1,4 +1,4 @@
-import { relations } from 'drizzle-orm'
+import { relations, sql } from 'drizzle-orm'
 import { bigint, boolean, index, integer, numeric, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core'
 
 /**
@@ -36,9 +36,12 @@ import { bigint, boolean, index, integer, numeric, pgTable, text, timestamp, uni
  *  - `events_media` — the shared gallery, documents and tickets.
  *  - `events_series_member` — the standing group of a recurring series: each
  *    new occurrence auto-invites every member.
- *  - `events_expense` + `events_expense_share` — the trip budget (integer
- *    cents; no float money), each row carrying the base currency and the FX
- *    rate it was recorded at.
+ *  - `events_account` + `events_expense` + `events_expense_share` — the trip
+ *    budget, kept as a DOUBLE-ENTRY LEDGER (#61): accounts per member, per
+ *    category and one for rounding; `events_expense` is a journal entry and
+ *    `events_expense_share` its lines, which sum to zero. Integer cents; no
+ *    float money. Each entry carries the base currency and the FX rate it was
+ *    recorded at.
  *  - `events_instance_setting` — the one-row instance configuration (the base
  *    currency the whole instance settles up in).
  *  - `events_message` — the per-event group chat.
@@ -299,9 +302,75 @@ export const seriesMember = pgTable('events_series_member', {
 /* ----------------------------- budget / splitting -------------------------- */
 
 /**
- * One paid cost on an event (trips mostly): who paid, how much, and how it is
- * split. Money is integer cents; there is no float money anywhere near this
- * table.
+ * THE CHART OF ACCOUNTS for one event (#61). Three kinds, and no more — this is
+ * a friend-group budget, not a general ledger, so there are no assets, no
+ * liabilities and no trial balance.
+ *
+ *  - `member` — one per person who touches money on this event, created on
+ *    first use of their identity. It carries the LOWERCASED EMAIL that is
+ *    already the identity everywhere else in this domain, so a line no longer
+ *    repeats a name and an address per row.
+ *  - `category` — where a cost lands. Seeded per event from the enum
+ *    `events_expense.category` used to hold, plus `Uncategorised`, which is the
+ *    DEFAULT DESTINATION: a group that never wants categories never meets the
+ *    concept, and every line still posts somewhere. More can be added within an
+ *    event; `Uncategorised` is `is_system` and is never deletable.
+ *  - `rounding` — one per event, `is_system`. The home for the cents that
+ *    converting a split at one rate leaves over. It exists so an entry can
+ *    always balance without the residual being shoved onto the largest creditor
+ *    by hand, which is arbitrary and unexplainable to whoever finds it later.
+ *
+ * WHY AN `email` COLUMN THAT IS NULL ON TWO OF THE THREE KINDS: it is the
+ * identity of a member account and there is nothing to be null ABOUT on a
+ * category. That is different from `events_expense.currency` before #25 — a
+ * value stored, typed and rendered on every row while nothing read it. Here the
+ * partial unique index below is what enforces "one account per person per
+ * event", and it is only meaningful on the rows that have one.
+ */
+export const account = pgTable('events_account', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
+  kind: text('kind', { enum: ['member', 'category', 'rounding'] }).notNull(),
+  /** What it is called on screen. Category names are the ones people rename. */
+  name: text('name').notNull(),
+  /** Lowercased, member accounts only — the identity RSVPs already use. */
+  email: text('email'),
+  /**
+   * `Uncategorised` and `Rounding`. A system account cannot be deleted at all;
+   * every account, system or not, refuses deletion while it holds lines.
+   */
+  isSystem: boolean('is_system').notNull().default(false),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
+}, table => [
+  index('events_account_event_idx').on(table.eventId),
+  // One member account per person per event. Postgres treats NULLs as distinct,
+  // so the two kinds that carry no email are simply not constrained by it.
+  uniqueIndex('events_account_event_email_unique').on(table.eventId, table.email),
+  // Category names are what the picker shows, so two accounts called "Food" on
+  // one event is a bug the database can refuse rather than a mess to clean up.
+  uniqueIndex('events_account_event_category_name_unique')
+    .on(table.eventId, table.name)
+    .where(sql`kind = 'category'`),
+  // Exactly one rounding account per event: the residual has ONE home, or it is
+  // not a home.
+  uniqueIndex('events_account_event_rounding_unique')
+    .on(table.eventId)
+    .where(sql`kind = 'rounding'`)
+])
+
+/**
+ * A JOURNAL ENTRY (#61). One paid cost on an event (trips mostly): who paid,
+ * how much, and how it is split. Money is integer cents; there is no float
+ * money anywhere near this table.
+ *
+ * The entry header carries what a person typed — the title, the total, the
+ * currency, who fronted it. WHERE THE MONEY WENT is in the lines
+ * (`events_expense_share`), which post to accounts and sum to zero. There is
+ * no `category` column any more and no `kind` discriminator: an entry with a
+ * line into a category account is a cost, and an entry whose lines touch only
+ * member accounts is a transfer between two friends. The structure says which,
+ * so nothing has to remember to set a flag.
  *
  * TWO AMOUNTS, ALWAYS (#25). `amount_cents`/`currency` is what was handed over;
  * `amount_base_cents`/`base_currency` is what it settles for, converted at
@@ -323,7 +392,6 @@ export const expense = pgTable('events_expense', {
   id: text('id').primaryKey(),
   eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
-  category: text('category', { enum: ['travel', 'accommodation', 'food', 'tickets', 'other'] }).notNull().default('other'),
   /** The total AS SPENT, in the currency it was spent in. */
   amountCents: integer('amount_cents').notNull(),
   /** What was actually handed over — EUR for a dinner in Milan. */
@@ -391,44 +459,88 @@ export const expense = pgTable('events_expense', {
 ])
 
 /**
- * One participant's slice of an expense. Shares are materialised amounts (the
- * remainder distribution happens at write time, whatever the split mode was),
- * so balances are a plain sum — no split-mode arithmetic at read time.
+ * THE LINES OF ONE JOURNAL ENTRY (#61) — the table that used to hold only "one
+ * participant's slice" and now holds every side of the transaction.
+ *
+ * Each line posts a SIGNED amount to an account: positive is a debit, negative
+ * is a credit, and **the lines of an entry sum to zero** — in `amount_cents`
+ * (what was handed over) and in `amount_base_cents` (what it settles for)
+ * independently. That single invariant is what makes the rest of the budget a
+ * sum rather than a special case; `assertEntryBalances` in
+ * `server/domain/expenses.ts` refuses to write an entry that violates it.
+ *
+ * Ana pays 120 for dinner, split four ways, is seven lines:
+ *
+ *     credit  member:Ana        120     ← she fronted it
+ *     debit   category:Food     120     ← THE COST
+ *     credit  category:Food     120     ← pushed back out to the people
+ *     debit   member:Ana         30
+ *     debit   member:Ben         30
+ *     debit   member:Cleo        30
+ *     debit   member:Dee         30
+ *
+ * The category account ACCUMULATES: the trip total is the sum of debits into
+ * category accounts, never the account's net (which is zero by design), so
+ * "what did accommodation cost" is one query over one account. A transfer
+ * between two friends posts member→member, touches no category account, and is
+ * therefore structurally not a cost — which is why there is no `kind` flag.
+ *
+ * `account_id` IS NEVER NULL. Nullable-when-not-applicable is exactly where the
+ * `currency` bug lived before #25 (stored, typed, rendered, read by nothing),
+ * and the premise of this table is not inventing that class of bug again. The
+ * name and the email a line used to repeat live on the member account instead.
  */
 export const expenseShare = pgTable('events_expense_share', {
   id: text('id').primaryKey(),
   expenseId: text('expense_id').notNull().references(() => expense.id, { onDelete: 'cascade' }),
   eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
-  name: text('name').notNull(),
-  email: text('email').notNull(),
+  /** Where this side of the transaction lands. Never null; never guessed. */
+  accountId: text('account_id').notNull().references(() => account.id, { onDelete: 'restrict' }),
+  /** SIGNED, as spent: debit positive, credit negative. */
   amountCents: integer('amount_cents').notNull(),
   /**
-   * What this person had ENTERED for them under a `percentage` or `weight`
-   * split — `33.33` or `2` — and null under `even` and `exact`, where the
-   * amounts are the whole of what was meant (#26).
+   * SIGNED, in base cents — the figure every balance, total and settlement is
+   * built from.
    *
-   * Kept only so an edit of a `percentage` or `weight` expense can re-split from
-   * the same numbers rather than asking for them again — an `even` expense with
-   * some amounts pinned has no equivalent record, and #27 will have to ask.
-   * `amount_cents` stays the source of truth for every balance: nothing reads
-   * this column to compute money, which is why a row whose weight says 2 and
-   * whose amount says otherwise is a display problem and never a wrong
-   * settlement.
-   */
-  weight: numeric('weight', { precision: 12, scale: 4 }),
-  /**
-   * The same slice in BASE cents, apportioned at write time so the base shares
-   * sum to the expense's `amount_base_cents` EXACTLY (largest remainder, same
-   * discipline as `splitEvenlyCents`). Converting each share at read time would
-   * lose or invent cents on almost every split.
+   * Each member's debit is THEIR OWN share converted at the entry's frozen
+   * rate, so what a person owes is explicable on its own ("your €40 at 0.9412
+   * is CHF 37.65") rather than being the figure that made the column tidy. The
+   * cents that rounding leaves over between the converted total and the sum of
+   * the converted shares post to the event's `rounding` account, where they are
+   * visible, instead of being absorbed by whoever happened to sort last.
    */
   amountBaseCents: integer('amount_base_cents').notNull(),
+  /**
+   * What this person had ENTERED for them under a `percentage` or `weight`
+   * split — `33.33` or `2` — and null everywhere else (#26): under `even` and
+   * `exact` the amounts are the whole of what was meant, and a category,
+   * rounding or payer-credit line was never entered by anybody.
+   *
+   * Kept only so an edit of a `percentage` or `weight` expense can re-split
+   * from the same numbers rather than asking for them again. `amount_cents`
+   * stays the source of truth for every balance: nothing reads this column to
+   * compute money, which is why a row whose weight says 2 and whose amount says
+   * otherwise is a display problem and never a wrong settlement.
+   */
+  weight: numeric('weight', { precision: 12, scale: 4 }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 }, table => [
   index('events_expense_share_expense_idx').on(table.expenseId),
   index('events_expense_share_event_idx').on(table.eventId),
-  index('events_expense_share_email_idx').on(table.email),
-  uniqueIndex('events_expense_share_expense_email_unique').on(table.expenseId, table.email)
+  index('events_expense_share_account_idx').on(table.accountId),
+  // At most one debit and one credit per account per entry. This is what the
+  // old `(expense_id, email)` unique index bought — "Ana cannot appear twice" —
+  // kept under a shape where Ana legitimately appears TWICE in one entry: once
+  // credited for fronting the money and once debited for her own share. The
+  // predicate is on the AS-SPENT amount, which is never zero on a credit (the
+  // total is at least one cent), where the base amount can be zero on a tiny
+  // expense at a small rate and would then collide with itself.
+  uniqueIndex('events_expense_share_expense_account_debit_unique')
+    .on(table.expenseId, table.accountId)
+    .where(sql`amount_cents >= 0`),
+  uniqueIndex('events_expense_share_expense_account_credit_unique')
+    .on(table.expenseId, table.accountId)
+    .where(sql`amount_cents < 0`)
 ])
 
 /* ---------------------------- instance settings ---------------------------- */
@@ -523,6 +635,7 @@ export const eventsSchema = {
   dateVote,
   contribution,
   seriesMember,
+  account,
   expense,
   expenseShare,
   message,

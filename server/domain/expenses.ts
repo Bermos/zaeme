@@ -5,6 +5,16 @@ import { tables, useDb } from './db'
 import { baseCurrencyWithin, instanceBaseCurrency } from './instance-settings'
 import { guestUser } from '../database/schema/auth'
 import { assertEventOpenToGuests, assertParticipant, assertPlanner, loadEventBySlug, type ParticipantRole } from './permissions'
+import {
+  type AccountKind,
+  type AccountView,
+  ensureEventAccountsWithin,
+  ensureMemberAccountsWithin,
+  loadEventAccounts,
+  resolveCategoryAccount,
+  ROUNDING,
+  UNCATEGORISED
+} from './accounts'
 import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
 import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '../../shared/utils/split-weight'
 
@@ -35,9 +45,28 @@ import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '.
  * `even`, which honours explicit per-person amounts and splits the remainder
  * across the rest: nothing records which participants were pinned, so a mixed
  * `even` expense is the one an edit cannot re-split without asking again.
+ *
+ * A DOUBLE-ENTRY LEDGER (#61). The two tables above were already a journal
+ * header with lines — the payer is the credit, each share a debit, and "the
+ * shares sum to the total" is the balance check — so what this file gained was
+ * ACCOUNTS (`server/domain/accounts.ts`), not a new structure. Every line now
+ * posts a SIGNED amount to a member, category or rounding account, and the
+ * lines of an entry sum to zero in both currencies. That one invariant
+ * (`assertEntryBalances`, refused at write time) is what makes every figure
+ * below a sum over accounts:
+ *
+ *   trip total   sum of DEBITS into category accounts
+ *   balances     per member account: credits paid, debits owed
+ *   settlements  member to member, touching no category account — which is why
+ *                a transfer between friends is structurally not a cost and
+ *                needs no `kind` flag to be left out of the total
+ *
+ * And the conversion residual has a home. Each member is debited THEIR OWN
+ * share converted at the entry's frozen rate, so what one person owes is
+ * explicable on its own; the cents between that and the converted total post to
+ * the event's `Rounding` account, visibly, rather than being handed to whoever
+ * sorted last. See `buildEntryLines`.
  */
-
-export type ExpenseCategory = 'travel' | 'accommodation' | 'food' | 'tickets' | 'other'
 
 /**
  * How a total is divided across the people it is split between (#26).
@@ -78,7 +107,19 @@ export interface ExpenseParticipantInput {
 
 export interface AddExpenseInput {
   title: string
-  category?: ExpenseCategory
+  /**
+   * Where the cost lands, BY NAME, case-insensitively — "Food", or the old
+   * lower-case enum value `food`, which still resolves. `other` resolves to
+   * `Uncategorised`, which is also what an omitted category means.
+   *
+   * Omitting it is the ordinary case and the reason the screen never has to ask
+   * (#61): every line still posts somewhere, so `accountId` on a line can be
+   * NOT NULL without a group that does not care about categories ever meeting
+   * the concept.
+   */
+  category?: string | null
+  /** The category account outright, when the caller has its id. Wins over `category`. */
+  accountId?: string | null
   /** The total AS SPENT, in `currency`. */
   amountCents: number
   /** What was handed over. Defaults to the instance base currency. */
@@ -106,7 +147,14 @@ export interface AddExpenseInput {
 export interface ExpenseView {
   id: string
   title: string
-  category: ExpenseCategory
+  /** The NAME of the category account this entry's cost was debited to. */
+  category: string
+  /**
+   * That account's id — the thing "what did accommodation cost" sums over.
+   * `null` only for an entry with no category line at all, which is what a
+   * transfer between two friends will be (#28); nothing writes one yet.
+   */
+  categoryAccountId: string | null
   /** As spent, in `currency`. */
   amountCents: number
   currency: string
@@ -129,6 +177,11 @@ export interface ExpenseView {
    */
   addedByName: string | null
   addedByEmail: string | null
+  /**
+   * The member DEBIT lines of this entry, which is what "a share" has always
+   * meant — who owes what. The name and the email come from the member account
+   * now; the line itself carries neither.
+   */
   shares: Array<{
     name: string
     email: string
@@ -137,6 +190,32 @@ export interface ExpenseView {
     /** The percentage or share count entered for this person, or null. */
     weight: string | null
   }>
+  /**
+   * EVERY line of the entry, credits included, in the order they were written.
+   * This is the ledger itself: it sums to zero, and a reader that wants to know
+   * where the money went reads it rather than reconstructing it from the fields
+   * above. The residual line on `Rounding`, when there is one, is only here.
+   */
+  lines: LedgerLineView[]
+}
+
+/** One posting: a signed amount into one account. Debit positive, credit negative. */
+export interface LedgerLine {
+  accountId: string
+  /** As spent, signed. */
+  amountCents: number
+  /** In base cents, signed. */
+  amountBaseCents: number
+  /** The entered percentage or weight, on member debit lines only. */
+  weight: string | null
+}
+
+/** A line with the account it posts to, for anything that renders or sums it. */
+export interface LedgerLineView extends LedgerLine {
+  accountName: string
+  accountKind: AccountKind
+  /** The member's address, or null on a category or rounding line. */
+  accountEmail: string | null
 }
 
 /**
@@ -238,11 +317,15 @@ export function convertCents(cents: number, rate: string): number {
  * by largest remainder: floor each proportional share, then hand the leftover
  * cents out one at a time to the largest fractional parts.
  *
- * This is why shares are converted as a GROUP rather than one at a time.
- * Converting each share on its own rounds each one independently, and three
- * roundings of 3333.33 do not add up to the converted total — the budget then
- * shows a total nobody owes, which is exactly the kind of quiet cent that makes
- * a friend group stop trusting the numbers.
+ * This is how a percentage or a weight becomes cents that sum to the total
+ * EXACTLY: 33.33/33.33/33.34 of a total that does not divide still adds up,
+ * because the leftover cents are handed to the largest fractional parts rather
+ * than to whoever happens to be last.
+ *
+ * It used to convert the shares into base cents as a group too. It does not any
+ * more (#61): each share converts on its own, so what one person owes is
+ * explicable without reference to the others, and the cents that leaves over go
+ * to the event's `Rounding` account. See `buildEntryLines`.
  */
 export function apportionCents(parts: number[], total: number, newTotal: number): number[] {
   if (parts.length === 0) return []
@@ -384,9 +467,8 @@ export function resolveShares(
  * may total anything above zero, because "Ana counts double" is 2/1/1 and
  * nobody should have to turn that into 50/25/25 themselves.
  *
- * The distribution is `apportionCents` — the very function that keeps converted
- * shares summing to the converted total — so the remainder lands cent by cent
- * on the largest fractional parts rather than on whoever happens to be last.
+ * The distribution is `apportionCents`, so the remainder lands cent by cent on
+ * the largest fractional parts rather than on whoever happens to be last.
  */
 function resolveProportional(
   amountCents: number,
@@ -435,32 +517,145 @@ function resolveProportional(
   }))
 }
 
+/* ------------------------------ the ledger -------------------------------- */
+
 /**
- * Per-person balances (paid − owed) across a list of expenses, in BASE cents.
+ * The lines one expense becomes, in the ACCUMULATING shape the owner chose.
  *
- * This function used to add `amountCents` across every expense whatever
- * currency it named, which is the whole of #25. It reads `amountBaseCents` and
- * nothing else; the as-spent figures exist to be shown, never to be summed.
+ *     Ana pays 120 for dinner, split 4 ways
+ *       credit  member:Ana        120     ← she fronted it
+ *       debit   category:Food     120     ← THE COST
+ *       credit  category:Food     120     ← pushed back out to the people
+ *       debit   member:Ana         30
+ *       debit   member:Ben         30
+ *       debit   member:Cleo        30
+ *       debit   member:Dee         30
+ *
+ * The category account accumulates rather than netting to zero, so the trip
+ * total is the sum of DEBITS into category accounts. A transfer between two
+ * friends will be an entry with member lines only — no category line, therefore
+ * structurally not a cost, therefore no `kind` flag to forget to set.
+ *
+ * WHERE THE ROUNDING LINE COMES FROM. Each member is debited their own share
+ * converted at the entry's frozen rate (`convertCents` per line), because that
+ * is the number you can explain to the person who owes it: "your €50 at 0.8367
+ * is CHF 41.84". Those conversions need not add up to the conversion of the
+ * total — €100 at 0.8367 is CHF 83.67, while 50/25/25 converts to 41.84 + 20.92
+ * + 20.92 = CHF 83.68 — and the difference is real, not a mistake to hide. It
+ * posts to `Rounding`, where somebody can find it, instead of being handed to
+ * the largest creditor or shaved off whoever sorts last.
+ *
+ * Two consequences worth stating, because both are load-bearing:
+ *
+ *  - the MEMBER lines of an entry always sum to zero (the payer is credited
+ *    exactly what the others are debited), so balances sum to zero exactly and
+ *    a settlement plan closes to the cent — the thing #59 was trying to buy by
+ *    rounding the plan;
+ *  - the trip total stays the sum of the converted totals, not of the converted
+ *    shares, so "what was spent" is unaffected by how it was divided.
+ *
+ * At rate 1 — every same-currency expense, which is most of them — the residual
+ * is zero and no rounding line is written at all.
  */
-export function computeBalances(expenses: ExpenseView[]): BalanceView[] {
+export function buildEntryLines(input: {
+  /** The entry total AS SPENT. */
+  amountCents: number
+  /** The entry total in base cents: `convertCents(amountCents, fxRate)`. */
+  amountBaseCents: number
+  fxRate: string
+  payerAccountId: string
+  categoryAccountId: string
+  roundingAccountId: string
+  shares: Array<{ accountId: string, amountCents: number, weight: string | null }>
+}): LedgerLine[] {
+  const shareBase = input.shares.map(s => convertCents(s.amountCents, input.fxRate))
+  const owed = shareBase.reduce((sum, c) => sum + c, 0)
+
+  const lines: LedgerLine[] = [
+    // The payer is credited what the group owes them, which is the sum of the
+    // debits below — that is what makes the member side of every entry net to
+    // zero, and the balances with it.
+    { accountId: input.payerAccountId, amountCents: -input.amountCents, amountBaseCents: -owed, weight: null },
+    { accountId: input.categoryAccountId, amountCents: input.amountCents, amountBaseCents: input.amountBaseCents, weight: null },
+    { accountId: input.categoryAccountId, amountCents: -input.amountCents, amountBaseCents: -owed, weight: null },
+    ...input.shares.map((s, i) => ({
+      accountId: s.accountId,
+      amountCents: s.amountCents,
+      amountBaseCents: shareBase[i]!,
+      weight: s.weight
+    }))
+  ]
+
+  const residual = owed - input.amountBaseCents
+  if (residual !== 0) {
+    lines.push({ accountId: input.roundingAccountId, amountCents: 0, amountBaseCents: residual, weight: null })
+  }
+  return lines
+}
+
+/**
+ * THE INVARIANT: the lines of an entry sum to zero — in what was handed over
+ * and in what it settles for, independently.
+ *
+ * In double-entry this one check catches most of what you would otherwise hunt
+ * for a case at a time: a split that does not cover the total, a conversion
+ * that lost a cent, a line posted to the wrong side. It is a 500 rather than a
+ * 422 on purpose — every input that can be wrong has already been refused by
+ * `resolveShares` and `convertCents` with a message naming the field, so an
+ * entry that reaches here unbalanced is this file's bug and not the caller's.
+ */
+export function assertEntryBalances(lines: LedgerLine[]): void {
+  const spent = lines.reduce((sum, l) => sum + l.amountCents, 0)
+  const base = lines.reduce((sum, l) => sum + l.amountBaseCents, 0)
+  if (spent !== 0 || base !== 0) {
+    throw createError({
+      statusCode: 500,
+      message: `This entry does not balance (${spent} as spent, ${base} in base). Nothing was recorded.`
+    })
+  }
+}
+
+/**
+ * Per-person balances, in BASE cents, summed over MEMBER ACCOUNTS.
+ *
+ * A credit on a member account is money they put in; a debit is money they owe.
+ * That is the whole calculation now — there is no "payer" special case left,
+ * because fronting the money IS a credit line like any other. It reads only
+ * `amountBaseCents`: the as-spent figures exist to be shown, never to be summed
+ * (which is the whole of #25).
+ */
+export function computeBalances(lines: LedgerLineView[]): BalanceView[] {
   const byEmail = new Map<string, BalanceView>()
-  const touch = (name: string, email: string): BalanceView => {
+  for (const line of lines) {
+    if (line.accountKind !== 'member') continue
+    const email = (line.accountEmail ?? '').toLowerCase()
     let b = byEmail.get(email)
     if (!b) {
-      b = { name, email, paidCents: 0, owedCents: 0, netCents: 0 }
+      b = { name: line.accountName, email, paidCents: 0, owedCents: 0, netCents: 0 }
       byEmail.set(email, b)
     }
-    return b
-  }
-  for (const exp of expenses) {
-    touch(exp.paidByName, exp.paidByEmail.toLowerCase()).paidCents += exp.amountBaseCents
-    for (const share of exp.shares) {
-      touch(share.name, share.email.toLowerCase()).owedCents += share.amountBaseCents
-    }
+    if (line.amountBaseCents < 0) b.paidCents += -line.amountBaseCents
+    else b.owedCents += line.amountBaseCents
   }
   const balances = [...byEmail.values()]
   for (const b of balances) b.netCents = b.paidCents - b.owedCents
   return balances.sort((a, b) => b.netCents - a.netCents)
+}
+
+/**
+ * What the trip cost: the sum of DEBITS into category accounts.
+ *
+ * Not the category accounts' net (which is a cent of conversion residual away
+ * from zero by design) and not the sum of what members owe (which includes that
+ * residual). Debits into categories are the money that was actually spent on
+ * something, and a member-to-member transfer touches no category account at
+ * all, so it is excluded without anything having to know it exists.
+ */
+export function computeTotalCents(lines: LedgerLineView[]): number {
+  return lines.reduce(
+    (sum, l) => (l.accountKind === 'category' && l.amountBaseCents > 0 ? sum + l.amountBaseCents : sum),
+    0
+  )
 }
 
 /**
@@ -512,24 +707,37 @@ function trimDecimal(stored: string): string {
 /* --------------------------------- reads ---------------------------------- */
 
 /**
- * All expenses with their shares, plus balances and a settlement plan.
+ * The whole budget: every entry with its lines, the accounts they post to,
+ * per-member balances and a settlement plan.
  *
  * `currency` is the INSTANCE BASE CURRENCY — the one thing every figure below
  * `expenses` is denominated in. It used to be `expenses[0]?.currency`, i.e.
  * whichever row came back first, which is how a budget could be labelled EUR
  * while the numbers under it were a sum of CHF and GBP cents.
+ *
+ * Every figure here is now a sum over accounts (#61). The accounts are SEEDED
+ * on the way through when this event has never had a budget looked at — events
+ * are created down four different paths and an account that exists on three of
+ * them is worse than none — which is why a read touches `ensureEventAccounts`.
  */
 export async function loadBudget(eventId: string): Promise<{
   expenses: ExpenseView[]
   balances: BalanceView[]
   settlements: SettlementView[]
-  /** The sum of every expense IN BASE CENTS. */
+  /** Every account on the event with what has been posted to it. */
+  accounts: AccountView[]
+  /** The sum of DEBITS into category accounts, in base cents. */
   totalCents: number
   /** The instance base currency: what `totalCents`, balances and settlements are in. */
   currency: string
 }> {
   const db = useDb()
   const baseCurrency = await instanceBaseCurrency()
+  // Seeds the event's accounts if this is the first look at its budget, and
+  // answers every account with what has been posted to it, in ONE grouped query.
+  const accounts = await loadEventAccounts(eventId)
+  const byAccountId = new Map(accounts.map(a => [a.id, a]))
+
   const rows = await db
     .select({
       expense: tables.expense,
@@ -541,46 +749,81 @@ export async function loadBudget(eventId: string): Promise<{
     .where(eq(tables.expense.eventId, eventId))
     .orderBy(asc(tables.expense.createdAt))
 
-  const shares = rows.length
+  const lineRows = rows.length
     ? await db
         .select()
         .from(tables.expenseShare)
         .where(inArray(tables.expenseShare.expenseId, rows.map(r => r.expense.id)))
+        // A stable order across reads: two lines written in one statement share
+        // a `created_at` to the microsecond, and cuid2 ids do not sort by age.
+        .orderBy(asc(tables.expenseShare.createdAt), asc(tables.expenseShare.id))
     : []
 
-  const expenses: ExpenseView[] = rows.map(({ expense: r, addedByName, addedByEmail }) => ({
-    id: r.id,
-    title: r.title,
-    category: r.category as ExpenseCategory,
-    amountCents: r.amountCents,
-    currency: r.currency,
-    amountBaseCents: r.amountBaseCents,
-    baseCurrency: r.baseCurrency,
-    fxRate: trimDecimal(r.fxRate),
-    splitMode: r.splitMode,
-    paidByName: r.paidByName,
-    paidByEmail: r.paidByEmail,
-    note: r.note,
-    createdAt: r.createdAt,
-    addedByName,
-    addedByEmail: addedByEmail?.toLowerCase() ?? null,
-    shares: shares
-      .filter(s => s.expenseId === r.id)
-      .map(s => ({
-        name: s.name,
-        email: s.email,
-        amountCents: s.amountCents,
-        amountBaseCents: s.amountBaseCents,
-        weight: s.weight === null ? null : trimDecimal(s.weight)
-      }))
-  }))
+  const allLines: LedgerLineView[] = lineRows.map((l) => {
+    const acc = byAccountId.get(l.accountId)
+    return {
+      accountId: l.accountId,
+      accountName: acc?.name ?? 'Unknown account',
+      accountKind: acc?.kind ?? 'category',
+      accountEmail: acc?.email ?? null,
+      amountCents: l.amountCents,
+      amountBaseCents: l.amountBaseCents,
+      weight: l.weight === null ? null : trimDecimal(l.weight)
+    }
+  })
+  const linesByExpense = new Map<string, LedgerLineView[]>()
+  lineRows.forEach((l, i) => {
+    const bucket = linesByExpense.get(l.expenseId)
+    if (bucket) bucket.push(allLines[i]!)
+    else linesByExpense.set(l.expenseId, [allLines[i]!])
+  })
 
-  const balances = computeBalances(expenses)
+  const expenses: ExpenseView[] = rows.map(({ expense: r, addedByName, addedByEmail }) => {
+    const lines = linesByExpense.get(r.id) ?? []
+    // The DEBIT into a category account is where this entry's cost landed. An
+    // entry with no such line is a transfer between two friends, which is not a
+    // cost and has no category; there is no way to write one yet (#28), and the
+    // shape rather than a flag is what will keep it out of the total.
+    const destination = lines.find(l => l.accountKind === 'category' && l.amountCents > 0)
+    return {
+      id: r.id,
+      title: r.title,
+      category: destination?.accountName ?? UNCATEGORISED,
+      categoryAccountId: destination?.accountId ?? null,
+      amountCents: r.amountCents,
+      currency: r.currency,
+      amountBaseCents: r.amountBaseCents,
+      baseCurrency: r.baseCurrency,
+      fxRate: trimDecimal(r.fxRate),
+      splitMode: r.splitMode,
+      paidByName: r.paidByName,
+      paidByEmail: r.paidByEmail,
+      note: r.note,
+      createdAt: r.createdAt,
+      addedByName,
+      addedByEmail: addedByEmail?.toLowerCase() ?? null,
+      // What a "share" has always meant: the member DEBIT lines. The payer's
+      // credit is a member line too and is excluded by its sign, not by a flag.
+      shares: lines
+        .filter(l => l.accountKind === 'member' && l.amountCents >= 0)
+        .map(l => ({
+          name: l.accountName,
+          email: l.accountEmail ?? '',
+          amountCents: l.amountCents,
+          amountBaseCents: l.amountBaseCents,
+          weight: l.weight
+        })),
+      lines
+    }
+  })
+
+  const balances = computeBalances(allLines)
   return {
     expenses,
     balances,
     settlements: suggestSettlements(balances),
-    totalCents: expenses.reduce((sum, e) => sum + e.amountBaseCents, 0),
+    accounts,
+    totalCents: computeTotalCents(allLines),
     currency: baseCurrency
   }
 }
@@ -667,7 +910,16 @@ async function resolveConversion(input: AddExpenseInput): Promise<{ currency: st
   return { currency, baseCurrency, fxRate, amountBaseCents: convertCents(input.amountCents, fxRate) }
 }
 
-/** Record an expense with materialised shares, in one transaction. */
+/**
+ * Record an expense as a balanced journal entry, in one transaction.
+ *
+ * The order matters. Shares are resolved and the rate settled BEFORE the
+ * transaction opens (an outbound HTTP call must never be made with one open);
+ * inside it the accounts are found or created, the lines are built, the entry
+ * is checked to balance, and only then is anything written. An entry that does
+ * not balance is never persisted — the check is the last thing before the
+ * insert, not a report afterwards.
+ */
 export async function addExpense(eventId: string, input: AddExpenseInput, by: ExpenseActor) {
   if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
     throw createError({ statusCode: 422, message: 'The amount must be a positive number of cents' })
@@ -678,12 +930,6 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
   const splitMode = input.splitMode ?? 'even'
   const resolved = resolveShares(input.amountCents, input.participants, splitMode)
   const { currency, baseCurrency, fxRate, amountBaseCents } = await resolveConversion(input)
-  // Apportioned as a group against the CONVERTED TOTAL, so the base shares add
-  // up to it exactly — the same guarantee `resolveShares` gives in the currency
-  // the money was actually spent in, whichever mode produced them. The two
-  // guarantees compose: a 2/1/1 weighted EUR dinner sums to the euros spent AND
-  // to the francs it settles for, and neither sum needs the other to be tidy.
-  const baseShares = apportionCents(resolved.map(s => s.amountCents), input.amountCents, amountBaseCents)
   const expenseId = createId()
   const db = useDb()
 
@@ -702,11 +948,41 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
         message: 'The instance base currency changed while this was being recorded. Try again.'
       })
     }
+
+    const accounts = await ensureEventAccountsWithin(tx, eventId)
+    const destination = resolveCategoryAccount(accounts, { accountId: input.accountId, category: input.category })
+    const rounding = accounts.find(a => a.kind === 'rounding')
+    if (!rounding) {
+      throw createError({ statusCode: 500, message: `This event has no ${ROUNDING} account` })
+    }
+    const members = await ensureMemberAccountsWithin(tx, eventId, [
+      { name: input.paidByName, email: input.paidByEmail },
+      ...resolved.map(r => ({ name: r.name, email: r.email }))
+    ])
+    const payerAccount = members.get(input.paidByEmail.trim().toLowerCase())
+    if (!payerAccount) {
+      throw createError({ statusCode: 500, message: 'The payer has no account on this event' })
+    }
+
+    const lines = buildEntryLines({
+      amountCents: input.amountCents,
+      amountBaseCents,
+      fxRate,
+      payerAccountId: payerAccount.id,
+      categoryAccountId: destination.id,
+      roundingAccountId: rounding.id,
+      shares: resolved.map(share => ({
+        accountId: members.get(share.email)!.id,
+        amountCents: share.amountCents,
+        weight: share.weight
+      }))
+    })
+    assertEntryBalances(lines)
+
     await tx.insert(tables.expense).values({
       id: expenseId,
       eventId,
       title: input.title,
-      category: input.category ?? 'other',
       amountCents: input.amountCents,
       currency,
       baseCurrency,
@@ -719,15 +995,14 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
       createdByUserId: by.userId,
       createdByGuestEmail: null
     })
-    await tx.insert(tables.expenseShare).values(resolved.map((share, i) => ({
+    await tx.insert(tables.expenseShare).values(lines.map(line => ({
       id: createId(),
       expenseId,
       eventId,
-      name: share.name,
-      email: share.email,
-      amountCents: share.amountCents,
-      amountBaseCents: baseShares[i]!,
-      weight: share.weight
+      accountId: line.accountId,
+      amountCents: line.amountCents,
+      amountBaseCents: line.amountBaseCents,
+      weight: line.weight
     })))
   })
 

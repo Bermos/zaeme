@@ -675,6 +675,7 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
         :budget="data.budget"
         :add-url="`/api/host/events/${slug}/expenses`"
         :expenses-base="`/api/host/events/${slug}/expenses`"
+        :accounts-base="`/api/host/events/${slug}/accounts`"
         :participants="splitParticipants"
         :viewer="me"
         show-amounts

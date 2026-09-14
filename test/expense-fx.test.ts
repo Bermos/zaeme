@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
   apportionCents,
+  assertEntryBalances,
+  buildEntryLines,
   computeBalances,
   convertCents,
   MAX_CENTS,
   resolveShares,
   splitEvenlyCents,
   suggestSettlements,
-  type ExpenseView
+  type LedgerLineView
 } from '../server/domain/expenses'
 
 /**
@@ -24,22 +26,55 @@ import {
  * those routes delegate to, where a wrong answer is cheapest to see.
  */
 
-function expenseView(over: Partial<ExpenseView> & Pick<ExpenseView, 'amountCents' | 'amountBaseCents' | 'shares'>): ExpenseView {
-  return {
-    id: 'e1',
-    title: 'x',
-    category: 'other',
-    currency: 'EUR',
-    baseCurrency: 'CHF',
-    fxRate: '1',
-    paidByName: 'A',
-    paidByEmail: 'a@e.com',
-    note: null,
-    createdAt: new Date(),
-    addedByName: null,
-    addedByEmail: null,
-    ...over
+/**
+ * The accounts one imaginary event has. Real ids come from `events_account`;
+ * what matters here is that a line names one, always, and that the sums below
+ * are over accounts rather than over a name repeated on every row.
+ */
+const MEMBERS: Record<string, { id: string, name: string }> = {
+  'a@e.com': { id: 'm_a', name: 'A' },
+  'b@e.com': { id: 'm_b', name: 'B' },
+  'c@e.com': { id: 'm_c', name: 'C' }
+}
+const CATEGORY = { id: 'cat_uncategorised', name: 'Uncategorised' }
+const ROUNDING = { id: 'acc_rounding', name: 'Rounding' }
+
+function asView(line: { accountId: string, amountCents: number, amountBaseCents: number, weight: string | null }): LedgerLineView {
+  const member = Object.entries(MEMBERS).find(([, m]) => m.id === line.accountId)
+  if (member) {
+    return { ...line, accountKind: 'member', accountName: member[1].name, accountEmail: member[0] }
   }
+  const system = line.accountId === ROUNDING.id ? ROUNDING : CATEGORY
+  return {
+    ...line,
+    accountKind: line.accountId === ROUNDING.id ? 'rounding' : 'category',
+    accountName: system.name,
+    accountEmail: null
+  }
+}
+
+/**
+ * One expense, as the lines it really becomes — built by the function the write
+ * path uses, not by hand. A fixture assembled by hand would keep agreeing with
+ * itself after `buildEntryLines` stopped being right.
+ */
+function entryLines(o: {
+  amountCents: number
+  fxRate: string
+  paidByEmail: string
+  shares: Array<{ email: string, amountCents: number }>
+}): LedgerLineView[] {
+  const lines = buildEntryLines({
+    amountCents: o.amountCents,
+    amountBaseCents: convertCents(o.amountCents, o.fxRate),
+    fxRate: o.fxRate,
+    payerAccountId: MEMBERS[o.paidByEmail]!.id,
+    categoryAccountId: CATEGORY.id,
+    roundingAccountId: ROUNDING.id,
+    shares: o.shares.map(s => ({ accountId: MEMBERS[s.email]!.id, amountCents: s.amountCents, weight: null }))
+  })
+  assertEntryBalances(lines)
+  return lines.map(asView)
 }
 
 describe('convertCents', () => {
@@ -145,37 +180,29 @@ describe('balances are computed in base cents and nothing else', () => {
    *   B paid     0, owes 13137 → -13137
    *   C paid  9412, owes 13137 →  -3725
    */
-  const flat = expenseView({
-    id: 'flat',
-    currency: 'CHF',
-    fxRate: '1',
+  const flat = entryLines({
     amountCents: 30000,
-    amountBaseCents: 30000,
-    paidByName: 'A',
+    fxRate: '1',
     paidByEmail: 'a@e.com',
     shares: [
-      { name: 'A', email: 'a@e.com', amountCents: 10000, amountBaseCents: 10000 },
-      { name: 'B', email: 'b@e.com', amountCents: 10000, amountBaseCents: 10000 },
-      { name: 'C', email: 'c@e.com', amountCents: 10000, amountBaseCents: 10000 }
+      { email: 'a@e.com', amountCents: 10000 },
+      { email: 'b@e.com', amountCents: 10000 },
+      { email: 'c@e.com', amountCents: 10000 }
     ]
   })
-  const dinner = expenseView({
-    id: 'dinner',
-    currency: 'EUR',
-    fxRate: '0.9412',
+  const dinner = entryLines({
     amountCents: 10000,
-    amountBaseCents: 9412,
-    paidByName: 'C',
+    fxRate: '0.9412',
     paidByEmail: 'c@e.com',
     shares: [
-      { name: 'A', email: 'a@e.com', amountCents: 3334, amountBaseCents: 3138 },
-      { name: 'B', email: 'b@e.com', amountCents: 3333, amountBaseCents: 3137 },
-      { name: 'C', email: 'c@e.com', amountCents: 3333, amountBaseCents: 3137 }
+      { email: 'a@e.com', amountCents: 3334 },
+      { email: 'b@e.com', amountCents: 3333 },
+      { email: 'c@e.com', amountCents: 3333 }
     ]
   })
 
   it('reconciles a mixed-currency trip by hand', () => {
-    const balances = computeBalances([flat, dinner])
+    const balances = computeBalances([...flat, ...dinner])
     expect(balances.map(b => [b.email, b.paidCents, b.owedCents, b.netCents])).toEqual([
       ['a@e.com', 30000, 13138, 16862],
       ['c@e.com', 9412, 13137, -3725],
@@ -184,19 +211,17 @@ describe('balances are computed in base cents and nothing else', () => {
     expect(balances.reduce((sum, b) => sum + b.netCents, 0)).toBe(0)
   })
 
-  it('does not read the as-spent amounts at all', () => {
-    // The regression, stated as an assertion: an expense whose own currency
-    // amount is nonsense must not move a single cent of anybody's balance.
-    const absurd = expenseView({
-      ...dinner,
-      amountCents: 999_999_999,
-      shares: dinner.shares.map(s => ({ ...s, amountCents: 333_333_333 }))
-    })
-    expect(computeBalances([flat, absurd])).toEqual(computeBalances([flat, dinner]))
+  it('reads the signed base amount of a member line and nothing else', () => {
+    // The regression, stated as an assertion: the as-spent column must not move
+    // a single cent of anybody's balance, whatever nonsense it holds. The
+    // category and rounding lines must not either — they are the two kinds of
+    // line a balance is not about, and both carry real money.
+    const corrupted = [...flat, ...dinner].map(l => ({ ...l, amountCents: 999_999_999 }))
+    expect(computeBalances(corrupted)).toEqual(computeBalances([...flat, ...dinner]))
   })
 
   it('settles the group in base cents, and clears it', () => {
-    const plan = suggestSettlements(computeBalances([flat, dinner]))
+    const plan = suggestSettlements(computeBalances([...flat, ...dinner]))
     expect(plan.map(p => [p.fromEmail, p.toEmail, p.amountCents])).toEqual([
       // Debtors are taken in balance order (the list is sorted by net, descending),
       // so the smaller debt is matched first. Both clear A either way.
@@ -204,7 +229,7 @@ describe('balances are computed in base cents and nothing else', () => {
       ['b@e.com', 'a@e.com', 13137]
     ])
     // Paying the plan leaves nobody owing anybody.
-    const after = computeBalances([flat, dinner]).map(b => ({ ...b }))
+    const after = computeBalances([...flat, ...dinner]).map(b => ({ ...b }))
     for (const p of plan) {
       after.find(b => b.email === p.fromEmail)!.netCents += p.amountCents
       after.find(b => b.email === p.toEmail)!.netCents -= p.amountCents
@@ -215,7 +240,7 @@ describe('balances are computed in base cents and nothing else', () => {
   it('stays consistent when an expense is removed', () => {
     // Deleting the dinner leaves exactly the flat's balances — no residue from
     // a conversion, because nothing was ever accumulated outside base cents.
-    expect(computeBalances([flat])).toEqual([
+    expect(computeBalances(flat)).toEqual([
       { name: 'A', email: 'a@e.com', paidCents: 30000, owedCents: 10000, netCents: 20000 },
       { name: 'B', email: 'b@e.com', paidCents: 0, owedCents: 10000, netCents: -10000 },
       { name: 'C', email: 'c@e.com', paidCents: 0, owedCents: 10000, netCents: -10000 }
