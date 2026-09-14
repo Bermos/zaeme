@@ -30,6 +30,14 @@ const query = computed(() => ({
 
 const { data, pending } = await useFetch('/api/admin/events', { query })
 
+/**
+ * One event's itinerary opens in place (issue #8). The owner is not
+ * necessarily a planner of every event here, so "Manage" — which goes to
+ * `/host` — answers 403 on somebody else's; the editor below talks to
+ * `/api/admin` instead, and corrects items without joining the planning team.
+ */
+const openSlug = ref<string | null>(null)
+
 // Keep the address bar honest — minus the paging default.
 watch(query, (next) => {
   const { limit: _limit, ...rest } = next
@@ -126,81 +134,105 @@ const WHEN_ITEMS = [
               <th class="py-2 px-3 font-medium text-right">
                 Media
               </th>
+              <th class="py-2 px-3 font-medium text-right">
+                Plan
+              </th>
               <th class="py-2 pl-3" />
             </tr>
           </thead>
           <tbody>
-            <tr
+            <template
               v-for="ev in data?.events ?? []"
               :key="ev.id"
-              class="border-b border-default last:border-b-0"
             >
-              <td class="py-2 pr-3">
-                <p class="font-medium">
-                  {{ ev.title }}
+              <tr class="border-b border-default last:border-b-0">
+                <td class="py-2 pr-3">
+                  <p class="font-medium">
+                    {{ ev.title }}
+                    <UBadge
+                      v-if="ev.externalRef"
+                      variant="subtle"
+                      color="info"
+                      size="sm"
+                      title="Projected from Enterprise"
+                    >
+                      ↔ Enterprise
+                    </UBadge>
+                    <UBadge
+                      v-if="ev.isPublic"
+                      variant="subtle"
+                      color="neutral"
+                      size="sm"
+                    >
+                      public
+                    </UBadge>
+                  </p>
+                  <p class="text-muted">
+                    {{ EVENT_TYPE_LABEL[ev.type] ?? ev.type }}
+                    <span v-if="ev.parentTitle"> · in {{ ev.parentTitle }}</span>
+                    <span v-if="ev.location"> · {{ ev.location }}</span>
+                  </p>
+                </td>
+                <td class="py-2 px-3 whitespace-nowrap">
+                  {{ formatWhen(ev.startsAt) }}
+                </td>
+                <td class="py-2 px-3">
                   <UBadge
-                    v-if="ev.externalRef"
                     variant="subtle"
-                    color="info"
-                    size="sm"
-                    title="Projected from Enterprise"
+                    :color="eventStatusColor(ev.status)"
                   >
-                    ↔ Enterprise
+                    {{ ev.status }}
                   </UBadge>
-                  <UBadge
-                    v-if="ev.isPublic"
-                    variant="subtle"
+                </td>
+                <td class="py-2 px-3 text-right tabular-nums">
+                  {{ ev.yesCount }}<span class="text-muted">/{{ ev.rsvpCount }}</span>
+                </td>
+                <td class="py-2 px-3 text-right tabular-nums">
+                  {{ ev.inviteCount }}
+                </td>
+                <td class="py-2 px-3 text-right tabular-nums">
+                  {{ ev.mediaCount }}
+                </td>
+                <td class="py-2 px-3 text-right">
+                  <UButton
+                    size="xs"
+                    variant="ghost"
                     color="neutral"
-                    size="sm"
+                    :disabled="!ev.timelineCount"
+                    :aria-expanded="openSlug === ev.slug"
+                    @click="openSlug = openSlug === ev.slug ? null : ev.slug"
                   >
-                    public
-                  </UBadge>
-                </p>
-                <p class="text-muted">
-                  {{ EVENT_TYPE_LABEL[ev.type] ?? ev.type }}
-                  <span v-if="ev.parentTitle"> · in {{ ev.parentTitle }}</span>
-                  <span v-if="ev.location"> · {{ ev.location }}</span>
-                </p>
-              </td>
-              <td class="py-2 px-3 whitespace-nowrap">
-                {{ formatWhen(ev.startsAt) }}
-              </td>
-              <td class="py-2 px-3">
-                <UBadge
-                  variant="subtle"
-                  :color="eventStatusColor(ev.status)"
+                    {{ ev.timelineCount }} {{ openSlug === ev.slug ? '▴' : '▾' }}
+                  </UButton>
+                </td>
+                <td class="py-2 pl-3 text-right whitespace-nowrap">
+                  <UButton
+                    :to="`/host/${ev.slug}`"
+                    size="xs"
+                    variant="outline"
+                  >
+                    Manage
+                  </UButton>
+                  <UButton
+                    v-if="ev.isPublic"
+                    :to="`/e/${ev.slug}`"
+                    size="xs"
+                    variant="ghost"
+                    color="neutral"
+                  >
+                    Public
+                  </UButton>
+                </td>
+              </tr>
+              <tr v-if="openSlug === ev.slug">
+                <td
+                  colspan="8"
+                  class="px-3 pb-3 bg-elevated/50"
                 >
-                  {{ ev.status }}
-                </UBadge>
-              </td>
-              <td class="py-2 px-3 text-right tabular-nums">
-                {{ ev.yesCount }}<span class="text-muted">/{{ ev.rsvpCount }}</span>
-              </td>
-              <td class="py-2 px-3 text-right tabular-nums">
-                {{ ev.inviteCount }}
-              </td>
-              <td class="py-2 px-3 text-right tabular-nums">
-                {{ ev.mediaCount }}
-              </td>
-              <td class="py-2 pl-3 text-right whitespace-nowrap">
-                <UButton
-                  :to="`/host/${ev.slug}`"
-                  size="xs"
-                  variant="outline"
-                >
-                  Manage
-                </UButton>
-                <UButton
-                  v-if="ev.isPublic"
-                  :to="`/e/${ev.slug}`"
-                  size="xs"
-                  variant="ghost"
-                  color="neutral"
-                >
-                  Public
-                </UButton>
-              </td>
-            </tr>
+                  <AdminEventTimeline :slug="ev.slug" />
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
         <p

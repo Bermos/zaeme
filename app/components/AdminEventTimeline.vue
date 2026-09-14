@@ -1,0 +1,257 @@
+<script setup lang="ts">
+/**
+ * The itinerary of one event, inline on `/admin/events` — the owner-side editor
+ * asked for in issue #8.
+ *
+ * It exists because the owner is not necessarily a planner of every event on
+ * their instance: "Manage" goes to `/host/<slug>`, which answers 403 to an
+ * owner who does not plan that one, so a typo in somebody else's itinerary was
+ * unreachable from the surface that could see it. Reads and writes go to
+ * `/api/admin/events/:slug/timeline`, behind the owner gate.
+ *
+ * Correcting and re-ordering only. Adding and removing items belong to the
+ * people planning the event, on `/host`.
+ */
+interface TimelineItem {
+  id: string
+  title: string
+  description: string | null
+  startsAt: string | null
+  location: string | null
+  type: string
+  sortOrder: number | null
+}
+
+const props = defineProps<{ slug: string }>()
+
+const toast = useToast()
+
+const TYPE_ITEMS = [
+  { label: '🚆 Transport', value: 'transport' },
+  { label: '🛏️ Accommodation', value: 'accommodation' },
+  { label: '🎬 Activity', value: 'activity' },
+  { label: '🍕 Meal', value: 'meal' },
+  { label: '📍 Other', value: 'other' }
+]
+const TYPE_ICONS: Record<string, string> = {
+  transport: '🚆', accommodation: '🛏️', activity: '🎬', meal: '🍕', other: '📍'
+}
+
+const items = ref<TimelineItem[]>([])
+const pending = ref(true)
+
+async function load() {
+  pending.value = true
+  try {
+    const res = await $fetch(`/api/admin/events/${props.slug}/timeline`)
+    items.value = res.timeline as unknown as TimelineItem[]
+  } catch (e) {
+    toast.add({ title: message(e, 'Could not load that itinerary'), color: 'error' })
+  } finally {
+    pending.value = false
+  }
+}
+onMounted(load)
+
+function message(e: unknown, fallback: string): string {
+  return (e as { data?: { message?: string } }).data?.message ?? fallback
+}
+
+/** `datetime-local` wants `YYYY-MM-DDTHH:mm` in LOCAL time, not an ISO string. */
+function toLocalInput(value: string | null): string {
+  if (!value) return ''
+  const d = new Date(value)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function when(iso: string | null): string | null {
+  return iso
+    ? new Date(iso).toLocaleString('en-CH', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+    : null
+}
+
+const editingId = ref<string | null>(null)
+const saving = ref(false)
+const draft = reactive({ title: '', type: 'other', when: '', location: '', description: '' })
+
+function startEdit(item: TimelineItem) {
+  editingId.value = item.id
+  draft.title = item.title
+  draft.type = item.type
+  draft.when = toLocalInput(item.startsAt)
+  draft.location = item.location ?? ''
+  draft.description = item.description ?? ''
+}
+
+async function saveEdit(id: string) {
+  if (!draft.title) return
+  saving.value = true
+  try {
+    await $fetch(`/api/admin/events/${props.slug}/timeline/${id}`, {
+      method: 'PATCH',
+      body: {
+        title: draft.title,
+        type: draft.type,
+        startsAt: draft.when ? new Date(draft.when).toISOString() : null,
+        location: draft.location || null,
+        description: draft.description || null
+      }
+    })
+    editingId.value = null
+    await load()
+    toast.add({ title: 'Updated', color: 'success' })
+  } catch (e) {
+    toast.add({ title: message(e, 'Could not save that'), color: 'error' })
+  } finally {
+    saving.value = false
+  }
+}
+
+/**
+ * Move an item by swapping `sortOrder` with its neighbour — the list is served
+ * in that order, so this is the whole of reordering.
+ */
+const moving = ref<string | null>(null)
+async function move(index: number, delta: number) {
+  const item = items.value[index]
+  const neighbour = items.value[index + delta]
+  if (!item || !neighbour) return
+  const a = item.sortOrder ?? index * 10
+  const b = neighbour.sortOrder ?? (index + delta) * 10
+  moving.value = item.id
+  try {
+    await $fetch(`/api/admin/events/${props.slug}/timeline/${item.id}`, { method: 'PATCH', body: { sortOrder: b } })
+    await $fetch(`/api/admin/events/${props.slug}/timeline/${neighbour.id}`, { method: 'PATCH', body: { sortOrder: a } })
+    await load()
+  } catch (e) {
+    toast.add({ title: message(e, 'Could not reorder'), color: 'error' })
+  } finally {
+    moving.value = null
+  }
+}
+</script>
+
+<template>
+  <div class="flex flex-col gap-1 py-2">
+    <p
+      v-if="pending"
+      class="text-muted text-sm"
+    >
+      Loading the itinerary…
+    </p>
+    <p
+      v-else-if="!items.length"
+      class="text-muted text-sm"
+    >
+      No itinerary on this one yet. Items are added from
+      <ULink :to="`/host/${slug}`">
+        the host page
+      </ULink>.
+    </p>
+
+    <div
+      v-for="(item, index) in items"
+      :key="item.id"
+      class="py-1.5 border-b border-default last:border-b-0 text-sm"
+    >
+      <form
+        v-if="editingId === item.id"
+        class="flex flex-col gap-2 py-1"
+        @submit.prevent="saveEdit(item.id)"
+      >
+        <div class="flex flex-col sm:flex-row gap-2">
+          <USelect
+            v-model="draft.type"
+            :items="TYPE_ITEMS"
+            class="sm:w-44"
+          />
+          <UInput
+            v-model="draft.title"
+            placeholder="Title"
+            class="flex-1"
+          />
+          <UInput
+            v-model="draft.when"
+            type="datetime-local"
+            class="sm:w-52"
+          />
+        </div>
+        <UInput
+          v-model="draft.location"
+          placeholder="Where (optional)"
+        />
+        <UTextarea
+          v-model="draft.description"
+          :rows="2"
+          placeholder="Details (optional)"
+        />
+        <div class="flex gap-2">
+          <UButton
+            type="submit"
+            size="xs"
+            :loading="saving"
+            :disabled="!draft.title"
+          >
+            Save
+          </UButton>
+          <UButton
+            size="xs"
+            variant="ghost"
+            color="neutral"
+            @click="editingId = null"
+          >
+            Cancel
+          </UButton>
+        </div>
+      </form>
+
+      <div
+        v-else
+        class="flex items-center justify-between gap-2"
+      >
+        <p class="min-w-0 truncate">
+          {{ TYPE_ICONS[item.type] || '📍' }}
+          <span
+            v-if="when(item.startsAt)"
+            class="text-muted tabular-nums mr-1"
+          >{{ when(item.startsAt) }}</span>
+          <span class="font-medium">{{ item.title }}</span>
+          <span
+            v-if="item.location"
+            class="text-muted"
+          > · {{ item.location }}</span>
+        </p>
+        <div class="flex items-center gap-0.5 shrink-0">
+          <UButton
+            size="xs"
+            color="neutral"
+            variant="ghost"
+            :disabled="index === 0 || moving === item.id"
+            aria-label="Move up"
+            @click="move(index, -1)"
+          >
+            ↑
+          </UButton>
+          <UButton
+            size="xs"
+            color="neutral"
+            variant="ghost"
+            :disabled="index === items.length - 1 || moving === item.id"
+            aria-label="Move down"
+            @click="move(index, 1)"
+          >
+            ↓
+          </UButton>
+          <UButton
+            size="xs"
+            variant="ghost"
+            @click="startEdit(item)"
+          >
+            Edit
+          </UButton>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>

@@ -476,7 +476,22 @@ export async function updateTimelineItem(
 ) {
   const ev = await loadEventBySlug(slug)
   await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+  return applyTimelineItemUpdate(ev.id, itemId, input)
+}
 
+/**
+ * The write itself, once the caller has settled WHO is allowed to do it.
+ *
+ * Two callers authorise it two different ways: `updateTimelineItem` above asks
+ * whether you plan this event, and `updateTimelineItemAsOwner` in `admin.ts`
+ * asks whether you own this instance. Nothing in here checks anything — never
+ * call it from a route handler that has not already asked one of those.
+ */
+export async function applyTimelineItemUpdate(
+  eventId: string,
+  itemId: string,
+  input: UpdateTimelineItemInput
+) {
   const updates: Record<string, unknown> = {}
   if (input.title !== undefined) updates.title = input.title
   if (input.description !== undefined) updates.description = input.description
@@ -492,7 +507,7 @@ export async function updateTimelineItem(
     const [row] = await db
       .select()
       .from(tables.timelineItem)
-      .where(and(eq(tables.timelineItem.id, itemId), eq(tables.timelineItem.eventId, ev.id)))
+      .where(and(eq(tables.timelineItem.id, itemId), eq(tables.timelineItem.eventId, eventId)))
       .limit(1)
     if (!row) throw createError({ statusCode: 404, message: 'Timeline item not found' })
     return row
@@ -501,7 +516,7 @@ export async function updateTimelineItem(
   const [updated] = await db
     .update(tables.timelineItem)
     .set(updates)
-    .where(and(eq(tables.timelineItem.id, itemId), eq(tables.timelineItem.eventId, ev.id)))
+    .where(and(eq(tables.timelineItem.id, itemId), eq(tables.timelineItem.eventId, eventId)))
     .returning()
   if (!updated) throw createError({ statusCode: 404, message: 'Timeline item not found' })
   return updated
