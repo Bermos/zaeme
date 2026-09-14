@@ -175,7 +175,7 @@ export function contribution(row: object) {
 }
 
 /**
- * `components.schemas.Expense`.
+ * `components.schemas.Expense` — one JOURNAL ENTRY (#61).
  *
  * Two amounts, always: `amountCents` in the currency the money was actually
  * spent in, and `amountBaseCents` in the instance base currency, frozen at the
@@ -185,6 +185,16 @@ export function contribution(row: object) {
  * `splitMode`, and the `weight` on each share, say how the total was divided
  * (#26). Both are a record of intent — the shares are materialised, so a client
  * that ignores them gets every figure it got before they existed.
+ *
+ * `category` IS NO LONGER AN ENUM. It is the name of the category account the
+ * cost was debited to, and `categoryAccountId` is that account. The old five
+ * values still resolve on the way in (`food` finds `Food`, `other` finds
+ * `Uncategorised`), so a client that writes them keeps working; what comes back
+ * is the account's name, which a group can rename and add to.
+ *
+ * `lines` is the entry itself: every posting, credits included, summing to zero.
+ * The residual line on the event's `Rounding` account — the cents between the
+ * converted total and the sum of the converted shares — appears only there.
  */
 export function expense(row: object) {
   const r = asRow(row)
@@ -192,6 +202,7 @@ export function expense(row: object) {
     id: r.id,
     title: r.title,
     category: r.category,
+    categoryAccountId: r.categoryAccountId ?? null,
     amountCents: r.amountCents,
     currency: r.currency,
     amountBaseCents: r.amountBaseCents,
@@ -202,7 +213,15 @@ export function expense(row: object) {
     paidByName: r.paidByName,
     paidByEmail: r.paidByEmail,
     createdAt: r.createdAt,
-    shares: r.shares ?? []
+    shares: r.shares ?? [],
+    lines: ((r.lines ?? []) as Row[]).map(l => ({
+      accountId: l.accountId,
+      accountName: l.accountName,
+      accountKind: l.accountKind,
+      accountEmail: l.accountEmail ?? null,
+      amountCents: l.amountCents,
+      amountBaseCents: l.amountBaseCents
+    }))
   }
 }
 
@@ -212,6 +231,13 @@ export function expense(row: object) {
  * `currency` is the INSTANCE BASE CURRENCY, and `totalCents`, every balance and
  * every settlement are in it. It was the first expense row's currency until
  * #25, which made it a label with no relationship to the numbers beside it.
+ *
+ * `accounts` is the event's chart of accounts with what has been posted to each
+ * (#61): members carry a balance, categories carry what was spent on them in
+ * `debitCents`, and the one `rounding` account carries the conversion residual.
+ * `totalCents` is the sum of category debits — a member-to-member transfer
+ * touches no category account and is therefore excluded structurally, with no
+ * flag to set.
  */
 export function budget(row: object) {
   const r = asRow(row)
@@ -220,7 +246,18 @@ export function budget(row: object) {
     totalCents: r.totalCents ?? 0,
     expenses: ((r.expenses ?? []) as Row[]).map(expense),
     balances: r.balances ?? [],
-    settlements: r.settlements ?? []
+    settlements: r.settlements ?? [],
+    accounts: ((r.accounts ?? []) as Row[]).map(a => ({
+      id: a.id,
+      kind: a.kind,
+      name: a.name,
+      email: a.email ?? null,
+      isSystem: a.isSystem ?? false,
+      debitCents: a.debitCents ?? 0,
+      creditCents: a.creditCents ?? 0,
+      netCents: a.netCents ?? 0,
+      lineCount: a.lineCount ?? 0
+    }))
   }
 }
 

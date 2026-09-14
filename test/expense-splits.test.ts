@@ -284,6 +284,10 @@ describe('a split sums exactly in BOTH currencies', () => {
    * shares add up to what was SPENT, and their conversions add up to what it
    * SETTLES FOR. Neither needs the other to be tidy, and no share is ever
    * converted on its own.
+   *
+   * `apportionCents` is the machinery, and `buildEntryLines` calls it with
+   * exactly these arguments — the shares, their sum, and the converted total —
+   * so the sweep below is over the call the ledger's write path makes (#61).
    */
   it('for six rates, forty split sizes and a dozen totals', () => {
     const rates = ['1', '0.9412', '1.1', '0.836719', '1.0000000001', '123.456789']
@@ -306,7 +310,9 @@ describe('a split sums exactly in BOTH currencies', () => {
   it('for a percentage split of a EUR dinner settled in CHF', () => {
     // EUR 100.00 at 0.8367 is CHF 83.67. 50/25/25 of the euros is
     // 5000/2500/2500; the francs do not divide the same way, and the
-    // apportionment is what makes them add up anyway.
+    // apportionment is what makes them add up anyway. Converting each share on
+    // its own would give 4184 + 2092 + 2092 = 8368 — a franc-denominated
+    // liability of 83.68 for a thing that cost 83.67.
     const spent = cents(resolveShares(10000, people(3, [50, 25, 25]), 'percentage'))
     expect(spent).toEqual([5000, 2500, 2500])
     const converted = convertCents(10000, '0.8367')

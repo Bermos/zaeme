@@ -170,11 +170,17 @@ jobs:
       # either of them and every percentage and weight split in the PRODUCT 400s
       # with vitest, the typecheck and this floor all still green. 217 -> 221.
       #
+      # #61 makes the budget a double-entry ledger and adds 57: the accounts,
+      # the entry-balance invariant, the line ordering, the `Rounding` account
+      # (which on this path correctly holds nothing), and the chart of accounts
+      # driven through /api/me and /api/host, which is where people actually
+      # write. 221 -> 278.
+      #
       # Keep this EXACT. A floor that is slack by the width of somebody else's
       # group is a floor that lets that group stop running — which is the silent
       # degradation this assertion exists to prevent, arriving by rebase rather
       # than by rename.
-      MIN_SMOKE_CHECKS: '221'
+      MIN_SMOKE_CHECKS: '278'
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
       # falls through to the dry run, which is what lets the magic-link sign-in
       # below read its token out of the database instead of out of an inbox.

@@ -19,10 +19,32 @@
  * list therefore shows BOTH the payer and whoever typed it in.
  */
 interface Share { name: string, email: string, amountCents: number, amountBaseCents: number, weight: string | null }
+interface Line {
+  accountId: string
+  accountName: string
+  accountKind: 'member' | 'category' | 'rounding'
+  accountEmail: string | null
+  amountCents: number
+  amountBaseCents: number
+}
+interface Account {
+  id: string
+  kind: 'member' | 'category' | 'rounding'
+  name: string
+  email: string | null
+  isSystem: boolean
+  /** What was posted INTO this account — on a category, what it cost. */
+  debitCents: number
+  creditCents: number
+  netCents: number
+  lineCount: number
+}
 interface Expense {
   id: string
   title: string
+  /** The NAME of the category account this cost was debited to. */
   category: string
+  categoryAccountId?: string | null
   /** As spent, in `currency`. */
   amountCents: number
   currency: string
@@ -38,12 +60,16 @@ interface Expense {
   addedByName?: string | null
   addedByEmail?: string | null
   shares: Share[]
+  /** Every posting of this entry, credits included. Sums to zero. */
+  lines?: Line[]
 }
 interface Budget {
   expenses: Expense[]
   balances: Array<{ name: string, email: string, paidCents: number, owedCents: number, netCents: number }>
   settlements: Array<{ fromName: string, fromEmail: string, toName: string, toEmail: string, amountCents: number }>
-  /** Every expense summed, in base cents. */
+  /** The event's chart of accounts, with what has been posted to each (#61). */
+  accounts?: Account[]
+  /** The sum of DEBITS into category accounts, in base cents. */
   totalCents: number
   /** The INSTANCE BASE CURRENCY: what every figure outside `expenses` is in. */
   currency: string
@@ -55,6 +81,12 @@ const props = defineProps<{
   /** POST target for a new expense; DELETE goes to `${expensesBase}/{id}`. */
   addUrl: string
   expensesBase: string
+  /**
+   * Where categories are listed, added and removed: GET/POST here, DELETE to
+   * `${accountsBase}/{id}`. Optional, because a surface that cannot offer the
+   * chart of accounts should not render a picker that 404s.
+   */
+  accountsBase?: string | null
   /** Everyone who can be part of a split — usually the yes/maybe RSVPs. */
   participants: Participant[]
   /** The signed-in account, or null when nobody is signed in. */
@@ -81,8 +113,17 @@ const emit = defineEmits<{ updated: [budget: Budget] }>()
 
 const toast = useToast()
 
+/**
+ * A friendly glyph for the categories every event is seeded with, keyed on the
+ * account's name in lower case. A category somebody added themselves gets the
+ * fallback, which is the point of a fallback.
+ */
 const CATEGORY_ICONS: Record<string, string> = {
-  travel: '🚆', accommodation: '🛏️', food: '🍕', tickets: '🎟️', other: '🧾'
+  travel: '🚆', accommodation: '🛏️', food: '🍕', tickets: '🎟️', uncategorised: '🧾'
+}
+
+function categoryIcon(name: string | undefined): string {
+  return CATEGORY_ICONS[(name ?? '').toLowerCase()] ?? '🧾'
 }
 
 function francs(cents: number): string {
@@ -128,7 +169,6 @@ function canRemove(x: Expense): boolean {
 const adding = ref(false)
 const title = ref('')
 const amount = ref('')
-const category = ref('other')
 const selected = ref<string[]>([])
 const payerEmail = ref('')
 const saving = ref(false)
@@ -143,6 +183,87 @@ watch(() => props.viewer?.email, (email) => {
 
 const amountCents = computed(() => Math.round(Number.parseFloat(amount.value || '0') * 100))
 const payer = computed(() => payerOptions.value.find(p => p.email === payerEmail.value) ?? props.viewer)
+
+/* ---- where the cost lands (#61) ---- */
+
+/**
+ * A group that does not care about categories never meets the concept. Every
+ * expense posts to `Uncategorised` unless somebody asks for the picker, so the
+ * form has one fewer control than it did and nothing is ever nullable behind
+ * it — the destination is always a real account.
+ *
+ * The picker opens by itself once the trip HAS used a category, because at that
+ * point hiding it would be hiding a decision the group has already made.
+ */
+const accounts = ref<Account[]>(props.budget.accounts ?? [])
+watch(() => props.budget.accounts, (list) => {
+  if (list) accounts.value = list
+})
+
+const categoryAccounts = computed(() => accounts.value.filter(a => a.kind === 'category'))
+const uncategorised = computed(() => categoryAccounts.value.find(a => a.name.toLowerCase() === 'uncategorised'))
+/** Categories with something actually posted to them — what the group uses. */
+const usedCategories = computed(() => categoryAccounts.value.filter(a => a.debitCents > 0 && a.id !== uncategorised.value?.id))
+
+const showCategory = ref(false)
+watch(usedCategories, (used) => {
+  if (used.length) showCategory.value = true
+}, { immediate: true })
+
+const categoryId = ref<string>('')
+watch([uncategorised, () => adding.value], () => {
+  if (!categoryId.value && uncategorised.value) categoryId.value = uncategorised.value.id
+}, { immediate: true })
+
+const categoryItems = computed(() => categoryAccounts.value.map(a => ({
+  label: `${categoryIcon(a.name)} ${a.name}`,
+  value: a.id
+})))
+
+const newCategory = ref('')
+const savingCategory = ref(false)
+
+/** The one account a category can be removed from the picker for: an unused one. */
+function canRemoveCategory(a: Account): boolean {
+  return !!props.accountsBase && !a.isSystem && a.lineCount === 0
+}
+
+async function addCategory() {
+  const name = newCategory.value.trim()
+  if (!name || !props.accountsBase) return
+  savingCategory.value = true
+  try {
+    const res = await $fetch<{ accounts: Account[] }>(props.accountsBase, { method: 'POST', body: { name } })
+    accounts.value = res.accounts
+    categoryId.value = res.accounts.find(a => a.name.toLowerCase() === name.toLowerCase())?.id ?? categoryId.value
+    newCategory.value = ''
+  } catch (e) {
+    toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not add that', color: 'error' })
+  } finally {
+    savingCategory.value = false
+  }
+}
+
+async function removeCategory(a: Account) {
+  if (!props.accountsBase) return
+  try {
+    const res = await $fetch<{ accounts: Account[] }>(`${props.accountsBase}/${a.id}`, { method: 'DELETE' })
+    accounts.value = res.accounts
+    if (categoryId.value === a.id) categoryId.value = uncategorised.value?.id ?? ''
+  } catch (e) {
+    toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not remove that', color: 'error' })
+  }
+}
+
+/**
+ * The conversion residual the ledger is carrying, if any — the rounding
+ * account's DEBIT balance, which is negative when the shares converted to less
+ * than the total rather than more.
+ */
+const roundingCents = computed(() => {
+  const a = accounts.value.find(x => x.kind === 'rounding')
+  return a ? a.debitCents - a.creditCents : 0
+})
 
 /* ---- the currency this one was spent in ---- */
 
@@ -351,7 +472,12 @@ async function addExpense() {
       method: 'POST',
       body: {
         title: title.value,
-        category: category.value,
+        // Omitted entirely unless somebody picked one: the server's default is
+        // `Uncategorised`, and sending it explicitly would make the picker look
+        // load-bearing when it is not.
+        ...(showCategory.value && categoryId.value && categoryId.value !== uncategorised.value?.id
+          ? { accountId: categoryId.value }
+          : {}),
         amountCents: amountCents.value,
         currency: spentCurrency.value.trim().toUpperCase() || props.budget.currency,
         // Only when there is something to convert, and only when a rate was
@@ -365,6 +491,7 @@ async function addExpense() {
     })
     title.value = ''
     amount.value = ''
+    categoryId.value = uncategorised.value?.id ?? ''
     splitMode.value = 'even'
     splitValues.value = {}
     spentCurrency.value = props.budget.currency
@@ -434,7 +561,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           >
             <div>
               <p class="font-medium">
-                {{ CATEGORY_ICONS[x.category] || '🧾' }} {{ x.title }}
+                {{ categoryIcon(x.category) }} {{ x.title }}
               </p>
               <p class="text-muted">
                 {{ x.paidByName }} paid {{ money(x.amountCents, x.currency) }}{{ isForeign(x) ? ` (${money(x.amountBaseCents, x.baseCurrency)})` : '' }}
@@ -474,6 +601,37 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           class="text-sm text-muted"
         >
           No expenses yet.
+        </p>
+
+        <!-- What it went on, once the group uses categories. One line per
+             account, and the figure is the sum of DEBITS into it — which is
+             what "what did accommodation cost" means now. -->
+        <div
+          v-if="usedCategories.length"
+          class="flex flex-col gap-1"
+        >
+          <p class="text-sm font-medium">
+            What it went on
+          </p>
+          <div
+            v-for="a in categoryAccounts.filter(c => c.debitCents > 0)"
+            :key="a.id"
+            class="flex items-center justify-between text-sm py-0.5"
+          >
+            <span>{{ categoryIcon(a.name) }} {{ a.name }}</span>
+            <span class="tabular-nums text-muted">{{ francs(a.debitCents) }}</span>
+          </div>
+        </div>
+
+        <!-- The conversion residual, where it can be seen and explained rather
+             than quietly landing on somebody's balance. -->
+        <p
+          v-if="roundingCents !== 0"
+          class="text-xs text-muted"
+        >
+          ⚖️ {{ money(roundingCents, budget.currency) }} of rounding sits apart from the totals: converting a
+          split at one rate does not always come out to the cent, and that difference is kept here rather
+          than added to anybody's share.
         </p>
 
         <!-- Balances -->
@@ -551,17 +709,6 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
         @submit.prevent="addExpense"
       >
         <div class="flex gap-2">
-          <USelect
-            v-model="category"
-            :items="[
-              { label: '🚆 Travel', value: 'travel' },
-              { label: '🛏️ Stay', value: 'accommodation' },
-              { label: '🍕 Food', value: 'food' },
-              { label: '🎟️ Tickets', value: 'tickets' },
-              { label: '🧾 Other', value: 'other' }
-            ]"
-            class="w-36"
-          />
           <UInput
             v-model="title"
             placeholder="Airbnb, night 1"
@@ -608,6 +755,70 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
               v-if="convertedCents !== null && amountCents > 0"
               class="text-sm text-muted tabular-nums"
             >= {{ money(convertedCents, budget.currency) }}</span>
+          </div>
+        </UFormField>
+        <!-- Categories are opt-in (#61). Without one an expense still posts
+             somewhere real — the event's Uncategorised account — so a group
+             that does not care is never asked. -->
+        <UButton
+          v-if="!showCategory"
+          size="xs"
+          variant="link"
+          color="neutral"
+          class="self-start -my-1"
+          @click="showCategory = true"
+        >
+          Put it in a category
+        </UButton>
+        <UFormField
+          v-else
+          label="Category"
+          size="sm"
+          help="Everything without one lands in Uncategorised."
+        >
+          <div class="flex flex-col gap-2">
+            <USelect
+              v-model="categoryId"
+              :items="categoryItems"
+              class="w-full"
+            />
+            <div
+              v-if="accountsBase"
+              class="flex gap-2"
+            >
+              <UInput
+                v-model="newCategory"
+                placeholder="Ski pass"
+                size="sm"
+                class="flex-1"
+                @keydown.enter.prevent="addCategory"
+              />
+              <UButton
+                size="sm"
+                variant="outline"
+                color="neutral"
+                :loading="savingCategory"
+                :disabled="!newCategory.trim()"
+                @click="addCategory"
+              >
+                Add category
+              </UButton>
+            </div>
+            <div
+              v-if="categoryAccounts.some(canRemoveCategory)"
+              class="flex flex-wrap gap-1"
+            >
+              <UButton
+                v-for="a in categoryAccounts.filter(canRemoveCategory)"
+                :key="a.id"
+                size="xs"
+                variant="ghost"
+                color="neutral"
+                @click="removeCategory(a)"
+              >
+                ✕ {{ a.name }}
+              </UButton>
+            </div>
           </div>
         </UFormField>
         <UFormField
