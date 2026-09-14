@@ -894,10 +894,9 @@ paths:
 
         The expense is recorded as a balanced journal entry: the payer is
         credited, the category account is debited what it cost and credited what
-        was pushed back out to the people, and each person is debited their own
-        share converted at that frozen rate. Where those conversions do not add
-        up to the converted total, the difference posts to the event's Rounding
-        account rather than being absorbed by somebody's share. Leave category
+        was pushed back out to the people, and each person is debited their
+        share. The shares are converted as a group, so they sum to
+        amountBaseCents exactly and no rounding line is written. Leave category
         and accountId out and the cost lands in Uncategorised.
       requestBody:
         required: true
@@ -2257,13 +2256,8 @@ components:
               amountBaseCents:
                 type: integer
                 description: >-
-                  This person's OWN slice converted at fxRate — what they owe,
-                  explicable on its own. It is no longer apportioned against the
-                  expense total, so on a foreign expense these need not sum to
-                  amountBaseCents; the cents between the two are posted to the
-                  event's Rounding account and appear in `lines` and in the
-                  budget's `accounts`. Balances still sum to zero exactly,
-                  because the payer is credited what the group severally owes.
+                  The same slice in base cents, apportioned so the shares sum to
+                  amountBaseCents exactly.
               weight:
                 type: [string, 'null']
                 description: >-
@@ -2276,9 +2270,14 @@ components:
           description: >-
             Every posting of this entry: signed amounts into accounts, debit
             positive and credit negative, summing to zero in amountCents and in
-            amountBaseCents independently. One expense is the payer's credit, a
-            debit and a credit on its category account, one debit per person,
-            and a rounding line when converting the split left cents over.
+            amountBaseCents independently. In the order they were written — the
+            payer's credit, the category debit and credit, then one debit per
+            person in the order the split named them. `shares` is the member
+            debits of this same list, in that same order.
+
+            A rounding line appears when an entry would not otherwise balance.
+            Nothing recorded through addTripExpense produces one: the shares are
+            converted as a group, so they sum to amountBaseCents exactly.
           items:
             type: object
             required: [accountId, accountName, accountKind, amountCents, amountBaseCents]
@@ -2351,8 +2350,9 @@ components:
             The event's chart of accounts with what has been posted to each. A
             member account per person, a category account per kind of cost
             (Uncategorised always present, and the default destination), and one
-            rounding account carrying the cents that converting a split leaves
-            over. totalCents is the sum of debitCents over the category accounts.
+            rounding account, which holds nothing unless an entry was recorded
+            that would not otherwise balance. totalCents is the sum of debitCents
+            over the category accounts.
           items:
             type: object
             required: [id, kind, name, isSystem, debitCents, creditCents, netCents, lineCount]

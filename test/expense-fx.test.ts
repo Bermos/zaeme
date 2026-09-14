@@ -67,7 +67,6 @@ function entryLines(o: {
   const lines = buildEntryLines({
     amountCents: o.amountCents,
     amountBaseCents: convertCents(o.amountCents, o.fxRate),
-    fxRate: o.fxRate,
     payerAccountId: MEMBERS[o.paidByEmail]!.id,
     categoryAccountId: CATEGORY.id,
     roundingAccountId: ROUNDING.id,

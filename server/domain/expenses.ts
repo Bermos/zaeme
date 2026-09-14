@@ -61,11 +61,13 @@ import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '.
  *                a transfer between friends is structurally not a cost and
  *                needs no `kind` flag to be left out of the total
  *
- * And the conversion residual has a home. Each member is debited THEIR OWN
- * share converted at the entry's frozen rate, so what one person owes is
- * explicable on its own; the cents between that and the converted total post to
- * the event's `Rounding` account, visibly, rather than being handed to whoever
- * sorted last. See `buildEntryLines`.
+ * And an entry that does not add up has somewhere honest to put the difference:
+ * the event's `Rounding` account. Nothing on this path ever produces one — the
+ * base shares are still converted as a group (#25), so they sum to the
+ * converted total exactly — and that is the point. The residual is COMPUTED
+ * rather than assumed, so the mechanism is there for #59, where changing a
+ * trip's currency recomputes per-person amounts that were rounded against a
+ * total that no longer exists. See `buildEntryLines`.
  */
 
 /**
@@ -536,48 +538,56 @@ function resolveProportional(
  * friends will be an entry with member lines only — no category line, therefore
  * structurally not a cost, therefore no `kind` flag to forget to set.
  *
- * WHERE THE ROUNDING LINE COMES FROM. Each member is debited their own share
- * converted at the entry's frozen rate (`convertCents` per line), because that
- * is the number you can explain to the person who owes it: "your €50 at 0.8367
- * is CHF 41.84". Those conversions need not add up to the conversion of the
- * total — €100 at 0.8367 is CHF 83.67, while 50/25/25 converts to 41.84 + 20.92
- * + 20.92 = CHF 83.68 — and the difference is real, not a mistake to hide. It
- * posts to `Rounding`, where somebody can find it, instead of being handed to
- * the largest creditor or shaved off whoever sorts last.
+ * WHAT THE ROUNDING ACCOUNT IS FOR. An entry must balance, so an entry whose
+ * lines do not add up needs somewhere honest to put the difference rather than
+ * a creditor to quietly absorb it. `buildEntryLines` posts any such residual to
+ * the event's `Rounding` account.
  *
- * Two consequences worth stating, because both are load-bearing:
+ * ON THIS PATH IT NEVER HAS ANYTHING TO DO, and that is the correct outcome
+ * rather than a criterion going unmet. The base shares are converted AS A GROUP
+ * (`apportionCents`, #25), so they sum to the converted total exactly, and the
+ * residual is structurally zero for every expense recorded through here. The
+ * alternative — converting each share on its own and booking the difference —
+ * does not surface a rounding artefact: it INVENTS a cent of liability and
+ * files it under a name that makes it look discovered. Three people would
+ * severally owe CHF 83.68 for a thing that cost 83.67, the payer would be
+ * credited 83.68 for handing over 83.67, and `paidCents` would stop meaning
+ * what they paid. The error is bounded by half a cent per person PER ENTRY and
+ * accumulates across them.
  *
- *  - the MEMBER lines of an entry always sum to zero (the payer is credited
- *    exactly what the others are debited), so balances sum to zero exactly and
- *    a settlement plan closes to the cent — the thing #59 was trying to buy by
- *    rounding the plan;
- *  - the trip total stays the sum of the converted totals, not of the converted
- *    shares, so "what was spent" is unaffected by how it was divided.
- *
- * At rate 1 — every same-currency expense, which is most of them — the residual
- * is zero and no rounding line is written at all.
+ * The branch earns its keep where the drift is real and cannot be apportioned
+ * away: #59 recomputes already-frozen per-person amounts when a trip's currency
+ * changes, and those were rounded against a total that no longer exists.
  */
 export function buildEntryLines(input: {
   /** The entry total AS SPENT. */
   amountCents: number
   /** The entry total in base cents: `convertCents(amountCents, fxRate)`. */
   amountBaseCents: number
-  fxRate: string
   payerAccountId: string
   categoryAccountId: string
   roundingAccountId: string
   shares: Array<{ accountId: string, amountCents: number, weight: string | null }>
 }): LedgerLine[] {
-  const shareBase = input.shares.map(s => convertCents(s.amountCents, input.fxRate))
+  // Converted AS A GROUP, so the base shares sum to the converted total exactly
+  // whatever the split was (#25). Converting each on its own rounds each one
+  // independently, and three roundings of 3333.33 do not add up — which is a
+  // total nobody owes, not a residual worth booking.
+  const spentOut = input.shares.reduce((sum, s) => sum + s.amountCents, 0)
+  const shareBase = apportionCents(input.shares.map(s => s.amountCents), spentOut, input.amountBaseCents)
   const owed = shareBase.reduce((sum, c) => sum + c, 0)
 
   const lines: LedgerLine[] = [
     // The payer is credited what the group owes them, which is the sum of the
     // debits below — that is what makes the member side of every entry net to
-    // zero, and the balances with it.
+    // zero, and the balances with it. On this path it is also exactly
+    // `amountBaseCents`, so `paidCents` still means what they paid.
     { accountId: input.payerAccountId, amountCents: -input.amountCents, amountBaseCents: -owed, weight: null },
     { accountId: input.categoryAccountId, amountCents: input.amountCents, amountBaseCents: input.amountBaseCents, weight: null },
-    { accountId: input.categoryAccountId, amountCents: -input.amountCents, amountBaseCents: -owed, weight: null },
+    // What was pushed back out, which is what the people below are debited —
+    // the same figure as the cost for anything `resolveShares` produced, and not
+    // assumed to be, so both columns close whatever this is handed.
+    { accountId: input.categoryAccountId, amountCents: -spentOut, amountBaseCents: -owed, weight: null },
     ...input.shares.map((s, i) => ({
       accountId: s.accountId,
       amountCents: s.amountCents,
@@ -586,6 +596,9 @@ export function buildEntryLines(input: {
     }))
   ]
 
+  // Zero for everything this path builds, and computed rather than assumed: the
+  // day a caller hands in shares that were rounded against a different total
+  // (#59), the entry still balances and the difference is where it can be seen.
   const residual = owed - input.amountBaseCents
   if (residual !== 0) {
     lines.push({ accountId: input.roundingAccountId, amountCents: 0, amountBaseCents: residual, weight: null })
@@ -733,11 +746,6 @@ export async function loadBudget(eventId: string): Promise<{
 }> {
   const db = useDb()
   const baseCurrency = await instanceBaseCurrency()
-  // Seeds the event's accounts if this is the first look at its budget, and
-  // answers every account with what has been posted to it, in ONE grouped query.
-  const accounts = await loadEventAccounts(eventId)
-  const byAccountId = new Map(accounts.map(a => [a.id, a]))
-
   const rows = await db
     .select({
       expense: tables.expense,
@@ -754,10 +762,19 @@ export async function loadBudget(eventId: string): Promise<{
         .select()
         .from(tables.expenseShare)
         .where(inArray(tables.expenseShare.expenseId, rows.map(r => r.expense.id)))
-        // A stable order across reads: two lines written in one statement share
-        // a `created_at` to the microsecond, and cuid2 ids do not sort by age.
-        .orderBy(asc(tables.expenseShare.createdAt), asc(tables.expenseShare.id))
+        // `seq`, and nothing else: the lines of an entry are written in ONE
+        // insert and therefore share `created_at` to the microsecond (Postgres
+        // `now()` is transaction time), and cuid2 ids do not sort by age.
+        .orderBy(asc(tables.expenseShare.seq), asc(tables.expenseShare.id))
     : []
+
+  // AFTER the lines, on purpose. A concurrent `addExpense` that creates a new
+  // member account and commits between the two reads would otherwise leave a
+  // line whose account is not in this map — and the fallback would type it as a
+  // category, adding somebody's share to the trip total while its owner
+  // vanished from the balances. Reading second makes the map a superset.
+  const accounts = await loadEventAccounts(eventId)
+  const byAccountId = new Map(accounts.map(a => [a.id, a]))
 
   const allLines: LedgerLineView[] = lineRows.map((l) => {
     const acc = byAccountId.get(l.accountId)
@@ -967,7 +984,6 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
     const lines = buildEntryLines({
       amountCents: input.amountCents,
       amountBaseCents,
-      fxRate,
       payerAccountId: payerAccount.id,
       categoryAccountId: destination.id,
       roundingAccountId: rounding.id,
@@ -995,11 +1011,15 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
       createdByUserId: by.userId,
       createdByGuestEmail: null
     })
-    await tx.insert(tables.expenseShare).values(lines.map(line => ({
+    await tx.insert(tables.expenseShare).values(lines.map((line, seq) => ({
       id: createId(),
       expenseId,
       eventId,
       accountId: line.accountId,
+      // The order `buildEntryLines` put them in, which is the order the entry
+      // reads in and the order the person named the split in. Nothing else in
+      // the row can carry it: one insert means one `created_at` for all of them.
+      seq,
       amountCents: line.amountCents,
       amountBaseCents: line.amountBaseCents,
       weight: line.weight

@@ -25,6 +25,18 @@
 -- the values it matches on. Hence the two `DROP NOT NULL`s in between: the
 -- columns are read, then loosened, then written around, then dropped.
 --
+-- `seq` is added the same way and for the same reason: all the lines of an
+-- entry are written in one insert and share `created_at` to the microsecond, so
+-- without it there is nothing to order them by and `shares[]` comes back in an
+-- arbitrary order rather than the one the person typed. Existing share rows are
+-- numbered from 3, after the payer credit and the category pair this migration
+-- writes in front of them.
+--
+-- The reference from a line to its account is COMPOSITE — `(event_id,
+-- account_id)` — so a line on one event cannot post into another event's
+-- account. A plain `account_id` reference accepts that, and Postgres refusing
+-- it is worth the extra unique index on `events_account (event_id, id)`.
+--
 -- There is NO `DEFAULT` on `account_id` at any point. The pattern #25 and #26
 -- used (add with a default, backfill, drop the default) exists for a column
 -- whose correct historical value is a constant — `split_mode` was `'even'` for
@@ -49,6 +61,7 @@ CREATE TABLE "events_account" (
 --> statement-breakpoint
 ALTER TABLE "events_account" ADD CONSTRAINT "events_account_event_id_events_event_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events_event"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "events_account_event_idx" ON "events_account" USING btree ("event_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "events_account_event_id_unique" ON "events_account" USING btree ("event_id","id");--> statement-breakpoint
 CREATE UNIQUE INDEX "events_account_event_email_unique" ON "events_account" USING btree ("event_id","email");--> statement-breakpoint
 CREATE UNIQUE INDEX "events_account_event_category_name_unique" ON "events_account" USING btree ("event_id","name") WHERE kind = 'category';--> statement-breakpoint
 CREATE UNIQUE INDEX "events_account_event_rounding_unique" ON "events_account" USING btree ("event_id") WHERE kind = 'rounding';--> statement-breakpoint
@@ -73,10 +86,18 @@ SELECT md5(random()::text || clock_timestamp()::text || m."event_id" || m."email
      ORDER BY x."event_id", lower(x."email"), x."created_at" DESC
   ) m;--> statement-breakpoint
 ALTER TABLE "events_expense_share" ADD COLUMN "account_id" text;--> statement-breakpoint
+ALTER TABLE "events_expense_share" ADD COLUMN "seq" integer;--> statement-breakpoint
 UPDATE "events_expense_share" s
    SET "account_id" = a."id"
   FROM "events_account" a
  WHERE a."event_id" = s."event_id" AND a."kind" = 'member' AND a."email" = lower(s."email");--> statement-breakpoint
+UPDATE "events_expense_share" s
+   SET "seq" = n."rn" + 2
+  FROM (
+    SELECT "id", row_number() OVER (PARTITION BY "expense_id" ORDER BY "created_at", "id") AS "rn"
+      FROM "events_expense_share"
+  ) n
+ WHERE n."id" = s."id";--> statement-breakpoint
 ALTER TABLE "events_expense_share" ALTER COLUMN "name" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "events_expense_share" ALTER COLUMN "email" DROP NOT NULL;--> statement-breakpoint
 CREATE TEMP TABLE "_zaeme_entry_61" ON COMMIT DROP AS
@@ -93,36 +114,38 @@ SELECT x."id" AS "expense_id",
          WHEN 'tickets' THEN 'Tickets'
          ELSE 'Uncategorised'
        END AS "category_name",
-       COALESCE(sum(s."amount_base_cents"), 0)::int AS "owed_base"
+       COALESCE(sum(s."amount_base_cents"), 0)::int AS "owed_base",
+       count(s."id")::int AS "lines"
   FROM "events_expense" x
   LEFT JOIN "events_expense_share" s ON s."expense_id" = x."id"
  GROUP BY x."id";--> statement-breakpoint
-INSERT INTO "events_expense_share" ("id", "expense_id", "event_id", "account_id", "amount_cents", "amount_base_cents", "weight", "created_at")
+INSERT INTO "events_expense_share" ("id", "expense_id", "event_id", "account_id", "seq", "amount_cents", "amount_base_cents", "weight", "created_at")
 SELECT md5(random()::text || clock_timestamp()::text || t."expense_id" || 'payer'),
-       t."expense_id", t."event_id", a."id", -t."amount_cents", -t."owed_base", NULL, t."created_at"
+       t."expense_id", t."event_id", a."id", 0, -t."amount_cents", -t."owed_base", NULL, t."created_at"
   FROM "_zaeme_entry_61" t
   JOIN "events_account" a
     ON a."event_id" = t."event_id" AND a."kind" = 'member' AND a."email" = t."payer_email";--> statement-breakpoint
-INSERT INTO "events_expense_share" ("id", "expense_id", "event_id", "account_id", "amount_cents", "amount_base_cents", "weight", "created_at")
+INSERT INTO "events_expense_share" ("id", "expense_id", "event_id", "account_id", "seq", "amount_cents", "amount_base_cents", "weight", "created_at")
 SELECT md5(random()::text || clock_timestamp()::text || t."expense_id" || 'cost'),
-       t."expense_id", t."event_id", a."id", t."amount_cents", t."amount_base_cents", NULL, t."created_at"
+       t."expense_id", t."event_id", a."id", 1, t."amount_cents", t."amount_base_cents", NULL, t."created_at"
   FROM "_zaeme_entry_61" t
   JOIN "events_account" a
     ON a."event_id" = t."event_id" AND a."kind" = 'category' AND a."name" = t."category_name";--> statement-breakpoint
-INSERT INTO "events_expense_share" ("id", "expense_id", "event_id", "account_id", "amount_cents", "amount_base_cents", "weight", "created_at")
+INSERT INTO "events_expense_share" ("id", "expense_id", "event_id", "account_id", "seq", "amount_cents", "amount_base_cents", "weight", "created_at")
 SELECT md5(random()::text || clock_timestamp()::text || t."expense_id" || 'spread'),
-       t."expense_id", t."event_id", a."id", -t."amount_cents", -t."owed_base", NULL, t."created_at"
+       t."expense_id", t."event_id", a."id", 2, -t."amount_cents", -t."owed_base", NULL, t."created_at"
   FROM "_zaeme_entry_61" t
   JOIN "events_account" a
     ON a."event_id" = t."event_id" AND a."kind" = 'category' AND a."name" = t."category_name";--> statement-breakpoint
-INSERT INTO "events_expense_share" ("id", "expense_id", "event_id", "account_id", "amount_cents", "amount_base_cents", "weight", "created_at")
+INSERT INTO "events_expense_share" ("id", "expense_id", "event_id", "account_id", "seq", "amount_cents", "amount_base_cents", "weight", "created_at")
 SELECT md5(random()::text || clock_timestamp()::text || t."expense_id" || 'round'),
-       t."expense_id", t."event_id", a."id", 0, t."owed_base" - t."amount_base_cents", NULL, t."created_at"
+       t."expense_id", t."event_id", a."id", t."lines" + 3, 0, t."owed_base" - t."amount_base_cents", NULL, t."created_at"
   FROM "_zaeme_entry_61" t
   JOIN "events_account" a ON a."event_id" = t."event_id" AND a."kind" = 'rounding'
  WHERE t."owed_base" <> t."amount_base_cents";--> statement-breakpoint
 ALTER TABLE "events_expense_share" ALTER COLUMN "account_id" SET NOT NULL;--> statement-breakpoint
-ALTER TABLE "events_expense_share" ADD CONSTRAINT "events_expense_share_account_id_events_account_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."events_account"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "events_expense_share" ALTER COLUMN "seq" SET NOT NULL;--> statement-breakpoint
+ALTER TABLE "events_expense_share" ADD CONSTRAINT "events_expense_share_event_account_fk" FOREIGN KEY ("event_id","account_id") REFERENCES "public"."events_account"("event_id","id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "events_expense_share_account_idx" ON "events_expense_share" USING btree ("account_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "events_expense_share_expense_account_debit_unique" ON "events_expense_share" USING btree ("expense_id","account_id") WHERE amount_cents >= 0;--> statement-breakpoint
 CREATE UNIQUE INDEX "events_expense_share_expense_account_credit_unique" ON "events_expense_share" USING btree ("expense_id","account_id") WHERE amount_cents < 0;--> statement-breakpoint

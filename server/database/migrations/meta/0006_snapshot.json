@@ -1,5 +1,5 @@
 {
-  "id": "3fb193e7-ec3f-494e-9a55-cfaddaa89752",
+  "id": "757fdde1-17c7-4522-af51-8234e382eee0",
   "prevId": "6c811d52-c434-436b-859c-38a171c04a47",
   "version": "7",
   "dialect": "postgresql",
@@ -72,6 +72,27 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "events_account_event_id_unique": {
+          "name": "events_account_event_id_unique",
+          "columns": [
+            {
+              "expression": "event_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1045,6 +1066,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "seq": {
+          "name": "seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
         "amount_cents": {
           "name": "amount_cents",
           "type": "integer",
@@ -1189,14 +1216,16 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "events_expense_share_account_id_events_account_id_fk": {
-          "name": "events_expense_share_account_id_events_account_id_fk",
+        "events_expense_share_event_account_fk": {
+          "name": "events_expense_share_event_account_fk",
           "tableFrom": "events_expense_share",
           "tableTo": "events_account",
           "columnsFrom": [
+            "event_id",
             "account_id"
           ],
           "columnsTo": [
+            "event_id",
             "id"
           ],
           "onDelete": "restrict",

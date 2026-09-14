@@ -1,5 +1,5 @@
 import { relations, sql } from 'drizzle-orm'
-import { bigint, boolean, index, integer, numeric, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core'
+import { bigint, boolean, foreignKey, index, integer, numeric, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core'
 
 /**
  * The events domain tables, namespaced `events_*`. zäme owns this schema and
@@ -344,6 +344,9 @@ export const account = pgTable('events_account', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
 }, table => [
   index('events_account_event_idx').on(table.eventId),
+  // The target of the composite foreign key on a line: it is what lets the
+  // database refuse a line on one event that posts to another event's account.
+  uniqueIndex('events_account_event_id_unique').on(table.eventId, table.id),
   // One member account per person per event. Postgres treats NULLs as distinct,
   // so the two kinds that carry no email are simply not constrained by it.
   uniqueIndex('events_account_event_email_unique').on(table.eventId, table.email),
@@ -494,8 +497,23 @@ export const expenseShare = pgTable('events_expense_share', {
   id: text('id').primaryKey(),
   expenseId: text('expense_id').notNull().references(() => expense.id, { onDelete: 'cascade' }),
   eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
-  /** Where this side of the transaction lands. Never null; never guessed. */
-  accountId: text('account_id').notNull().references(() => account.id, { onDelete: 'restrict' }),
+  /**
+   * Where this side of the transaction lands. Never null; never guessed, and
+   * constrained to an account of THIS event by the composite foreign key below.
+   */
+  accountId: text('account_id').notNull(),
+  /**
+   * The line's position within its entry, from 0. The payer's credit, then the
+   * category debit and credit, then one debit per person in the order the split
+   * named them, then the rounding line if there is one.
+   *
+   * It exists because there is nothing else to order by. All the lines of an
+   * entry are written in ONE insert, so they share `created_at` to the
+   * microsecond (Postgres `now()` is transaction time), and cuid2 ids do not
+   * sort by age — so `created_at, id` is a stable order but an arbitrary one,
+   * and `shares[]` would come back in a different order than the person typed.
+   */
+  seq: integer('seq').notNull(),
   /** SIGNED, as spent: debit positive, credit negative. */
   amountCents: integer('amount_cents').notNull(),
   /**
@@ -528,6 +546,16 @@ export const expenseShare = pgTable('events_expense_share', {
   index('events_expense_share_expense_idx').on(table.expenseId),
   index('events_expense_share_event_idx').on(table.eventId),
   index('events_expense_share_account_idx').on(table.accountId),
+  // A line belongs to one event and posts to an account OF THAT EVENT. A plain
+  // `account_id` reference lets a line on one trip post into another trip's
+  // Food account — unreachable through today's write path, and exactly the
+  // class of thing this issue exists not to re-invent, so the database refuses
+  // it rather than the code remembering to.
+  foreignKey({
+    columns: [table.eventId, table.accountId],
+    foreignColumns: [account.eventId, account.id],
+    name: 'events_expense_share_event_account_fk'
+  }).onDelete('restrict'),
   // At most one debit and one credit per account per entry. This is what the
   // old `(expense_id, email)` unique index bought — "Ana cannot appear twice" —
   // kept under a shape where Ana legitimately appears TWICE in one entry: once

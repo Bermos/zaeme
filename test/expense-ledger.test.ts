@@ -24,12 +24,12 @@ import {
  * function the write path uses.
  *
  * Every fixture is chosen so the WRONG answer is visibly different from the
- * right one. The rounding fixture converts to a residual of exactly one cent
- * (dropping the rounding line leaves an entry that does not balance AND a total
- * that is a cent out); the category fixture posts two costs to two different
- * accounts (so "everything lands in Uncategorised" fails); and the settlement
- * fixture touches no category account at all (so a total that counted transfers
- * would be 300.00 too high).
+ * right one. The category fixture posts two costs to two different accounts (so
+ * "everything lands in Uncategorised" fails); the settlement fixture touches no
+ * category account at all (so a total that counted transfers would be 150.00
+ * too high); and the foreign fixture is one whose per-share conversions do NOT
+ * add up to the converted total, so a write path that converted each share
+ * separately would be caught by the figures here.
  */
 
 const ANA = { id: 'm_ana', name: 'Ana', email: 'ana@e.com' }
@@ -76,7 +76,6 @@ function entry(o: {
   const lines = buildEntryLines({
     amountCents: o.amountCents,
     amountBaseCents: convertCents(o.amountCents, fxRate),
-    fxRate,
     payerAccountId: o.paidBy.id,
     categoryAccountId: o.categoryId ?? UNCATEGORISED.id,
     roundingAccountId: ROUNDING.id,
@@ -163,17 +162,19 @@ describe('every entry balances', () => {
   })
 })
 
-describe('the conversion residual posts to Rounding', () => {
+describe('Rounding exists, and on this path has nothing to do', () => {
   /**
    * EUR 100.00 at 0.8367, "Ana counts double" — 50.00 / 25.00 / 25.00.
    *
    *   the total converts to  10000 x 0.8367 = 8367.00 → 8367
-   *   the shares convert to   5000 x 0.8367 = 4183.50 → 4184
-   *                           2500 x 0.8367 = 2091.75 → 2092  (x2)
-   *                           the three owe 8368, a cent more than was spent
+   *   converting each share separately would give 4184 + 2092 + 2092 = 8368
    *
-   * That cent is real. It goes to Rounding, where somebody can find it, rather
-   * than being shaved off whoever happens to sort last.
+   * That extra cent is not a rounding artefact waiting to be surfaced — it is a
+   * cent of liability being INVENTED. Three people would severally owe CHF
+   * 83.68 for a thing that cost 83.67, and the payer would be credited 83.68
+   * for handing over 83.67, so `paidCents` would stop meaning what they paid.
+   * The shares are therefore apportioned as a group (#25) and the entry has no
+   * residual at all.
    */
   const lines = entry({
     amountCents: 10000,
@@ -184,43 +185,60 @@ describe('the conversion residual posts to Rounding', () => {
     split: [{ member: ANA, weight: '2' }, { member: BEN, weight: '1' }, { member: CLEO, weight: '1' }]
   })
 
-  it('writes a rounding line for exactly the cents that do not reconcile', () => {
-    const rounding = lines.filter(l => l.accountKind === 'rounding')
-    expect(rounding.map(l => [l.amountCents, l.amountBaseCents])).toEqual([[0, 1]])
+  it('writes no rounding line, because there is nothing to put in it', () => {
+    expect(lines.filter(l => l.accountKind === 'rounding')).toEqual([])
     expect(sumBase(lines)).toBe(0)
     expect(sumSpent(lines)).toBe(0)
   })
 
-  it('debits each person their OWN share converted, not a tidied one', () => {
+  it('apportions the shares so they sum to the converted total exactly', () => {
     const debits = lines.filter(l => l.accountKind === 'member' && l.amountBaseCents > 0)
+    // 4183, NOT the 4184 that 5000 x 0.8367 rounds to on its own: the cent that
+    // separate conversions would invent is the one being refused here.
     expect(debits.map(l => [l.accountName, l.amountCents, l.amountBaseCents])).toEqual([
-      ['Ana', 5000, 4184],
+      ['Ana', 5000, 4183],
       ['Ben', 2500, 2092],
       ['Cleo', 2500, 2092]
     ])
+    expect(debits.reduce((a, l) => a + l.amountBaseCents, 0)).toBe(8367)
   })
 
-  it('leaves the balances summing to zero exactly, and the plan closing', () => {
+  it('credits the payer exactly what they handed over', () => {
     const balances = computeBalances(lines)
     expect(balances.map(b => [b.email, b.paidCents, b.owedCents, b.netCents])).toEqual([
-      ['ana@e.com', 8368, 4184, 4184],
+      ['ana@e.com', 8367, 4183, 4184],
       ['ben@e.com', 0, 2092, -2092],
       ['cleo@e.com', 0, 2092, -2092]
     ])
     expect(balances.reduce((sum, b) => sum + b.netCents, 0)).toBe(0)
-    const plan = suggestSettlements(balances)
-    expect(plan.reduce((sum, p) => sum + p.amountCents, 0)).toBe(4184)
-  })
-
-  it('keeps the trip total at what was actually spent', () => {
-    // 8367, not the 8368 the three of them severally owe. The difference is the
-    // rounding line, and it is NOT a cost — `Rounding` is not a category.
+    expect(suggestSettlements(balances).reduce((sum, p) => sum + p.amountCents, 0)).toBe(4184)
     expect(computeTotalCents(lines)).toBe(8367)
   })
 
-  it('writes no rounding line at all when nothing drifts', () => {
-    const plain = entry({ amountCents: 12000, paidBy: ANA, split: MEMBERS.map(m => ({ member: m })) })
-    expect(plain.filter(l => l.accountKind === 'rounding')).toEqual([])
+  /**
+   * The branch is still there, and it is not decoration: it is the guarantee
+   * that `buildEntryLines` can never return lines that do not sum to zero,
+   * whatever it is handed. Nothing on the write path can hand it shares that do
+   * not cover the total — `resolveShares` refuses those with a 422 naming the
+   * sum — so the only way to reach it today is to call it directly, which is
+   * what #59 will do when it recomputes per-person amounts that were rounded
+   * against a total that no longer exists.
+   */
+  it('closes an entry it is handed that would not otherwise balance', () => {
+    const orphaned = buildEntryLines({
+      amountCents: 10000,
+      amountBaseCents: 8367,
+      payerAccountId: ANA.id,
+      categoryAccountId: FOOD.id,
+      roundingAccountId: ROUNDING.id,
+      // Shares that cover none of it: `apportionCents` has nothing to spread,
+      // so the whole converted total is left over.
+      shares: [{ accountId: BEN.id, amountCents: 0, weight: null }]
+    })
+    const rounding = orphaned.filter(l => l.accountId === ROUNDING.id)
+    expect(rounding.map(l => [l.amountCents, l.amountBaseCents])).toEqual([[0, -8367]])
+    expect(sumBase(orphaned)).toBe(0)
+    expect(() => assertEntryBalances(orphaned)).not.toThrow()
   })
 })
 

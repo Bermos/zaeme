@@ -139,11 +139,19 @@ export function ensureEventAccounts(eventId: string): Promise<AccountRow[]> {
  * Get-or-create a member account per person, keyed on the lowercased email that
  * is the identity everywhere else in this domain.
  *
- * The NAME is refreshed when it differs from what is stored: an account is one
- * person, so correcting "Ana Müler" to "Ana Müller" ought to fix every line she
- * is on rather than only the ones recorded afterwards. That is the difference
- * between a name repeated on every row (what the lines used to carry) and an
- * account that has one.
+ * THE NAME IS REFRESHED, RETROACTIVELY AND UNGATED, whenever an incoming one
+ * differs from what is stored: an account is one person, so correcting "Ana
+ * Müler" to "Ana Müller" fixes every line she is on rather than only the ones
+ * recorded afterwards. That is the difference between a name repeated on every
+ * row (what the lines used to carry) and an account that has one.
+ *
+ * The cost, which is real: anybody who may record an expense can rename anybody
+ * else on the event by typing a different spelling once, and it changes
+ * `shares[].name` on every PAST expense. The entry headers do not move with it
+ * — `events_expense.paid_by_name` is a record of what was typed at the time —
+ * so one budget payload can legitimately show "Ana" as the payer of an old
+ * expense and "Anna" in its shares. Nothing here depends on the name; the
+ * identity is the email, and no money moves.
  */
 export async function ensureMemberAccountsWithin(
   db: DbLike,
@@ -344,12 +352,13 @@ async function addCategoryAccount(eventId: string, name: string) {
 /**
  * Remove a category account.
  *
- * Two refusals, and they are different refusals on purpose. A SYSTEM account —
- * `Uncategorised`, `Rounding` — is never removable, because every line needs a
- * destination and the residual needs a home. Any other category is removable
- * only WHILE IT HOLDS NO LINES: deleting an account that money has been posted
- * to would either orphan the lines or silently move history somewhere it never
- * was, and neither is something a budget should do quietly.
+ * Two refusals, and they are different refusals on purpose, checked in the
+ * order a person can act on. A SYSTEM account — `Uncategorised`, `Rounding` —
+ * is never removable at all, because every line needs a destination and the
+ * residual needs a home. Any other category is removable only WHILE IT HOLDS NO
+ * LINES: deleting an account money has been posted to would either orphan the
+ * lines or silently move history somewhere it never was, and neither is
+ * something a budget should do quietly.
  */
 export async function removeAccountAsParticipant(actor: { id: string }, slug: string, accountId: string) {
   const ev = await assertMayShapeAccounts(slug, actor)
@@ -369,6 +378,13 @@ async function removeAccount(eventId: string, accountId: string) {
     throw createError({ statusCode: 422, message: 'Only category accounts can be removed' })
   }
 
+  // The system refusal comes FIRST, because it is the one that cannot be worked
+  // around. Asking somebody to delete every expense on `Uncategorised` and then
+  // refusing anyway is a worse answer than refusing straight away.
+  if (row.isSystem) {
+    throw createError({ statusCode: 422, message: `"${row.name}" is part of every budget and cannot be removed` })
+  }
+
   const [held] = await db
     .select({ lines: sql<number>`count(*)::int` })
     .from(tables.expenseShare)
@@ -378,9 +394,6 @@ async function removeAccount(eventId: string, accountId: string) {
       statusCode: 409,
       message: `"${row.name}" still has expenses posted to it, so it cannot be removed`
     })
-  }
-  if (row.isSystem) {
-    throw createError({ statusCode: 422, message: `"${row.name}" is part of every budget and cannot be removed` })
   }
 
   await db.delete(tables.account).where(eq(tables.account.id, accountId))

@@ -146,6 +146,23 @@ entry_lines() {
     })' "$2"
 }
 
+# `entry_order <body> <title>` — the names on the named entry's shares, in the
+# order the payload lists them. All the lines of an entry share one `created_at`
+# (Postgres `now()` is transaction time) and cuid2 ids do not sort by age, so
+# without an explicit `seq` this is whatever the planner felt like returning.
+entry_order() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const e = (budget.expenses ?? [budget]).find(x => x.title === process.argv[1])
+      if (!e) return process.stdout.write("no-such-entry")
+      process.stdout.write((e.shares ?? []).map(sh => sh.name).join(" "))
+    })' "$2"
+}
+
 # `account_id <body> <name>` — the id of the named account, from a budget or an
 # `{accounts:…}` body.
 account_id() {
@@ -469,8 +486,8 @@ DINNER=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
 contains "a foreign expense keeps what was SPENT"        "$DINNER" '"amountCents":10000,"currency":"EUR"'
 contains "...freezes the rate it was recorded at"        "$DINNER" '"fxRate":"0.9412"'
 contains "...and is converted once, at that rate"        "$DINNER" '"amountBaseCents":9412'
-contains "...with each share converted at that rate too" "$DINNER" '"amountCents":3334,"amountBaseCents":3138'
-contains "...and this one converting to a cent less"     "$DINNER" '"amountCents":3333,"amountBaseCents":3137'
+contains "...with the shares apportioned in base too"    "$DINNER" '"amountCents":3334,"amountBaseCents":3138'
+contains "...so the base shares sum to it exactly"       "$DINNER" '"amountCents":3333,"amountBaseCents":3137'
 
 TAXI=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$FSLUG/expenses" \
   -d "{\"title\":\"Taxi\",\"amountCents\":4500,\"currency\":\"GBP\",\"fxRate\":\"1.1\",\"paidByName\":\"B\",\"paidByEmail\":\"b@e.com\",\"participants\":$SPLIT3}")
@@ -639,27 +656,25 @@ SEVENB=$(body "${AUTH[@]}" "$API/events/$VSLUG/budget")
 contains "...so the payer owes the smaller slice, not the larger" "$SEVENB" '"a@e.com","paidCents":10000,"owedCents":1428,"netCents":8572'
 contains "...and the last person owes the larger one"     "$SEVENB" '"g@e.com","paidCents":0,"owedCents":1429,"netCents":-1429'
 
-# A weighted split of a FOREIGN expense. The euros sum to what was spent; the
-# francs are each person's OWN share converted, which is the figure you can
-# explain to them — and those need NOT sum to the converted total.
+# A weighted split of a FOREIGN expense: the shares have to sum exactly in BOTH
+# currencies, and the base ones are NOT in the 2:1:1 ratio the euros are — which
+# is the whole reason shares are converted as a group.
 #
-#   EUR 100.00 at 0.8367 → CHF 83.67 spent
-#   spent 5000/2500/2500   base 4184/2092/2092 (sum 8368, a cent over)
+#   EUR 100.00 at 0.8367 → CHF 83.67
+#   spent 5000/2500/2500   base 4183/2092/2092 (sum 8367)
 #
-# That cent is the conversion residual and it posts to the event's Rounding
-# account (#61), where it is visible, rather than being shaved off whoever
-# sorted last. The trip total stays 8367 — what was actually spent — and the
-# balances still sum to zero exactly, because the payer is credited 8368: what
-# the three of them severally owe her.
+# Converting each share on its own would give 4184/2092/2092 = 8368: a cent of
+# liability invented, not a residual discovered. #61 keeps the group
+# apportionment and leaves the Rounding account with nothing to do.
 FXWTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke fx-weight $SUFFIX\",\"type\":\"trip\"}")
 WSLUG=$(printf '%s' "$FXWTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
 FXW=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$WSLUG/expenses" \
   -d '{"title":"Dinner in Milan","amountCents":10000,"currency":"EUR","fxRate":"0.8367","splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"2"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"}]}')
-contains "a weighted foreign split sums in what was SPENT" "$FXW" '"amountCents":5000,"amountBaseCents":4184'
-contains "...and debits each share its OWN conversion"     "$FXW" '"amountCents":2500,"amountBaseCents":2092'
+contains "a weighted foreign split sums in what was SPENT" "$FXW" '"amountCents":5000,"amountBaseCents":4183'
+contains "...and in the base it settles for"               "$FXW" '"amountCents":2500,"amountBaseCents":2092'
 FXWB=$(body "${AUTH[@]}" "$API/events/$WSLUG/budget")
-contains "...while the total stays what was SPENT"         "$FXWB" '"currency":"CHF","totalCents":8367'
-contains "...with the balances reconciled in base cents"   "$FXWB" '"a@e.com","paidCents":8368,"owedCents":4184,"netCents":4184'
+contains "...to the last cent of the converted total"      "$FXWB" '"currency":"CHF","totalCents":8367'
+contains "...with the balances reconciled in base cents"   "$FXWB" '"a@e.com","paidCents":8367,"owedCents":4183,"netCents":4184'
 
 echo
 echo "== the budget is a double-entry ledger with accounts (#61) =="
@@ -719,33 +734,40 @@ contains "...and exactly its cents off the total"         "$LB2" '"totalCents":9
 equals "...leaving every remaining entry balanced" "$(ledger_imbalance "$LB2")" "0"
 
 echo
-echo "== the conversion residual has a home, and it is not somebody's share (#61) =="
+echo "== the residual has a home, and this path never gives it anything (#61) =="
 # EUR 100.00 at 0.8367, "Ana counts double": 50.00 / 25.00 / 25.00.
-#   the total converts to 8367; the three shares convert to 4184 + 2092 + 2092
-#   = 8368, a cent more. The cent is real and goes to Rounding.
+#   the total converts to 8367. Converting each share on its own would give
+#   4184 + 2092 + 2092 = 8368 — three people severally owing 83.68 for a thing
+#   that cost 83.67, and a payer credited 83.68 for handing over 83.67. That is
+#   a cent of liability invented, not a residual discovered, so the shares are
+#   apportioned as a group and the entry has NO residual at all.
+#
+# `Rounding` having nothing to do here is the correct answer, not a gap. The
+# branch that posts to it is the guarantee that an entry can never be written
+# unbalanced, and it is what #59 will need when a currency change recomputes
+# per-person amounts that were rounded against a total that no longer exists.
 ROUNDTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke rounding $SUFFIX\",\"type\":\"trip\"}")
 RSLUG=$(printf '%s' "$ROUNDTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
 RESID=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$RSLUG/expenses" \
   -d '{"title":"Milan dinner","amountCents":10000,"currency":"EUR","fxRate":"0.8367","splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"2"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"}]}')
-contains "each share is debited its OWN conversion"       "$RESID" '"amountCents":5000,"amountBaseCents":4184'
-contains "...and the residual is a line of its own"       "$RESID" '"accountKind":"rounding","accountEmail":null,"amountCents":0,"amountBaseCents":1'
-# Seven lines: the six a three-way expense makes, plus the rounding line.
-equals "...so the entry has one more line than usual" "$(entry_lines "$RESID" "Milan dinner")" "7"
-equals "...and it balances, which is why it exists" "$(ledger_imbalance "$RESID")" "0"
+# 4183, not the 4184 that 5000 x 0.8367 rounds to on its own.
+contains "the double share is apportioned, not rounded up" "$RESID" '"amountCents":5000,"amountBaseCents":4183'
+contains "...and the other two take the rest exactly"     "$RESID" '"amountCents":2500,"amountBaseCents":2092'
+# Six lines and no seventh: an entry that needed a rounding line would have one.
+equals "...in six lines, with no residual among them" "$(entry_lines "$RESID" "Milan dinner")" "6"
+equals "...and it balances, which is the whole invariant" "$(ledger_imbalance "$RESID")" "0"
 RB=$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")
-equals "...and every entry in that budget balances"  "$(ledger_imbalance "$RB")" "0"
-contains "the Rounding account shows the cent"            "$RB" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":1'
-contains "the trip total is still what was SPENT"         "$RB" '"totalCents":8367'
-contains "...while the payer is owed what the three owe"  "$RB" '"a@e.com","paidCents":8368,"owedCents":4184,"netCents":4184'
-contains "...and a debtor owes their own converted share" "$RB" '"b@e.com","paidCents":0,"owedCents":2092,"netCents":-2092'
-# Rounding is NOT a category, so the cent never becomes part of what the trip
-# cost — and the balances still sum to zero, which is what lets a plan close.
+equals "...as does every entry in that budget"       "$(ledger_imbalance "$RB")" "0"
+contains "the Rounding account is there, holding nothing" "$RB" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
+contains "the trip total is what was SPENT"               "$RB" '"totalCents":8367'
+contains "...and the payer is credited what they paid"    "$RB" '"a@e.com","paidCents":8367,"owedCents":4183,"netCents":4184'
+contains "...with a debtor owing their apportioned share" "$RB" '"b@e.com","paidCents":0,"owedCents":2092,"netCents":-2092'
 contains "the plan clears the whole of one debt"          "$RB" '"toEmail":"a@e.com","amountCents":2092'
-# A same-currency expense drifts by nothing and must write NO rounding line.
+# A same-currency expense divides the same way and also writes no extra line.
 body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$RSLUG/expenses" \
   -d '{"title":"Tram","amountCents":900,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"}]}' > /dev/null
-equals "a split that does not drift writes no extra line" "$(entry_lines "$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")" Tram)" "6"
-contains "...and Rounding is still holding the one cent"  "$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")" '"name":"Rounding","email":null,"isSystem":true,"debitCents":1'
+equals "a same-currency split writes no extra line either" "$(entry_lines "$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")" Tram)" "6"
+contains "...and Rounding is still empty"                 "$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")" '"name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
 
 echo
 echo "== the chart of accounts, through the surfaces the product writes (#61) =="
@@ -785,9 +807,16 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   contains "...and it joins the chart, not as a system one" "$ACCLIST2" '"kind":"category","name":"Ski pass","email":null,"isSystem":false'
   check "...and a second one by the same name"     409 "${PL61[@]}" "${JSON[@]}" -X POST "$MEACC" -d '{"name":"ski PASS"}'
   SKI_ID=$(account_id "$ACCLIST2" "Ski pass")
+  # Named out of alphabetical order, and with the payer in the middle, so the
+  # order asserted below is one that neither a sort nor a payer-first rule gives.
+  SPLIT3ORD='[{"name":"Cleo","email":"cleo@e.com"},{"name":"Ana","email":"ana@e.com"},{"name":"Ben","email":"ben@e.com"}]'
   MESKI=$(body "${PL61[@]}" "${JSON[@]}" -X POST "$MEEXP61" \
-    -d "{\"title\":\"Lift pass\",\"accountId\":\"$SKI_ID\",\"amountCents\":22000,\"paidByName\":\"B\",\"paidByEmail\":\"b@e.com\",\"participants\":$SPLIT2}")
+    -d "{\"title\":\"Lift pass\",\"accountId\":\"$SKI_ID\",\"amountCents\":22000,\"paidByName\":\"Ana\",\"paidByEmail\":\"ana@e.com\",\"participants\":$SPLIT3ORD}")
   contains "an expense posted into it lands there"  "$MESKI" '"category":"Ski pass"'
+  # The lines come back in the order they were written, so `shares[]` is still
+  # the order the split named people in — all seven share one `created_at`, so
+  # without `seq` this is whatever Postgres feels like returning.
+  equals "...with the shares still in the order given" "$(entry_order "$MESKI" "Lift pass")" "Cleo Ana Ben"
   equals "...and that entry balances too"          "$(ledger_imbalance "$MESKI")" "0"
   contains "...so the new account carries the cost" "$(body "${PL61[@]}" "$MEACC")" '"name":"Ski pass","email":null,"isSystem":false,"debitCents":22000'
 
@@ -795,8 +824,12 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # cannot go; Uncategorised cannot go at all.
   check "removing a category that holds lines"     409 "${PL61[@]}" -X DELETE "$MEACC/$SKI_ID"
   contains "...saying which one and why"                  "$(body "${PL61[@]}" -X DELETE "$MEACC/$SKI_ID")" 'still has expenses posted to it'
+  # `Uncategorised` is refused OUTRIGHT, holding lines or not: the system check
+  # comes first on purpose, because telling somebody to delete every expense on
+  # it and then refusing anyway is a worse answer than refusing straight away.
   UNCAT_ID=$(account_id "$ACCLIST2" Uncategorised)
-  check "removing Uncategorised while it holds lines" 409 "${PL61[@]}" -X DELETE "$MEACC/$UNCAT_ID"
+  check "removing Uncategorised while it holds lines" 422 "${PL61[@]}" -X DELETE "$MEACC/$UNCAT_ID"
+  contains "...saying it is part of every budget"         "$(body "${PL61[@]}" -X DELETE "$MEACC/$UNCAT_ID")" 'part of every budget'
   TICKETS_ID=$(account_id "$ACCLIST2" Tickets)
   check "removing a category nobody has used"      200 "${PL61[@]}" -X DELETE "$MEACC/$TICKETS_ID"
   ACCLIST3=$(body "${PL61[@]}" "$MEACC")
@@ -815,9 +848,9 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # The host surface writes the same ledger, and the residual reaches it too.
   HOSTFX=$(body "${PL61[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$ESLUG/expenses" \
     -d '{"title":"Milan again","amountCents":10000,"currency":"EUR","fxRate":"0.8367","splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"2"},{"name":"B","email":"b@e.com","weight":"1"},{"name":"C","email":"c@e.com","weight":"1"}]}')
-  contains "the HOST surface posts the residual too"      "$HOSTFX" '"accountKind":"rounding","accountEmail":null,"amountCents":0,"amountBaseCents":1'
+  contains "the HOST surface apportions the same way"     "$HOSTFX" '"amountCents":5000,"amountBaseCents":4183'
   equals "...and its entry balances as well"       "$(ledger_imbalance "$HOSTFX")" "0"
-  contains "...with the total still what was spent"       "$HOSTFX" '"totalCents":8367'
+  contains "...with the total what was spent"             "$HOSTFX" '"totalCents":8367'
   check "adding a category on the host surface"    201 "${PL61[@]}" "${JSON[@]}" -X POST "$HOSTACC" -d '{"name":"Petrol"}'
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
