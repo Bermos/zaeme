@@ -113,9 +113,9 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
-      # The floor the smoke step asserts. 133 is what the suite runs with both
+      # The floor the smoke step asserts. 139 is what the suite runs with both
       # session cookies and object storage present; a bare run manages 83 (it
-      # skips 38 session-gated checks and 12 poster ones). Raise this when the
+      # skips 44 session-gated checks and 12 poster ones). Raise this when the
       # suite grows — never lower it to make a run go green.
       #
       # 106 -> 117 with #48, which added eleven checks to the credential
@@ -129,11 +129,19 @@ jobs:
       # pinning its delta, and dropping its `event_id` scoping so one move
       # renumbers every itinerary on the instance all leave vitest green.
       #
+      # 133 -> 139 with #51, six checks that EXECUTE writes on /api/me and then
+      # read back the kind the audit RECORDED for each — `participant` for a
+      # friend with an RSVP and no planner row, `planner` for a non-owner who
+      # really does plan the event, `owner` for the instance owner. The label is
+      # computed at the edge and read by a query, so nothing structural can
+      # prove it, and the two-sidedness is the point: labelling the whole of
+      # /api/me one way passes half of them.
+      #
       # Keep this EXACT. A floor that is slack by the width of somebody else's
       # group is a floor that lets that group stop running — which is the silent
       # degradation this assertion exists to prevent, arriving by rebase rather
       # than by rename.
-      MIN_SMOKE_CHECKS: '133'
+      MIN_SMOKE_CHECKS: '139'
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
       # falls through to the dry run, which is what lets the magic-link sign-in
       # below read its token out of the database instead of out of an inbox.

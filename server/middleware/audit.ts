@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm'
 import { getGuestSession } from '../utils/auth'
 import { resolveInstanceOwnerId } from '../utils/instance'
 import { eventSlugFromPath, recordAudit, type AuditActorKind, type AuditSurface } from '../domain/audit'
+import { findPlannerRoleBySlug } from '../domain/permissions'
 import { tables, useDb } from '../domain/db'
 
 /**
@@ -31,6 +32,58 @@ const SURFACES: Array<{ prefix: string, surface: AuditSurface }> = [
   { prefix: '/api/me/', surface: 'me' },
   { prefix: '/api/invites/', surface: 'invite' }
 ]
+
+/**
+ * What standing a SESSION acted in — the half of the audit that #51 is about.
+ *
+ * The instance owner is the owner everywhere: that is a fact about the
+ * instance, not about an event, and it is what `/admin/audit` filters on.
+ *
+ * Below that the answer depends on the surface, because the surfaces differ in
+ * what they have already proved by the time a request arrives:
+ *
+ *  - `/api/host/**` and `/api/admin/**` — every handler there asserts a planner
+ *    row (or the owner gate) before it does anything, so `planner` is true by
+ *    construction and costs no query.
+ *  - `/api/me/**` — the ACCOUNT surface, where it is genuinely open: since #48
+ *    `POST /api/me/events/<slug>/expenses` is written by a trip participant who
+ *    has an RSVP and no planner row. So the question is asked, per request, of
+ *    the event in the path — ONE indexed statement (`findPlannerRoleBySlug`),
+ *    the same order of cost as the owner lookup every mutating request already
+ *    pays, and only on this surface.
+ *
+ * `participant` is therefore "a signed-in account, on `/api/me`, holding no
+ * planner standing on the event it touched". That includes an account with no
+ * standing at all, whose request is about to be refused — and rightly so: the
+ * kind records what the caller was, and `status` records that they were sent
+ * away. Resolving it any further would mean re-deciding access in the audit,
+ * which is the one place that must never have an opinion about it.
+ *
+ * `logistics` is NOT planner standing here, and the exclusion is the whole
+ * point rather than a detail: `assertParticipant` deliberately refuses to count
+ * it (`server/domain/permissions.ts`), and the host surface refuses it an
+ * expense write. If the audit called it `planner` the log would contradict the
+ * handler that decided the very same request — the same class of untruth #51
+ * exists to remove, pointing the other way.
+ *
+ * A `/api/me` path that names NO event gets `account`: there is no such
+ * mutating route today, and the day somebody adds one (`PATCH /api/me/profile`)
+ * "participant" would be a claim about an event that is not in the request.
+ */
+async function resolveSessionActorKind(
+  surface: AuditSurface,
+  path: string,
+  userId: string
+): Promise<AuditActorKind> {
+  if ((await resolveInstanceOwnerId().catch(() => null)) === userId) return 'owner'
+  if (surface !== 'me') return 'planner'
+
+  const slug = eventSlugFromPath(path)
+  if (!slug) return 'account'
+
+  const role = await findPlannerRoleBySlug(slug, userId).catch(() => null)
+  return role && role !== 'logistics' ? 'planner' : 'participant'
+}
 
 /** The invite whose capability URL this is — `/api/invites/<token>/…`. */
 async function resolveInviteActor(path: string) {
@@ -70,7 +123,7 @@ export default defineEventHandler(async (event) => {
     if (session?.user) {
       actorId = session.user.id
       actorLabel = session.user.email
-      actorKind = (await resolveInstanceOwnerId().catch(() => null)) === session.user.id ? 'owner' : 'planner'
+      actorKind = await resolveSessionActorKind(match.surface, path, session.user.id)
     }
   }
 

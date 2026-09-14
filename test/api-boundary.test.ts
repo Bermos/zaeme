@@ -374,6 +374,78 @@ describe('the audit records every surface, and reads no cookie near /api/v1', ()
     expect(middleware).toMatch(/\/api\/auth/)
   })
 
+  /**
+   * Every value `actor_kind` can hold, read out of the schema rather than
+   * retyped — the point of the check is that three other places agree with it.
+   */
+  const ACTOR_KINDS = (() => {
+    const schema = readFileSync(join(ROOT, 'server', 'database', 'schema', 'audit.ts'), 'utf8')
+    const list = /actorKind: text\('actor_kind', \{ enum: \[([^\]]*)\]/.exec(schema)?.[1] ?? ''
+    return list.split(',').map(v => v.trim().replace(/^'|'$/g, '')).filter(Boolean)
+  })()
+
+  it('tells a planner from a participant on the account surface', () => {
+    // #51: every non-owner session used to be filed as `planner`, which was
+    // true only while every session-bearing surface was /api/host. Expense
+    // writes moved to /api/me (#48) and a friend on a trip is not a planner.
+    expect(ACTOR_KINDS).toContain('participant')
+    expect(middleware).toMatch(/findPlannerRoleBySlug/)
+    // …and it is the EVENT IN THE PATH that is asked about, not the surface.
+    expect(middleware).toMatch(/eventSlugFromPath\(path\)/)
+  })
+
+  it('asks that question on /api/me only, and never on the machine surface', () => {
+    // /api/host and /api/admin have already asserted a planner row by the time
+    // a handler runs, so paying for the lookup there would buy nothing.
+    expect(middleware).toMatch(/surface !== 'me'/)
+    // The per-request lookup must stay behind the /api/v1 bail-out like
+    // everything else here: it reaches the database on a session's behalf, so
+    // its CALL SITE (the helper is declared above the handler) comes after the
+    // guard and after the session it is resolving for.
+    const call = middleware.indexOf('resolveSessionActorKind(match.surface')
+    expect(call).toBeGreaterThan(middleware.indexOf('path.startsWith(\'/api/v1\')'))
+    expect(call).toBeGreaterThan(middleware.indexOf('getGuestSession(event)'))
+  })
+
+  it('does not let a logistics planner row outrank the handler that refused it', () => {
+    // `assertParticipant` deliberately does not count `logistics` as planner
+    // standing, and the host surface refuses it an expense write. If the audit
+    // counted it, the log would call the caller a planner for the very request
+    // the handler answered as a participant — or refused outright.
+    expect(middleware).toMatch(/role !== 'logistics'/)
+    const permissions = readFileSync(join(ROOT, 'server', 'domain', 'permissions.ts'), 'utf8')
+    expect(permissions).toMatch(/export async function findPlannerRoleBySlug/)
+    // …and the lookup must hand the ROLE back rather than a boolean, or the
+    // exclusion above has nothing to test.
+    expect(permissions).toMatch(/findPlannerRoleBySlug\([^)]*\): Promise<PlannerRole \| null>/)
+  })
+
+  it('never calls a session a participant of an event the path does not name', () => {
+    // There is no mutating /api/me route without a slug today. The day one
+    // arrives (`PATCH /api/me/profile`), `participant` would be a claim about
+    // an event that is not in the request.
+    expect(ACTOR_KINDS).toContain('account')
+    expect(middleware).toMatch(/if \(!slug\) return 'account'/)
+  })
+
+  it('the admin filter and the audit page know every kind there is', () => {
+    // A kind missing from any of the three is a category the owner silently
+    // cannot see, or one that silently wears somebody else's badge.
+    const route = readFileSync(join(ROOT, 'server', 'api', 'admin', 'audit', 'index.get.ts'), 'utf8')
+    for (const kind of ACTOR_KINDS) expect(route).toContain(`'${kind}'`)
+
+    const page = readFileSync(join(ROOT, 'app', 'pages', 'admin', 'audit.vue'), 'utf8')
+    const items = /const ACTOR_ITEMS = \[([\s\S]*?)\n\]/.exec(page)?.[1] ?? ''
+    for (const kind of ACTOR_KINDS) expect(items).toContain(`value: '${kind}'`)
+
+    // The badge map falls back to `primary`, which is the PLANNER's colour — so
+    // a kind missing here reads as a planner at a glance, which is the exact
+    // failure this whole change exists to fix.
+    const colors = /const ACTOR_COLORS[^=]*= \{([\s\S]*?)\n\}/.exec(page)?.[1] ?? ''
+    expect(colors).not.toBe('')
+    for (const kind of ACTOR_KINDS) expect(colors).toContain(`${kind}:`)
+  })
+
   it('the machine surface audits itself, from its own credential', () => {
     const src = readFileSync(join(ROOT, 'server', 'utils', 'service-auth.ts'), 'utf8')
     expect(src).toMatch(/recordAudit/)
