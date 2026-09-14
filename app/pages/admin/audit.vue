@@ -59,6 +59,7 @@ const ACTOR_ITEMS = [
   { label: 'Owner', value: 'owner' },
   { label: 'Planner', value: 'planner' },
   { label: 'Participant', value: 'participant' },
+  { label: 'Account (no event)', value: 'account' },
   { label: 'Guest', value: 'guest' },
   { label: 'Enterprise', value: 'service' },
   { label: 'Unauthenticated', value: 'anonymous' }
@@ -73,6 +74,7 @@ const ACTOR_COLORS: Record<string, 'primary' | 'secondary' | 'info' | 'neutral'>
   owner: 'primary',
   planner: 'primary',
   participant: 'secondary',
+  account: 'secondary',
   guest: 'primary',
   service: 'info',
   anonymous: 'neutral'

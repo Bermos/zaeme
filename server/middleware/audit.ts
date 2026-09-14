@@ -53,11 +53,22 @@ const SURFACES: Array<{ prefix: string, surface: AuditSurface }> = [
  *    pays, and only on this surface.
  *
  * `participant` is therefore "a signed-in account, on `/api/me`, holding no
- * planner row on the event it touched". That includes an account with no
+ * planner standing on the event it touched". That includes an account with no
  * standing at all, whose request is about to be refused — and rightly so: the
  * kind records what the caller was, and `status` records that they were sent
  * away. Resolving it any further would mean re-deciding access in the audit,
  * which is the one place that must never have an opinion about it.
+ *
+ * `logistics` is NOT planner standing here, and the exclusion is the whole
+ * point rather than a detail: `assertParticipant` deliberately refuses to count
+ * it (`server/domain/permissions.ts`), and the host surface refuses it an
+ * expense write. If the audit called it `planner` the log would contradict the
+ * handler that decided the very same request — the same class of untruth #51
+ * exists to remove, pointing the other way.
+ *
+ * A `/api/me` path that names NO event gets `account`: there is no such
+ * mutating route today, and the day somebody adds one (`PATCH /api/me/profile`)
+ * "participant" would be a claim about an event that is not in the request.
  */
 async function resolveSessionActorKind(
   surface: AuditSurface,
@@ -68,8 +79,10 @@ async function resolveSessionActorKind(
   if (surface !== 'me') return 'planner'
 
   const slug = eventSlugFromPath(path)
-  if (!slug) return 'participant'
-  return (await findPlannerRoleBySlug(slug, userId).catch(() => null)) ? 'planner' : 'participant'
+  if (!slug) return 'account'
+
+  const role = await findPlannerRoleBySlug(slug, userId).catch(() => null)
+  return role && role !== 'logistics' ? 'planner' : 'participant'
 }
 
 /** The invite whose capability URL this is — `/api/invites/<token>/…`. */

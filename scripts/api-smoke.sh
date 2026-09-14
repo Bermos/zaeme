@@ -103,6 +103,15 @@ equals() {
 # `finish` hook, AFTER the body is on the wire, so a read issued straight
 # afterwards can legitimately beat it. Poll briefly rather than sleep blindly,
 # and return whatever the last read said so a failure still prints something.
+#
+# ⚠️ THE NEEDLE MUST BE SOMETHING ONLY AN `entries` ROW CAN CARRY.
+# `GET /api/admin/audit` answers `{entries, summary}` and `summariseAudit` is
+# UNFILTERED: `summary.bySurface` always contains `{"surface":"me",…}` and
+# `summary.byActor` always contains `{"actorKind":"participant",…}` however
+# narrow the query string is — a filter matching nothing at all still returns
+# them beside `entries: []`. A needle drawn from either satisfies the FIRST
+# read, so the poll never polls and the assertion that follows never fails.
+# Use `"path":"…"` or `"actorLabel":"…"`, which appear in no summary.
 audit_await() {
   local url="$1" needle="$2" out=''
   local i=0
@@ -403,34 +412,44 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}
   body "${JSON[@]}" -X POST "$BASE/api/invites/$ATOK/rsvp" \
     -d "{\"status\":\"yes\",\"guestName\":\"CI Guest\",\"guestEmail\":\"$GEMAIL\"}" > /dev/null
 
+  # Each read below is filtered by `actorKind` AND `surface` AND `eventSlug`, so
+  # any row that comes back in `entries` is BY CONSTRUCTION of the kind asked
+  # for — which is what lets the assertions match on identity (`actorLabel`,
+  # `path`) and still prove the kind. They must match on identity: see the
+  # warning on `audit_await`, the summary beside `entries` names every kind and
+  # every surface unconditionally.
+  OEMAIL=$(body "${OWNER_COOKIE[@]}" "$BASE/api/auth/get-session" | grep -o '"email":"[^"]*"' | head -1 | sed 's/^"email":"//;s/"$//')
+
   # No planner row on this trip, an RSVP and nothing else — which is exactly the
   # caller #48 created and #51 was mislabelling.
   check "a participant with an RSVP may write an expense" 200 "${GUEST[@]}" "${JSON[@]}" \
     -X POST "$BASE/api/me/events/$ATRIP/expenses" -d "$NEW"
-  APART=$(audit_await "$BASE/api/admin/audit?actorKind=participant&surface=me&eventSlug=$ATRIP&limit=10" '"actorKind":"participant"')
-  contains "...and the audit files it as a participant" "$APART" '"actorKind":"participant"'
+  APART=$(audit_await "$BASE/api/admin/audit?actorKind=participant&surface=me&eventSlug=$ATRIP&limit=10" \
+    "\"path\":\"/api/me/events/$ATRIP/expenses\"")
+  contains "...and the audit files it as a participant" "$APART" "\"path\":\"/api/me/events/$ATRIP/expenses\""
   contains "...against the account that wrote it"       "$APART" "\"actorLabel\":\"$GEMAIL\""
 
   # …and a NON-owner who really does plan the event is still a planner on the
-  # same surface. This is the half that the cheap fix — labelling all of
-  # /api/me `participant` — would have got wrong, so it is asserted rather than
-  # assumed. The second account plans its own trip, which is the only way to
-  # come by a planner row without being the instance owner.
+  # same surface. The second account plans its own trip, which is the only way
+  # to come by a planner row without being the instance owner.
   GTRIP=$(body "${GUEST[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events" \
     -d "{\"title\":\"Smoke guest trip $SUFFIX\",\"type\":\"trip\"}" \
     | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
   body "${GUEST[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$GTRIP/status" -d '{"status":"published"}' > /dev/null
   check "a planner who is not the owner may write there too" 200 "${GUEST[@]}" "${JSON[@]}" \
     -X POST "$BASE/api/me/events/$GTRIP/expenses" -d "$NEW"
-  APLAN=$(audit_await "$BASE/api/admin/audit?actorKind=planner&surface=me&eventSlug=$GTRIP&limit=10" '"surface":"me"')
+  APLAN=$(audit_await "$BASE/api/admin/audit?actorKind=planner&surface=me&eventSlug=$GTRIP&limit=10" \
+    "\"actorLabel\":\"$GEMAIL\"")
   contains "...and the audit still calls them a planner" "$APLAN" "\"actorLabel\":\"$GEMAIL\""
 
   # …while the same surface, written by the instance owner, is still the owner's.
-  # Labelling the whole of /api/me `participant` would have passed the check
-  # above and broken this one.
+  # These three together are what make the per-request decision falsifiable:
+  # labelling the whole of /api/me one way breaks the planner read and this one,
+  # and resolving nobody breaks the participant read.
   body "${OWNER_COOKIE[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$ATRIP/expenses" -d "$NEW" > /dev/null
-  AOWN=$(audit_await "$BASE/api/admin/audit?actorKind=owner&surface=me&eventSlug=$ATRIP&limit=10" '"surface":"me"')
-  contains "...and the owner's own write is still the owner's" "$AOWN" '"surface":"me"'
+  AOWN=$(audit_await "$BASE/api/admin/audit?actorKind=owner&surface=me&eventSlug=$ATRIP&limit=10" \
+    "\"actorLabel\":\"$OEMAIL\"")
+  contains "...and the owner's own write is still the owner's" "$AOWN" "\"actorLabel\":\"$OEMAIL\""
 else
   echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
 fi
