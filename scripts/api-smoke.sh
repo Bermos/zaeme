@@ -285,6 +285,54 @@ tl_titles() { printf '%s' "$1" | grep -o '"title":"[^"]*"' | sed 's/^"title":"//
 tl_orders() { printf '%s' "$1" | grep -o '"sortOrder":[0-9-]*' | sed 's/^"sortOrder"://' | tr '\n' ' ' | sed 's/ $//'; }
 tl_ids()    { printf '%s' "$1" | grep -o '"id":"[^"]*"' | sed 's/^"id":"//;s/"$//' | tr '\n' ' ' | sed 's/ $//'; }
 
+# `geocode_shape <body>` (#32) — "well-formed", or what is wrong with it.
+#
+# A GEOCODER IS SOMEBODY ELSE'S SERVER and this suite runs in CI, so no check
+# here may depend on Nominatim answering: a `contains '"name":"Ponte'` would
+# redden this branch on the afternoon OpenStreetMap is having a bad time, or
+# whenever the runner's address is one Nominatim declines to serve. What CAN be
+# asserted unconditionally is that the answer is one of the two shapes this
+# feature promises, and that whichever one arrived is INTERNALLY HONEST:
+#
+#   * `unavailable` carries a reason and NO results — "search is unavailable,
+#     type the name", never a silently empty list that reads as "no matches";
+#   * `ok` carries no reason, and every result is a place this app could
+#     actually store: a name, coordinates on the planet at the six decimals
+#     `numeric(9, 6)` holds, and an OSM reference that is both or neither.
+#
+# So when the geocoder IS reachable this validates every result it sent, and
+# when it is not it validates the degrade path — and a dead zäme reads as
+# `unparseable` rather than as a clean bill of health.
+geocode_shape() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      if (b.status !== "ok" && b.status !== "unavailable") return process.stdout.write("no-status")
+      if (!Array.isArray(b.results)) return process.stdout.write("no-results-array")
+      if (typeof b.attribution !== "string" || !b.attribution) return process.stdout.write("no-attribution")
+      if (b.status === "unavailable") {
+        if (!b.reason) return process.stdout.write("unavailable-without-a-reason")
+        if (b.results.length) return process.stdout.write("unavailable-with-results")
+        if (b.cached !== false) return process.stdout.write("unavailable-but-cached")
+        return process.stdout.write("well-formed")
+      }
+      if (b.reason !== null) return process.stdout.write("ok-with-a-reason")
+      for (const r of b.results) {
+        if (typeof r.name !== "string" || !r.name.trim()) return process.stdout.write("result-with-no-name")
+        if (!Number.isFinite(r.lat) || !Number.isFinite(r.lng)) return process.stdout.write("result-with-no-position")
+        if (Math.abs(r.lat) > 90 || Math.abs(r.lng) > 180) return process.stdout.write("result-off-the-planet")
+        for (const v of [r.lat, r.lng]) {
+          const dp = String(v).split(".")[1]?.length ?? 0
+          if (dp > 6) return process.stdout.write("result-finer-than-the-column")
+        }
+        if ((r.osmType === null) !== (r.osmId === null)) return process.stdout.write("result-with-half-an-osm-reference")
+      }
+      process.stdout.write("well-formed")
+    })'
+}
+
 AUTH=(-H "Authorization: Bearer $TOKEN" -H "x-mcp-user: $OWNER")
 # The four provenance headers Enterprise stamps. zäme does nothing with them
 # yet; accepting them without erroring is what keeps the lineage option open.
@@ -1298,6 +1346,164 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # place twice is refused by `insertLeg` whatever the event's status is, and
   # would prove nothing about the gate.
   check "a CANCELLED trip takes no leg from a guest" 403 "${JSON[@]}" -X POST "$GLEGS" -d "{\"fromPlaceId\":\"$PID3\",\"toPlaceId\":\"$PID4\",\"mode\":\"walk\"}"
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
+
+echo
+echo "== searching for a place instead of typing its name (Bermos/zaeme#32) =="
+# Typing latitudes by hand is not a feature anyone uses, so a planner searches
+# and clicks. What is EXECUTED here is everything that is not decidable from the
+# source: the credential (this route is the host session's and nothing else),
+# the refusals, the normalisation end to end, and the uniqueness rule #30
+# deferred and this issue answered — one OSM feature is one place per event,
+# which is a partial unique index and therefore a statement Postgres runs.
+#
+# NOT ONE CHECK HERE DEPENDS ON NOMINATIM ANSWERING, and that is deliberate
+# rather than timid: this suite runs in CI, from a runner whose address a public
+# geocoder may decline to serve, and a red build that means "OpenStreetMap is
+# busy" teaches everybody to ignore it. `geocode_shape` is what makes that
+# honest — it validates the results when they arrive and the degrade envelope
+# when they do not, and either way it fails on a zäme that answered rubbish.
+# `test/geocode.test.ts` holds the cache policy, the rate limiter and the three
+# failure modes, none of which touch the network either.
+GEOTRIP32=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke search $SUFFIX\",\"type\":\"trip\"}")
+GSLUG32=$(printf '%s' "$GEOTRIP32" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$GSLUG32/status" -d '{"status":"published"}' > /dev/null
+GTOK32=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$GSLUG32/invites" -d '{"label":"Search smoke"}' \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+OTHER32=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke search elsewhere $SUFFIX\",\"type\":\"trip\"}")
+OSLUG32=$(printf '%s' "$OTHER32" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+HSEARCH="$BASE/api/host/events/$GSLUG32/places/search"
+HREVERSE="$BASE/api/host/events/$GSLUG32/places/reverse"
+HPLACES32="$BASE/api/host/events/$GSLUG32/places"
+echo "  trip: $GSLUG32"
+
+check "a place search needs a session"            401 "$HSEARCH?q=lisbon"
+check "...and a service token is not one"         401 "${AUTH[@]}" "$HSEARCH?q=lisbon"
+check "naming a pin needs one too"                401 "$HREVERSE?lat=38.68944&lng=-9.17722"
+# THE DECISION TAKEN AGAINST THE ISSUE'S WORDING, executed. #32 offers this to
+# the invite capability URL as well; it is a link that gets forwarded into group
+# chats, and a third-party proxy behind it hands everyone it reaches the ability
+# to drive queries under this instance's identifying User-Agent — which is how
+# an instance gets blocked, for an audience nobody can count. A guest cannot
+# create a place either (#30), so there is nothing for them to do with a result.
+check "the link cannot search for a place"        404 "$BASE/api/invites/$GTOK32/places/search?q=lisbon"
+check "...nor name a pin over it"                 404 "$BASE/api/invites/$GTOK32/places/reverse?lat=38.7&lng=-9.1"
+# And not on the machine API: a third-party dependency inside the contract
+# Enterprise generates its tools from is a verb nobody decided to hand the model.
+check "the geocoder is not on the machine API"    404 "${AUTH[@]}" "$API/events/$GSLUG32/places/search?q=lisbon"
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  PLN32=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+
+  # THE REFUSALS. 400 is the zod schema (there was no query at all); 422 is the
+  # domain having read it. "Type more" is deliberately NOT an empty result list:
+  # an empty list means "there is no such place", which is a different sentence.
+  check "a search with no query at all"           400 "${PLN32[@]}" "$HSEARCH"
+  check "a one-character search"                  422 "${PLN32[@]}" "$HSEARCH?q=z"
+  contains "...and says to type more"                  "$(body "${PLN32[@]}" "$HSEARCH?q=z")" 'Type at least 2 characters'
+  # The OPPOSITE advice, and it used to be the same sentence: 161 characters is
+  # past what the domain will key, and "type at least 2 characters" is the one
+  # thing that cannot help whoever pasted a paragraph into the box.
+  LONG32=$(printf 'x%.0s' $(seq 1 170))
+  check "a search longer than a place name"       422 "${PLN32[@]}" --get --data-urlencode "q=$LONG32" "$HSEARCH"
+  contains "...and says to shorten it instead"         "$(body "${PLN32[@]}" --get --data-urlencode "q=$LONG32" "$HSEARCH")" 'at most 160 characters'
+  check "a pin that is not on the planet"         422 "${PLN32[@]}" "$HREVERSE?lat=91&lng=0"
+  check "half a pin"                              422 "${PLN32[@]}" "$HREVERSE?lat=38.68944&lng="
+  contains "...says both or neither, like a place"     "$(body "${PLN32[@]}" "$HREVERSE?lat=38.68944&lng=")" 'both a latitude and a longitude'
+
+  # THE ACCEPTANCE CRITERION'S OWN QUERY. What is asserted of it unconditionally
+  # is the shape and the NORMALISATION — "  Ponte  25 DE Abril " and "ponte 25
+  # de abril" are one question, and the echoed query is what proves the folding
+  # ran on the way to the cache key rather than only in a unit test.
+  S1=$(body "${PLN32[@]}" "$HSEARCH?q=%20%20Ponte%20%2025%20DE%20Abril%20")
+  check "a place search always answers"           200 "${PLN32[@]}" "$HSEARCH?q=Ponte+25+de+Abril"
+  equals "...in one of the two shapes it promises" "$(geocode_shape "$S1")" "well-formed"
+  contains "...echoing the query as it was keyed"      "$S1" '"query":"ponte 25 de abril"'
+  contains "...naming the geocoder that answered"      "$S1" '"provider":"nominatim"'
+  contains "...and the attribution OSM data needs"     "$S1" 'OpenStreetMap contributors'
+
+  # THE CACHE, on a query NOTHING has ever asked — this suite re-runs against
+  # the database the last run left behind, and "Ponte 25 de Abril" may well be
+  # in the cache table already, which would make a `"cached":false` assertion on
+  # it pass exactly once per Postgres.
+  NEW32="smoke nowhere $SUFFIX"
+  C1=$(body "${PLN32[@]}" --get --data-urlencode "q=$NEW32" "$HSEARCH")
+  C2=$(body "${PLN32[@]}" --get --data-urlencode "q=$NEW32" "$HSEARCH")
+  ST1=$(printf '%s' "$C1" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+  CACHED1=$(printf '%s' "$C1" | sed -n 's/.*"cached":\([a-z]*\).*/\1/p')
+  CACHED2=$(printf '%s' "$C2" | sed -n 's/.*"cached":\([a-z]*\).*/\1/p')
+  equals "a question never asked is not a cache hit" "$CACHED1" "false"
+  # A SUCCESSFUL answer is kept and a FAILED one never is, which is the same
+  # rule read from either side: caching "we could not ask" would turn a
+  # thirty-second outage into a thirty-day one. Written as a derived
+  # expectation rather than a conditional, so this check runs — and can fail —
+  # whether or not the geocoder was reachable from wherever this is running.
+  if [ "$ST1" = "ok" ]; then WANT32=true; else WANT32=false; fi
+  equals "...and is answered from the cache next time" "$CACHED2" "$WANT32"
+
+  # REVERSE. The key is the pin ROUNDED to about a metre, and the same point
+  # typed to seven decimals is the same question — otherwise every pin is its
+  # own cache row and the cache never hits at all.
+  R1=$(body "${PLN32[@]}" "$HREVERSE?lat=38.68944&lng=-9.17722")
+  check "a dropped pin can be named"              200 "${PLN32[@]}" "$HREVERSE?lat=38.68944&lng=-9.17722"
+  equals "...in one of the two shapes as well"    "$(geocode_shape "$R1")" "well-formed"
+  contains "...keyed on the pin, not on a name"        "$R1" '"query":"38.68944,-9.17722"'
+  contains "...and a finer pin is the same question"   "$(body "${PLN32[@]}" "$HREVERSE?lat=38.6894441&lng=-9.1772221")" '"query":"38.68944,-9.17722"'
+
+  # THREE PLANNERS AT ONCE. The rate limiter is a queue in one process, so the
+  # thing worth executing is that it neither deadlocks nor 500s when three
+  # requests are genuinely in flight together — which no unit test with a fake
+  # clock can say anything about.
+  BURST32=$(mktemp -d)
+  for n in 1 2 3; do
+    curl -s -o /dev/null -w '%{http_code}' "${PLN32[@]}" --get \
+      --data-urlencode "q=smoke burst $n $SUFFIX" "$HSEARCH" > "$BURST32/$n" &
+  done
+  wait
+  equals "three searches at once all answer"      "$(cat "$BURST32/1" "$BURST32/2" "$BURST32/3" | tr -d '\n')" "200200200"
+  rm -rf "$BURST32"
+
+  # ONE OSM FEATURE IS ONE PLACE PER EVENT — #30 left this open and #32 closed
+  # it. The rule is a PARTIAL unique index (`where osm_id is not null`), so both
+  # halves need executing: the same feature twice is refused, and hand-typed
+  # places with no reference at all are not touched by it however many there are.
+  BRIDGE32='"lat":"38.689444","lng":"-9.177222","osmType":"way","osmId":"4306103"'
+  MATCHED=$(body "${PLN32[@]}" "${JSON[@]}" -X POST "$HPLACES32" -d "{\"name\":\"Ponte 25 de Abril\",$BRIDGE32}")
+  contains "a searched place records what it matched"  "$MATCHED" '"osmType":"way","osmId":"4306103"'
+  contains "...with the coordinates it came back with" "$MATCHED" '"lat":38.689444,"lng":-9.177222'
+  check "the same feature twice is refused"       409 "${PLN32[@]}" "${JSON[@]}" -X POST "$HPLACES32" -d "{\"name\":\"The bridge again\",$BRIDGE32}"
+  contains "...naming the place already there"         "$(body "${PLN32[@]}" "${JSON[@]}" -X POST "$HPLACES32" -d "{\"name\":\"The bridge again\",$BRIDGE32}")" 'Ponte 25 de Abril is already on this trip'
+  check "half an OSM reference is refused"        422 "${PLN32[@]}" "${JSON[@]}" -X POST "$HPLACES32" -d '{"name":"Half a reference","osmId":"4306103"}'
+  contains "...and says both or neither"               "$(body "${PLN32[@]}" "${JSON[@]}" -X POST "$HPLACES32" -d '{"name":"Half a reference","osmId":"4306103"}')" 'both an OpenStreetMap type and id'
+  # The other half of the rule, executed: two hand-typed places with no
+  # reference at all are not duplicates of each other. That is the ordinary case
+  # and the one a uniqueness rule is most likely to break — a domain check that
+  # forgot to return early on a null reference refuses the second of these.
+  check "a hand-typed place needs no reference"   201 "${PLN32[@]}" "${JSON[@]}" -X POST "$HPLACES32" -d '{"name":"Ana flat"}'
+  check "...and a second one is not a duplicate"  201 "${PLN32[@]}" "${JSON[@]}" -X POST "$HPLACES32" -d '{"name":"The usual spot"}'
+  # The rule is PER EVENT: another trip may pin the same bridge.
+  check "another trip may match the same feature" 201 "${PLN32[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$OSLUG32/places" -d "{\"name\":\"Ponte 25 de Abril\",$BRIDGE32}"
+  # …and an EDIT is the second writer of that pair, which is the half a rule
+  # applied only on the add would leave open.
+  FLAT32=$(place_id "$(body "${PLN32[@]}" "$HPLACES32")" "Ana flat")
+  check "an edit cannot take another place's feature" 409 "${PLN32[@]}" "${JSON[@]}" -X PATCH "$HPLACES32/$FLAT32" -d "{$BRIDGE32}"
+  # …AND A PLACE IS NOT A DUPLICATE OF ITSELF. The self-exclusion in
+  # `assertOsmRefFree` is the one line that makes the edit branch usable at all,
+  # and nothing else here can see it: replacing the `find` with `rows[0]` leaves
+  # every other check in this suite and every unit test green, while every save
+  # of a geocoded place 409s against itself.
+  BRIDGEID32=$(place_id "$(body "${PLN32[@]}" "$HPLACES32")" "Ponte 25 de Abril")
+  check "a geocoded place may be saved again"     200 "${PLN32[@]}" "${JSON[@]}" -X PATCH "$HPLACES32/$BRIDGEID32" -d "{\"name\":\"Ponte 25 de Abril\",$BRIDGE32}"
+  contains "...and still holds the feature after"      "$(body "${PLN32[@]}" "$HPLACES32")" '"osmType":"way","osmId":"4306103"'
+  check "...while a place keeps its own on a rename" 200 "${PLN32[@]}" "${JSON[@]}" -X PATCH "$HPLACES32/$FLAT32" -d '{"name":"Ana upstairs flat"}'
+  KEPT=$(body "${PLN32[@]}" "$HPLACES32")
+  contains "the renamed place is still on the trip"    "$KEPT" '"name":"Ana upstairs flat"'
+  # A PLACE WITH NO COORDINATES STAYS A FIRST-CLASS STATE (#30): nothing in this
+  # issue is on the path of adding one, and the form works with the geocoder
+  # unreachable because that is still the only way a place is written.
+  contains "...and still has no coordinates at all"    "$KEPT" '"name":"Ana upstairs flat","address":null,"lat":null,"lng":null'
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
 fi

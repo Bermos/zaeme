@@ -129,11 +129,43 @@ concurrency:
 # capability URL must NOT carry (a place's note, its postal address) has no
 # `contains` that can state it. 278 -> 337.
 #
+# #32 lets a planner SEARCH for a place rather than typing its latitude, and
+# adds 37. Not one of them depends on Nominatim answering, which is the whole
+# difficulty: this job runs from a runner whose address a public geocoder may
+# decline to serve, and a red build meaning "OpenStreetMap is busy" teaches
+# everybody to ignore a red build. So `geocode_shape` asserts the answer is one
+# of the two shapes the feature promises and that whichever arrived is honest —
+# results with a name, coordinates on the planet at the six decimals the column
+# holds, and an OSM reference that is both or neither, or else an `unavailable`
+# carrying a reason and NO results, which is the degrade path itself. The cache
+# check is written the same way: a successful answer must be cached next time
+# and a failed one must never be, derived from what the first answer was rather
+# than as a conditional that would silently stop running.
+#
+# The rest are things no unit test can reach. The route is the HOST SESSION's
+# and the invite link 404s on it — the decision taken against this issue's own
+# wording, because a capability URL gets forwarded and a third-party proxy
+# behind one hands an uncountable audience the ability to drive queries under
+# this instance's identifying User-Agent. And #30's open question, answered:
+# one OSM feature is one place per event, which is a PARTIAL unique index, so
+# both halves are executed — the same bridge twice is a 409 naming the place
+# already there, on the edit as well as on the add, while two hand-typed places
+# with no reference at all are not duplicates of each other — the ordinary case,
+# and the one a uniqueness rule is most likely to break.
+#
+# Four of the 41 came out of the review, and two are worth naming. A geocoded
+# place saved again with its OWN reference must answer 200: the self-exclusion
+# in `assertOsmRefFree` is one `find` predicate, replacing it with `rows[0]`
+# left every unit test and every other check here green while making every save
+# of a searched place 409 against itself. And a 170-character query is refused
+# with the OPPOSITE advice to a one-character one — they shared a sentence, so
+# whoever pasted a paragraph was told to type at least two characters. 337 -> 378.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '337'
+  MIN_SMOKE_CHECKS: '378'
 
 jobs:
   ci:
@@ -289,6 +321,17 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
+      # THE SMOKE SUITE SENDS OPENSTREETMAP NOTHING (#32). The place-search
+      # checks salt their queries per run on purpose, so the cache cannot spare
+      # the request — which is the right way to test a cache and the wrong
+      # thing to point at somebody else's public service twice per CI run, from
+      # a shared runner address, under the same `zaeme/1.0` User-Agent prefix a
+      # real deployment sends. A block earned here is a block served to the
+      # owner's instance. `scripts/geocoder-stub.mjs` answers instead, in
+      # Nominatim's own shape, so everything between the route and the socket
+      # is still the real thing. Unset — which is every real instance — means
+      # Nominatim; see `geocoderBase` in server/domain/geocode.ts.
+      ZAEME_GEOCODER_URL: http://127.0.0.1:3333
       # MIN_SMOKE_CHECKS is set once at the top of this file, for this job and
       # for `upgrade` together.
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
@@ -330,6 +373,24 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      # The stub the two `ZAEME_GEOCODER_URL` above point at. Booted before
+      # anything that could search, and WAITED FOR rather than assumed: if it
+      # were not up, the app would degrade to "search is unavailable" and every
+      # shape assertion would still pass — green, and proving the outage path
+      # twice instead of the feature.
+      - name: Boot the geocoder stub
+        run: |
+          nohup node scripts/geocoder-stub.mjs > geocoder-stub.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS "$ZAEME_GEOCODER_URL/healthz" > /dev/null; then
+              echo "the geocoder stub is up on $ZAEME_GEOCODER_URL"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the geocoder stub never answered at $ZAEME_GEOCODER_URL"
+          cat geocoder-stub.log
+          exit 1
 
       - name: Wait for object storage
         run: |
@@ -474,6 +535,11 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
+      # See `api`: the geocoder is a stub here too, so neither release booted by
+      # this job sends a live request. The previous release ignores it (#32 is
+      # what introduced the variable), which is exactly what "anything added
+      # there belongs here" is for.
+      ZAEME_GEOCODER_URL: http://127.0.0.1:3333
 
     steps:
       - name: Checkout
@@ -549,6 +615,24 @@ jobs:
       - name: Build the previous release
         working-directory: ${{ runner.temp }}/previous
         run: pnpm build
+
+      # The stub the two `ZAEME_GEOCODER_URL` above point at. Booted before
+      # anything that could search, and WAITED FOR rather than assumed: if it
+      # were not up, the app would degrade to "search is unavailable" and every
+      # shape assertion would still pass — green, and proving the outage path
+      # twice instead of the feature.
+      - name: Boot the geocoder stub
+        run: |
+          nohup node scripts/geocoder-stub.mjs > geocoder-stub.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS "$ZAEME_GEOCODER_URL/healthz" > /dev/null; then
+              echo "the geocoder stub is up on $ZAEME_GEOCODER_URL"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the geocoder stub never answered at $ZAEME_GEOCODER_URL"
+          cat geocoder-stub.log
+          exit 1
 
       - name: Wait for object storage
         run: |

@@ -215,9 +215,21 @@ export const timelineItem = pgTable('events_timeline_item', {
  *
  * `osm_type`/`osm_id` are where a geocoded place records WHAT IT MATCHED, so
  * #32 can tell "we looked this up" from "somebody typed it". Both null on a
- * hand-typed place. They are deliberately NOT unique per event: whether
- * looking up the same café twice is a duplicate to be merged or two pins the
- * group meant is #32's decision, not this one's.
+ * hand-typed place, and never one of them — same discipline as the coordinate
+ * pair, and the unique index below needs it: Postgres counts two NULLs as
+ * distinct, so a row with an `osm_id` and no `osm_type` would slip past the
+ * uniqueness this event is supposed to have.
+ *
+ * #30 left "is the same café twice a duplicate" open and #32 ANSWERED IT: one
+ * OSM feature is one place per event, enforced by a partial unique index below.
+ * A group that wants two pins on one building names the second one itself (a
+ * hand-typed place has no OSM reference and is therefore never in the index),
+ * which is the case that actually happens — "the hotel" and "the hotel bar" are
+ * both the same `way` to OpenStreetMap and two different places to the people
+ * going. What the index refuses is the accident: searching for the station
+ * twice in a week and ending up with two pins at the same coordinates, which
+ * #33's clustering would then draw on top of each other and every leg would
+ * have to guess between.
  *
  * WHY `numeric(9, 6)` AND NOT A FLOAT OR A STRING. Six decimal places is about
  * 11 cm at the equator — far finer than anything a trip planner needs, and the
@@ -265,7 +277,29 @@ export const place = pgTable('events_place', {
   // place, including a pure rename, while the screen says "no coordinates yet"
   // and explains nothing. One line on an empty table now, a data-cleanup
   // migration later.
-  check('events_place_coordinates_pair', sql`(lat is null) = (lng is null)`)
+  check('events_place_coordinates_pair', sql`(lat is null) = (lng is null)`),
+  // BOTH OR NEITHER for the OSM reference too (#32). An `osm_id` without an
+  // `osm_type` does not identify anything — node 12345, way 12345 and relation
+  // 12345 are three different features — and it would also be invisible to the
+  // unique index below, since Postgres treats the NULL `osm_type` as distinct
+  // from every other. `normaliseOsmRef` refuses the half in the domain; this is
+  // what keeps it true of a row written any other way.
+  check('events_place_osm_ref_pair', sql`(osm_type is null) = (osm_id is null)`),
+  // ONE OSM FEATURE, ONE PLACE PER EVENT (#32) — the decision #30 deferred.
+  // PARTIAL, on `osm_id is not null`, because the rule is only about places
+  // that were looked up: a trip may have as many hand-typed places as it likes
+  // and every one of them has a NULL reference. Postgres counts two NULLs as
+  // distinct by default, so an index without the predicate would permit the
+  // same rows today — the predicate states which rows the rule is about, keeps
+  // the index to those, and is what stops a future `NULLS NOT DISTINCT`
+  // rebuild from refusing a trip its second hand-typed place.
+  // `addPlaceAsPlanner` and
+  // `updatePlaceAsPlanner` refuse a duplicate as a sentence naming the place
+  // that is already there; this is the backstop for two planners searching the
+  // same café at the same moment, which no read-then-write can catch.
+  uniqueIndex('events_place_event_osm_unique')
+    .on(table.eventId, table.osmType, table.osmId)
+    .where(sql`osm_id is not null`)
 ])
 
 /**

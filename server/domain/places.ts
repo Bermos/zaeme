@@ -114,6 +114,71 @@ export function normaliseCoordinates(
   }
 }
 
+/* ------------------------------ the OSM reference ------------------------- */
+
+/**
+ * WHAT A GEOCODED PLACE MATCHED — both or neither, like the coordinates.
+ *
+ * An `osm_id` without an `osm_type` identifies nothing: node 12345, way 12345
+ * and relation 12345 are three different features. It is also invisible to the
+ * unique index that makes one OSM feature one place per event (#32), because
+ * Postgres counts its NULL `osm_type` as distinct from every other — so half a
+ * reference would quietly opt a row out of the very rule it looks like it is
+ * subject to.
+ *
+ * Pure, and exported for the same reason `normaliseCoordinates` is: it is a
+ * rule, and a rule this small should not need a booted server to be shown
+ * wrong.
+ */
+export function normaliseOsmRef(
+  osmType: OsmType | null | undefined,
+  osmId: string | null | undefined
+): { osmType: OsmType | null, osmId: string | null } {
+  const hasType = osmType !== null && osmType !== undefined
+  const hasId = osmId !== null && osmId !== undefined && `${osmId}`.trim() !== ''
+  if (!hasType && !hasId) return { osmType: null, osmId: null }
+  if (!hasType || !hasId) {
+    throw createError({
+      statusCode: 422,
+      message: 'A place needs both an OpenStreetMap type and id, or neither'
+    })
+  }
+  return { osmType: osmType!, osmId: `${osmId}`.trim() }
+}
+
+/**
+ * ONE OSM FEATURE IS ONE PLACE PER EVENT (#32), refused here as a sentence
+ * naming the place already there rather than as a 23505 from the driver.
+ *
+ * The partial unique index behind this is the backstop for the case a
+ * read-then-write cannot see — two planners choosing the same café in the same
+ * second — and this is the message everybody else gets. 409 rather than 422:
+ * nothing about the request is wrong, it conflicts with what is already on the
+ * trip, and the thing to do about it is to look at the place that is there.
+ */
+async function assertOsmRefFree(
+  eventId: string,
+  ref: { osmType: OsmType | null, osmId: string | null },
+  exceptPlaceId?: string
+): Promise<void> {
+  if (ref.osmType === null || ref.osmId === null) return
+  const rows = await useDb()
+    .select({ id: tables.place.id, name: tables.place.name })
+    .from(tables.place)
+    .where(and(
+      eq(tables.place.eventId, eventId),
+      eq(tables.place.osmType, ref.osmType),
+      eq(tables.place.osmId, ref.osmId)
+    ))
+  const clash = rows.find(r => r.id !== exceptPlaceId)
+  if (clash) {
+    throw createError({
+      statusCode: 409,
+      message: `${clash.name} is already on this trip — edit it instead of adding it twice`
+    })
+  }
+}
+
 /* --------------------------------- views ---------------------------------- */
 
 export type OsmType = 'node' | 'way' | 'relation'
@@ -313,11 +378,18 @@ export interface CreatePlaceInput {
  * that they walked between two places the group already has; minting new points
  * on the trip's map is the planners', and widening that is the owner's call
  * rather than a side effect of this issue.
+ *
+ * A place that came out of the search (#32) carries the OSM feature it matched,
+ * and one feature is one place per event: `assertOsmRefFree` is what turns the
+ * second attempt into a sentence rather than a second pin at the same
+ * coordinates.
  */
 export async function addPlaceAsPlanner(userId: string, slug: string, input: CreatePlaceInput): Promise<Geography> {
   const ev = await loadEventBySlug(slug)
   await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
   const { lat, lng } = normaliseCoordinates(input.lat, input.lng)
+  const ref = normaliseOsmRef(input.osmType, input.osmId)
+  await assertOsmRefFree(ev.id, ref)
 
   await useDb().insert(tables.place).values({
     id: createId(),
@@ -326,8 +398,8 @@ export async function addPlaceAsPlanner(userId: string, slug: string, input: Cre
     address: input.address ?? null,
     lat,
     lng,
-    osmType: input.osmType ?? null,
-    osmId: input.osmId ?? null,
+    osmType: ref.osmType,
+    osmId: ref.osmId,
     note: input.note ?? null,
     createdByUserId: userId
   })
@@ -353,6 +425,11 @@ export interface UpdatePlaceInput {
  * otherwise leave the row half-coordinated, which is the state `addPlace`
  * refuses. Sending one of the two is an error; sending both as null clears them
  * and returns the place to "somewhere we know the name of".
+ *
+ * THE OSM REFERENCE MOVES AS A PAIR FOR THE SAME REASON (#32), and is subject
+ * to the same uniqueness: giving this place the feature another place on the
+ * trip already matched is refused, with that place named. Clearing both is how
+ * a planner says "this pin is ours now, not the one the search found".
  */
 export async function updatePlaceAsPlanner(
   userId: string,
@@ -368,8 +445,12 @@ export async function updatePlaceAsPlanner(
   if (input.name !== undefined) updates.name = input.name.trim()
   if (input.address !== undefined) updates.address = input.address
   if (input.note !== undefined) updates.note = input.note
-  if (input.osmType !== undefined) updates.osmType = input.osmType
-  if (input.osmId !== undefined) updates.osmId = input.osmId
+  if (input.osmType !== undefined || input.osmId !== undefined) {
+    const ref = normaliseOsmRef(input.osmType, input.osmId)
+    await assertOsmRefFree(ev.id, ref, placeId)
+    updates.osmType = ref.osmType
+    updates.osmId = ref.osmId
+  }
   if (input.lat !== undefined || input.lng !== undefined) {
     const { lat, lng } = normaliseCoordinates(input.lat, input.lng)
     updates.lat = lat
@@ -420,6 +501,16 @@ export interface PlaceRemoval extends Geography {
  * The composite foreign keys are `restrict`, so a place still referenced by a
  * leg cannot be deleted by accident from anywhere else — the database refuses
  * it rather than this function being the only thing that remembers.
+ *
+ * REMOVING A DUPLICATE IS THEREFORE NOT A DELETE ON ITS OWN. If two places are
+ * the same spot and the one to keep is the other one, repoint every leg that
+ * ends at this one first — `updateLegAsPlanner` with `fromPlaceId`/`toPlaceId`
+ * — and then delete. Going straight to the delete does not fail: the three
+ * statements above run, and the legs that pointed here come out half-joined or
+ * gone, which is a worse record than the one you were tidying up. (#32 made
+ * duplicates from the SEARCH impossible — one OSM feature is one place per
+ * event — so the ones left to clean up are hand-typed, and nothing but a person
+ * can tell those apart.)
  */
 export async function deletePlaceAsPlanner(userId: string, slug: string, placeId: string): Promise<PlaceRemoval> {
   const ev = await loadEventBySlug(slug)
