@@ -129,11 +129,35 @@ concurrency:
 # capability URL must NOT carry (a place's note, its postal address) has no
 # `contains` that can state it. 278 -> 337.
 #
+# #32 lets a planner SEARCH for a place rather than typing its latitude, and
+# adds 37. Not one of them depends on Nominatim answering, which is the whole
+# difficulty: this job runs from a runner whose address a public geocoder may
+# decline to serve, and a red build meaning "OpenStreetMap is busy" teaches
+# everybody to ignore a red build. So `geocode_shape` asserts the answer is one
+# of the two shapes the feature promises and that whichever arrived is honest —
+# results with a name, coordinates on the planet at the six decimals the column
+# holds, and an OSM reference that is both or neither, or else an `unavailable`
+# carrying a reason and NO results, which is the degrade path itself. The cache
+# check is written the same way: a successful answer must be cached next time
+# and a failed one must never be, derived from what the first answer was rather
+# than as a conditional that would silently stop running.
+#
+# The rest are things no unit test can reach. The route is the HOST SESSION's
+# and the invite link 404s on it — the decision taken against this issue's own
+# wording, because a capability URL gets forwarded and a third-party proxy
+# behind one hands an uncountable audience the ability to drive queries under
+# this instance's identifying User-Agent. And #30's open question, answered:
+# one OSM feature is one place per event, which is a PARTIAL unique index, so
+# both halves are executed — the same bridge twice is a 409 naming the place
+# already there, on the edit as well as on the add, while two hand-typed places
+# with no reference at all are not duplicates of each other — the ordinary case,
+# and the one a uniqueness rule is most likely to break. 337 -> 374.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '337'
+  MIN_SMOKE_CHECKS: '374'
 
 jobs:
   ci:
