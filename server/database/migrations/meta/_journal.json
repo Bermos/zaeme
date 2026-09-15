@@ -50,6 +50,13 @@
       "when": 1789411969724,
       "tag": "0006_red_redwing",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789487026433,
+      "tag": "0007_useful_loa",
+      "breakpoints": true
     }
   ]
 }

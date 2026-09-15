@@ -50,6 +50,32 @@ export function assertEventOpenToGuests(ev: Pick<typeof tables.event.$inferSelec
   }
 }
 
+/**
+ * A place id may only be used by the event that owns it (#30).
+ *
+ * Two modules need this rule and neither may import the other:
+ * `events-data.ts` attaches a place to a timeline item, and `places.ts`
+ * attaches two of them to a leg. A leg's endpoints are additionally held by a
+ * composite foreign key `(event_id, place_id)`, which the database enforces
+ * whatever the code does; `events_timeline_item.place_id` cannot have one,
+ * because `on delete set null` on a composite key would null `event_id` with
+ * it. So on that path this function IS the constraint, and it answers 422
+ * rather than letting a plausible-looking id from another trip land silently.
+ *
+ * Returns the place, so a caller that needs the row does not read it twice.
+ */
+export async function assertPlaceOnEvent(eventId: string, placeId: string) {
+  const [row] = await useDb()
+    .select()
+    .from(tables.place)
+    .where(and(eq(tables.place.id, placeId), eq(tables.place.eventId, eventId)))
+    .limit(1)
+  if (!row) {
+    throw createError({ statusCode: 422, message: 'That place is not on this event' })
+  }
+  return row
+}
+
 export async function loadEventBySlug(slug: string) {
   const [row] = await useDb().select().from(tables.event).where(eq(tables.event.slug, slug)).limit(1)
   if (!row) {

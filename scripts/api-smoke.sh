@@ -87,6 +87,21 @@ contains() {
   esac
 }
 
+# `excludes <name> <haystack> <needle>` — the NEGATIVE of `contains`, for the
+# assertions that are about what a response must NOT carry. There is no way to
+# write one with `contains`, and the hand-rolled `case` blocks that used to do
+# this job (the service token on the integration page) are easy to get subtly
+# wrong and never counted as checks.
+excludes() {
+  local name="$1" haystack="$2" needle="$3"
+  case "$haystack" in
+    *"$needle"*)
+      FAIL=$((FAIL + 1)); printf '  FAIL %-58s leaked %s\n' "$name" "$needle"
+      printf '       got: %.200s\n' "$haystack" ;;
+    *) PASS=$((PASS + 1)); printf '  ok   %-58s\n' "$name" ;;
+  esac
+}
+
 # `equals <name> <got> <want>` — exact, for assertions where `contains` would
 # pass on the wrong answer (an ORDER is the obvious one: every permutation of a
 # list contains the same items).
@@ -200,6 +215,68 @@ audit_await() {
     i=$((i + 1))
   done
   printf '%s' "$out"
+}
+
+# THE MAP HELPERS (#30). A trip's places and legs come back as one object with
+# two arrays, and the questions worth asking of it are "which id is that place"
+# and "what order are the legs in" — neither of which sed can answer honestly
+# once a name contains a space. Same shape as the ledger helpers above: a
+# one-line `node -e` over the body, and a SENTINEL rather than a plausible
+# answer when it finds nothing, so a dead server cannot read as a clean bill of
+# health.
+
+# `place_id <body> <name>` — the id of the named place, or "" if there is none.
+place_id() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const p = (b.places ?? []).find(x => x.name === process.argv[1])
+      process.stdout.write(p ? p.id : "")
+    })' "$2"
+}
+
+# `leg_route <body>` — "From>To" per leg, in the order the API returned them.
+# A `?` is an endpoint whose place was deleted, which is a state this suite
+# deliberately produces.
+leg_route() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const legs = b.legs
+      if (!Array.isArray(legs)) return process.stdout.write("no-legs")
+      process.stdout.write(legs.map(l => `${l.fromPlaceName ?? "?"}>${l.toPlaceName ?? "?"}`).join(" "))
+    })'
+}
+
+# `leg_id_by_route <body> <from> <to>` — the id of the leg joining those two
+# places by name. "The last leg in the answer" would be wrong the moment the
+# order stops being creation order, which is exactly what this block tests.
+leg_id_by_route() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const l = (b.legs ?? []).find(x => x.fromPlaceName === process.argv[1] && x.toPlaceName === process.argv[2])
+      process.stdout.write(l ? l.id : "no-such-leg")
+    })' "$2" "$3"
+}
+
+# `leg_orders <body>` — the legs' sort_order values, in the same order.
+leg_orders() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const legs = b.legs
+      if (!Array.isArray(legs)) return process.stdout.write("no-legs")
+      process.stdout.write(legs.map(l => l.sortOrder).join(" "))
+    })'
 }
 
 # The three fields of an itinerary, in the order the API returned them. No jq:
@@ -994,6 +1071,235 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}
   contains "...and the owner's own write is still the owner's" "$AOWN" "\"actorLabel\":\"$OEMAIL\""
 else
   echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
+fi
+
+echo
+echo "== places, and the legs between them (Bermos/zaeme#30) =="
+# An itinerary was a sorted list of strings until now: one free-text location
+# per item, no pin, and nothing to say that the 09:14 connects two of them.
+# Everything below EXECUTES that against a real Postgres, because almost none of
+# it is decidable from the source: the delete cascade is three statements in a
+# transaction, the reorder is one `row_number()` renumbering, and the guest
+# write is a capability URL resolving to an event. `pnpm test` pins the
+# coordinate rule and the merged order, which are the only pure parts.
+#
+# BOTH SURFACES THE PRODUCT WRITES TO, deliberately (#60's lesson): the host
+# session on /api/host and the invite link on /api/invites, which are two
+# separate zod schemas and two different credentials for one feature. Proving
+# one says nothing about the other — and `isPlanned` means the OPPOSITE thing by
+# default on each, which is the pair of checks that catches a single shared
+# default.
+GEOTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke places $SUFFIX\",\"type\":\"trip\"}")
+GSLUG=$(printf '%s' "$GEOTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$GSLUG/status" -d '{"status":"published"}' > /dev/null
+GTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$GSLUG/invites" -d '{"label":"Places smoke"}' \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+# A second trip, so "a place from another trip" is a real id and not a typo.
+OTHERTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke elsewhere $SUFFIX\",\"type\":\"trip\"}")
+OSLUG3=$(printf '%s' "$OTHERTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+HPLACES="$BASE/api/host/events/$GSLUG/places"
+HLEGS="$BASE/api/host/events/$GSLUG/legs"
+echo "  trip: $GSLUG"
+
+check "a place needs a session"                  401 "${JSON[@]}" -X POST "$HPLACES" -d '{"name":"Nope"}'
+check "...and a service token is not one"        401 "${AUTH[@]}" "${JSON[@]}" -X POST "$HPLACES" -d '{"name":"Nope"}'
+# The constraint #30 says is the one most likely to be got wrong: Enterprise
+# generates its MCP tools from the contract, so a route here would be a verb
+# nobody decided to give the model. `pnpm test` asserts the spec and the route
+# tree; this asserts the running server answers nothing there.
+check "the map is not on the machine API"        404 "${AUTH[@]}" "$API/events/$GSLUG/places"
+check "...and neither are the legs"              404 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$GSLUG/legs" -d '{}'
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  PLN=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+
+  P1=$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HPLACES" -d '{"name":"Zug HB","address":"Bahnhofplatz","lat":"47.1742","lng":"8.5153"}')
+  contains "a place with coordinates"                   "$P1" '"name":"Zug HB","address":"Bahnhofplatz"'
+  # NUMBERS, not the padded strings the driver hands back for numeric(9,6) —
+  # a map takes [lat, lng] and a distance is trigonometry, so every consumer
+  # would otherwise have to remember to parse, and the one that forgot would
+  # concatenate instead of adding.
+  contains "...answered as numbers, not driver strings" "$P1" '"lat":47.1742,"lng":8.5153'
+
+  # THE STATE THIS TABLE EXISTS TO KEEP: "Ana's flat" is a place, and #32 has to
+  # be able to leave it alone.
+  P2=$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HPLACES" -d '{"name":"Hotel Bellevue"}')
+  contains "a place with NO coordinates at all"         "$P2" '"name":"Hotel Bellevue","address":null,"lat":null,"lng":null'
+  body "${PLN[@]}" "${JSON[@]}" -X POST "$HPLACES" -d '{"name":"Lakeside"}' > /dev/null
+
+  HALF='{"name":"Half","lat":"47.1"}'
+  check "half a coordinate is refused"             422 "${PLN[@]}" "${JSON[@]}" -X POST "$HPLACES" -d "$HALF"
+  contains "...and says both or neither"                "$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HPLACES" -d "$HALF")" 'both a latitude and a longitude, or neither'
+  check "a latitude that is not on the planet"     422 "${PLN[@]}" "${JSON[@]}" -X POST "$HPLACES" -d '{"name":"Off","lat":"91","lng":"0"}'
+  check "...and a longitude that is not either"    422 "${PLN[@]}" "${JSON[@]}" -X POST "$HPLACES" -d '{"name":"Off","lat":"0","lng":"181"}'
+
+  PID1=$(place_id "$P1" "Zug HB")
+  PID2=$(place_id "$P2" "Hotel Bellevue")
+  PID3=$(place_id "$(body "${PLN[@]}" "$HPLACES")" "Lakeside")
+  # A fourth place, carrying a note of the kind a host actually writes. It is
+  # never an endpoint until the last check in this block, so it changes none of
+  # the delete arithmetic below — it is here to be looked for in what the invite
+  # link carries.
+  P4=$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HPLACES" -d '{"name":"Museum","note":"lockbox 4417, back door"}')
+  PID4=$(place_id "$P4" "Museum")
+
+  # "Coordinates added later" is an acceptance criterion, and the value below is
+  # the one this script ROUNDED BY HAND: 47.3768866 is what a geocoder answers
+  # and 47.376887 is what numeric(9,6) holds — about 11 cm.
+  LATER=$(body "${PLN[@]}" "${JSON[@]}" -X PATCH "$HPLACES/$PID2" -d '{"lat":"47.3768866","lng":"8.5416578"}')
+  contains "coordinates can be added later"             "$LATER" '"name":"Hotel Bellevue","address":null,"lat":47.376887,"lng":8.541658'
+  equals "...to the same place, not a new one"     "$(place_id "$LATER" "Hotel Bellevue")" "$PID2"
+
+  OPLACE=$(body "${PLN[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$OSLUG3/places" -d '{"name":"Another trip entirely"}')
+  OPID=$(place_id "$OPLACE" "Another trip entirely")
+
+  # Legs. The first is TIMED and carries everything a person can say about one;
+  # the three after it have no clock, which is the block the arrows act on.
+  L1=$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS" \
+    -d "{\"fromPlaceId\":\"$PID1\",\"toPlaceId\":\"$PID2\",\"mode\":\"train\",\"departsAt\":\"2027-06-01T09:14:00+02:00\",\"durationMinutes\":42,\"note\":\"IR 2313\"}")
+  contains "a leg joins two places, by name"            "$L1" '"fromPlaceName":"Zug HB","toPlaceName":"Hotel Bellevue"'
+  contains "...keeping the mode and the note"           "$L1" '"mode":"train"'
+  # The host means the PLAN when it says nothing, and the guest link means what
+  # HAPPENED. One shared default satisfies one of these two and not both.
+  contains "...and a host leg is the PLAN by default"   "$L1" '"isPlanned":true'
+  body "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS" -d "{\"fromPlaceId\":\"$PID2\",\"toPlaceId\":\"$PID3\",\"mode\":\"walk\"}" > /dev/null
+  body "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS" -d "{\"fromPlaceId\":\"$PID3\",\"toPlaceId\":\"$PID1\",\"mode\":\"bus\"}" > /dev/null
+  body "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS" -d "{\"fromPlaceId\":\"$PID1\",\"toPlaceId\":\"$PID3\",\"mode\":\"bike\"}" > /dev/null
+
+  check "a leg to the same place it starts at"     422 "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS" -d "{\"fromPlaceId\":\"$PID1\",\"toPlaceId\":\"$PID1\",\"mode\":\"walk\"}"
+  check "a leg that arrives before it departs"     422 "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS" \
+    -d "{\"fromPlaceId\":\"$PID1\",\"toPlaceId\":\"$PID2\",\"mode\":\"train\",\"departsAt\":\"2027-06-01T09:14:00+02:00\",\"arrivesAt\":\"2027-06-01T08:00:00+02:00\"}"
+  # The composite foreign key would refuse this as a 500 from the driver; the
+  # domain refuses it as a sentence.
+  check "a leg ending at another trip's place"     422 "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS" -d "{\"fromPlaceId\":\"$PID1\",\"toPlaceId\":\"$OPID\",\"mode\":\"car\"}"
+  contains "...and says whose place it is not"          "$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS" -d "{\"fromPlaceId\":\"$PID1\",\"toPlaceId\":\"$OPID\",\"mode\":\"car\"}")" 'not on this event'
+
+  # RE-ORDERING, EXECUTED. This is the only evidence `applyItineraryLegMove`
+  # computes the right thing: deleting its transposition, pinning its delta, or
+  # dropping the `event_id` scoping so one move renumbers every trip on the
+  # instance are all invisible to vitest. The four legs form a LOOP on purpose —
+  # every one has a different pair of endpoints, so a wrong answer reads
+  # differently rather than coincidentally the same.
+  GEO=$(body "${PLN[@]}" "$HPLACES")
+  LEG_T=$(leg_id_by_route "$GEO" "Zug HB" "Hotel Bellevue")
+  LEG_C=$(leg_id_by_route "$GEO" "Zug HB" "Lakeside")
+  LEG_B=$(leg_id_by_route "$GEO" "Lakeside" "Zug HB")
+  equals "four legs, the timed one first"          "$(leg_route "$GEO")" "Zug HB>Hotel Bellevue Hotel Bellevue>Lakeside Lakeside>Zug HB Zug HB>Lakeside"
+  equals "...numbered ten apart"                   "$(leg_orders "$GEO")" "0 10 20 30"
+
+  MOVED=$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS/$LEG_C/move" -d '{"direction":"up"}')
+  equals "moving one up transposes it with its neighbour" "$(leg_route "$MOVED")" "Zug HB>Hotel Bellevue Hotel Bellevue>Lakeside Zug HB>Lakeside Lakeside>Zug HB"
+  # The untimed block is renumbered 0/10/20 while the timed leg keeps the number
+  # it was created with, because `sort_order` is the manual order among the legs
+  # that have no clock and nothing else. A statement that renumbered every leg
+  # would answer "0 10 20 30" here.
+  equals "...renumbering the untimed block only"   "$(leg_orders "$MOVED")" "0 0 10 20"
+  MOVED2=$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS/$LEG_C/move" -d '{"direction":"up"}')
+  equals "...again, and it leads the untimed ones" "$(leg_route "$MOVED2")" "Zug HB>Hotel Bellevue Zug HB>Lakeside Hotel Bellevue>Lakeside Lakeside>Zug HB"
+  check "moving it up once more is a no-op"        200 "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS/$LEG_C/move" -d '{"direction":"up"}'
+  NOOP=$(body "${PLN[@]}" "$HPLACES")
+  equals "...and cannot lift it above a timed leg" "$(leg_route "$NOOP")" "Zug HB>Hotel Bellevue Zug HB>Lakeside Hotel Bellevue>Lakeside Lakeside>Zug HB"
+  equals "...with the numbering still total"       "$(leg_orders "$NOOP")" "0 0 10 20"
+  # The arrows do not exist on a timed leg (the host card hides them and says
+  # why), and the domain refuses it rather than renumbering a column no screen
+  # reads — which would be a 200 and a leg that does not move.
+  check "a timed leg cannot be moved by hand"      422 "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS/$LEG_T/move" -d '{"direction":"up"}'
+  contains "...and says what orders it instead"         "$(body "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS/$LEG_T/move" -d '{"direction":"up"}')" 'ordered by its departure time'
+  check "a leg that is not on this trip"           404 "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS/no-such-leg/move" -d '{"direction":"up"}'
+  check "a direction that is not up or down"       400 "${PLN[@]}" "${JSON[@]}" -X POST "$HLEGS/$LEG_C/move" -d '{"direction":"sideways"}'
+
+  # THE CLOCK WINS, AND BOTH SURFACES AGREE ABOUT IT. Giving the bus a departure
+  # of 08:00 moves it to the FRONT — it holds `sort_order` 20, the last of the
+  # untimed block, so this is the one arrangement the old rule (`sort_order`
+  # first) could not produce. Asserted on the host card's read AND on the invite
+  # payload the guest itinerary is rendered from: while those two disagreed, a
+  # planner could reorder a timed leg, watch it move on /host, open the invite
+  # link and find that nothing had.
+  body "${PLN[@]}" "${JSON[@]}" -X PATCH "$HLEGS/$LEG_B" -d '{"departsAt":"2027-06-01T08:00:00+02:00"}' > /dev/null
+  BYCLOCK="Lakeside>Zug HB Zug HB>Hotel Bellevue Zug HB>Lakeside Hotel Bellevue>Lakeside"
+  equals "a leg given a time moves to its time"    "$(leg_route "$(body "${PLN[@]}" "$HPLACES")")" "$BYCLOCK"
+  equals "...and the GUEST itinerary reads the same" "$(leg_route "$(body "$BASE/api/invites/$GTOK")")" "$BYCLOCK"
+
+  # The itinerary item keeps its free text AND gains a pin — the criterion that
+  # an item with only a location renders exactly as it did before #30.
+  PINNED=$(body "${PLN[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$GSLUG/timeline" \
+    -d "{\"title\":\"Check in\",\"location\":\"the front desk\",\"placeId\":\"$PID2\"}")
+  contains "an itinerary item can be pinned to a place" "$PINNED" "\"placeId\":\"$PID2\""
+  contains "...and keeps its free-text location too"    "$PINNED" '"location":"the front desk"'
+  ITEMID=$(printf '%s' "$PINNED" | sed -n 's/.*"item":{"id":"\([^"]*\)".*/\1/p')
+  check "an item pinned to another trip's place"   422 "${PLN[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$GSLUG/timeline/$ITEMID" -d "{\"placeId\":\"$OPID\"}"
+
+  # THE GUEST HALF. "We ended up walking" happens while the host is asleep, so
+  # this write is the invite link's — and it is filed as what happened.
+  GLEGS="$BASE/api/invites/$GTOK/legs"
+  check "the invite link may add a leg"            201 "${JSON[@]}" -X POST "$GLEGS" -d "{\"fromPlaceId\":\"$PID2\",\"toPlaceId\":\"$PID1\",\"mode\":\"walk\"}"
+  GL=$(body "${JSON[@]}" -X POST "$GLEGS" -d "{\"fromPlaceId\":\"$PID2\",\"toPlaceId\":\"$PID1\",\"mode\":\"walk\",\"note\":\"missed the bus, walked it\"}")
+  contains "...with no account anywhere in it"          "$GL" '"note":"missed the bus, walked it"'
+  contains "...filed as what HAPPENED, not as the plan" "$GL" '"isPlanned":false'
+  check "the map reads over the link as well"      200 "$BASE/api/invites/$GTOK/places"
+  contains "...and carries the places by name"          "$(body "$BASE/api/invites/$GTOK/places")" '"name":"Hotel Bellevue"'
+  # …but the guest PAGE is SSR'd from the invite payload, not from that route,
+  # so the read the product actually performs is asserted too (#60: prove a
+  # feature on the surface the product uses, not the one that is easiest to
+  # curl). All three of these render on /i/<token>.
+  INVPAGE=$(body "$BASE/api/invites/$GTOK")
+  contains "the invite page carries the map it renders"  "$INVPAGE" '"places":[{'
+  # The guest's OWN note, which no host leg in this fixture carries: a needle
+  # any leg could satisfy would pass even if nothing a guest wrote ever reached
+  # the payload.
+  contains "...with the guest's own leg among them"      "$INVPAGE" '"note":"missed the bus, walked it"'
+  contains "...and an item's pin beside its free text"   "$INVPAGE" '"location":"the front desk","placeId":"'
+  # …and NOT the planning detail. The capability URL is forwardable and this
+  # payload is the SSR'd page source of /i/<token>: a place's note is where a
+  # host writes "lockbox 4417, back door", and no guest screen draws it or the
+  # address. The coordinates stay — a pin's position is the point of it.
+  excludes "the link carries no place's private note"    "$INVPAGE" 'lockbox 4417'
+  excludes "...and no postal address either"             "$INVPAGE" 'Bahnhofplatz'
+  contains "...while a pinned position still travels"    "$INVPAGE" '"lat":47.376887,"lng":8.541658'
+  excludes "the refresh route narrows it the same way"   "$(body "$BASE/api/invites/$GTOK/places")" 'lockbox 4417'
+  # Adding POINTS to the trip stays with the planners: the link says how you
+  # travelled between the ones that are there.
+  check "a place cannot be minted over the link"   404 "${JSON[@]}" -X POST "$BASE/api/invites/$GTOK/places" -d '{"name":"Mine now"}'
+  check "...nor can one be removed"                404 "${JSON[@]}" -X DELETE "$BASE/api/invites/$GTOK/places/$PID1"
+
+  # Everything `resolveInviteToken` carries besides identity, on this route too:
+  # #48 lost exactly these by moving a write off the token.
+  RINV=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$GSLUG/invites" -d '{"label":"Revoked smoke"}')
+  RTOK=$(printf '%s' "$RINV" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  RID=$(printf '%s' "$RINV" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  check "a live link is what makes this work (control)" 201 "${JSON[@]}" -X POST "$BASE/api/invites/$RTOK/legs" -d "{\"fromPlaceId\":\"$PID1\",\"toPlaceId\":\"$PID3\",\"mode\":\"bike\"}"
+  body "${AUTH[@]}" -X DELETE "$API/events/$GSLUG/invites/$RID" > /dev/null
+  check "a REVOKED link cannot add one"            410 "${JSON[@]}" -X POST "$BASE/api/invites/$RTOK/legs" -d "{\"fromPlaceId\":\"$PID1\",\"toPlaceId\":\"$PID3\",\"mode\":\"bike\"}"
+
+  # REMOVING A PLACE, which is the "defined way" #30 asks for. The counts below
+  # are worked out from the fixture, not read back out of the answer: four legs
+  # touch the hotel (the train in, the walk on, and the two the guest added),
+  # every one of them still has its other end, and one itinerary item is pinned
+  # to it. So four detached, none removed, one unpinned.
+  DEL1=$(body "${PLN[@]}" -X DELETE "$HPLACES/$PID2")
+  contains "removing a place says exactly what it touched" "$DEL1" '"removedLegs":0,"detachedLegs":4,"detachedItems":1'
+  contains "...the legs survive it, half-joined"        "$DEL1" '"toPlaceId":null,"fromPlaceName":"Zug HB","toPlaceName":null'
+  contains "...and the place itself is gone"            "$(leg_route "$(body "${PLN[@]}" "$HPLACES")")" "Zug HB>?"
+  HOSTPAGE=$(body "${PLN[@]}" "$BASE/api/host/events/$GSLUG")
+  contains "the pinned item falls back to its own text" "$HOSTPAGE" '"location":"the front desk","placeId":null'
+
+  # …and the SECOND delete is the other half of the rule: the legs that lose
+  # their last endpoint go with it rather than becoming a journey from nowhere
+  # to nowhere. Three of them do (the train in and the guest's two walks); the
+  # bus from Lakeside still has Lakeside, so it is detached instead.
+  DEL2=$(body "${PLN[@]}" -X DELETE "$HPLACES/$PID1")
+  contains "a leg that loses its LAST endpoint goes too" "$DEL2" '"removedLegs":3,"detachedLegs":3,"detachedItems":0'
+
+  # The lifecycle rule, last, because it ends this trip: an invite link resolves
+  # only on a live event, and a cancelled trip takes no writes at all.
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$GSLUG/status" -d '{"status":"cancelled"}' > /dev/null
+  # Lakeside and the Museum both survive the deletes above, so this is a leg
+  # that WOULD be written if the lifecycle gate were not there. Sending one
+  # place twice is refused by `insertLeg` whatever the event's status is, and
+  # would prove nothing about the gate.
+  check "a CANCELLED trip takes no leg from a guest" 403 "${JSON[@]}" -X POST "$GLEGS" -d "{\"fromPlaceId\":\"$PID3\",\"toPlaceId\":\"$PID4\",\"mode\":\"walk\"}"
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
 fi
 
 echo

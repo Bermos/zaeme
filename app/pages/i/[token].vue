@@ -298,8 +298,20 @@ const errorMessage = computed(() => {
       />
 
       <EventTimeline
-        v-if="page.timeline.length"
+        v-if="page.timeline.length || page.legs.length"
         :timeline="page.timeline"
+        :legs="page.legs"
+        :places="page.places"
+      />
+
+      <!-- "We ended up walking" (#30). The invite link is the credential: this
+           is a note about the afternoon, not money, and it is written while the
+           host is asleep. Shown on a live trip that has places to join up. -->
+      <GuestLegCard
+        v-if="(published || completed) && page.places.length"
+        :token="token"
+        :places="page.places"
+        @updated="refresh"
       />
 
       <BringList

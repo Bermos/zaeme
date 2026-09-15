@@ -3,7 +3,7 @@ import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
 import { guestUser } from '../database/schema/auth'
-import { assertPlanner, loadEventBySlug } from './permissions'
+import { assertPlaceOnEvent, assertPlanner, loadEventBySlug } from './permissions'
 import { generateUniqueSlug } from './slugify'
 
 /**
@@ -414,6 +414,12 @@ export interface CreateTimelineItemInput {
   startsAt?: DateInput
   endsAt?: DateInput
   location?: string | null
+  /**
+   * The place this happens at, when the group has pinned one (#30). Optional
+   * and staying optional: `location` above is the free-text fallback and is
+   * what an item without a place still shows.
+   */
+  placeId?: string | null
   type?: 'transport' | 'activity' | 'accommodation' | 'meal' | 'other'
   icon?: string | null
   sortOrder?: number
@@ -438,6 +444,13 @@ export async function addTimelineItem(userId: string, slug: string, input: Creat
     if (last) sortOrder = (last.sortOrder ?? 0) + 10
   }
 
+  // A place id is only ever this event's. `events_timeline_item.place_id`
+  // cannot carry the composite foreign key the legs do — `on delete set null`
+  // on one would null `event_id` with it — so this check IS the constraint on
+  // this path, and it answers 422 rather than storing a plausible id from
+  // another trip.
+  if (input.placeId) await assertPlaceOnEvent(ev.id, input.placeId)
+
   const [inserted] = await useDb()
     .insert(tables.timelineItem)
     .values({
@@ -448,6 +461,7 @@ export async function addTimelineItem(userId: string, slug: string, input: Creat
       startsAt: toDate(input.startsAt),
       endsAt: toDate(input.endsAt),
       location: input.location ?? null,
+      placeId: input.placeId ?? null,
       type: input.type ?? 'other',
       icon: input.icon ?? null,
       sortOrder
@@ -462,6 +476,8 @@ export interface UpdateTimelineItemInput {
   startsAt?: DateInput
   endsAt?: DateInput
   location?: string | null
+  /** Pin this item to a place, or `null` to unpin it (#30). */
+  placeId?: string | null
   type?: 'transport' | 'activity' | 'accommodation' | 'meal' | 'other'
   icon?: string | null
   sortOrder?: number
@@ -511,7 +527,12 @@ export interface ApplyTimelineItemUpdate {
 }
 
 export async function applyTimelineItemUpdate({ eventId, itemId, input }: ApplyTimelineItemUpdate) {
+  // See `addTimelineItem`: this is the constraint on this column, and `null`
+  // (unpin, keep the free text) is a legitimate value that skips it.
+  if (input.placeId) await assertPlaceOnEvent(eventId, input.placeId)
+
   const updates: Record<string, unknown> = {}
+  if (input.placeId !== undefined) updates.placeId = input.placeId
   if (input.title !== undefined) updates.title = input.title
   if (input.description !== undefined) updates.description = input.description
   if (input.startsAt !== undefined) updates.startsAt = toDate(input.startsAt)

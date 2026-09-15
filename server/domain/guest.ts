@@ -7,6 +7,7 @@ import { summariseRsvps, type EventDispatch, type RsvpStatus, type RsvpSummary }
 import { loadPoll, type PollOptionView, type PollAnswer } from './poll'
 import { addContribution, claimContribution, listContributions, releaseContribution, type ContributionView } from './contributions'
 import { loadBudget } from './expenses'
+import { addLegForEvent, loadGuestGeography, type GuestGeography, type GuestLegInput } from './places'
 import { loadSeriesContext, type SeriesContext } from './series'
 import { listMessages, postMessage } from './chat'
 import {
@@ -78,9 +79,18 @@ export interface InvitePage {
     startsAt: Date | null
     endsAt: Date | null
     location: string | null
+    /** The pin, when there is one; `location` is still the fallback (#30). */
+    placeId: string | null
     type: string
     icon: string | null
   }>
+  /**
+   * The trip's map: the places, and the legs between them (#30). The places are
+   * NARROWED (`guestPlaceView`) — a forwardable link carries a name and a
+   * position, never the host's note or the postal address.
+   */
+  places: GuestGeography['places']
+  legs: GuestGeography['legs']
   /** Date poll (present while the host is finding a date, i.e. status polling). */
   poll: PollOptionView[]
   contributions: ContributionView[]
@@ -101,7 +111,7 @@ export async function getInvitePage(token: string): Promise<InvitePage> {
   const { invite: inv, event: ev } = await resolveInviteToken(token)
   const db = useDb()
 
-  const [rsvpRows, timeline, poll, contributions, series, budget] = await Promise.all([
+  const [rsvpRows, timeline, poll, contributions, series, budget, geography] = await Promise.all([
     db.select().from(tables.rsvp).where(eq(tables.rsvp.eventId, ev.id)).orderBy(asc(tables.rsvp.createdAt)),
     db.select().from(tables.timelineItem)
       .where(eq(tables.timelineItem.eventId, ev.id))
@@ -109,7 +119,8 @@ export async function getInvitePage(token: string): Promise<InvitePage> {
     loadPoll(ev.id),
     listContributions(ev.id),
     ev.parentId ? loadSeriesContext(ev.parentId, ev.id) : Promise.resolve(null),
-    loadBudget(ev.id)
+    loadBudget(ev.id),
+    loadGuestGeography(ev.id)
   ])
 
   const attending = rsvpRows.filter(r => r.status !== 'no')
@@ -157,9 +168,12 @@ export async function getInvitePage(token: string): Promise<InvitePage> {
       startsAt: t.startsAt,
       endsAt: t.endsAt,
       location: t.location,
+      placeId: t.placeId,
       type: t.type,
       icon: t.icon
     })),
+    places: geography.places,
+    legs: geography.legs,
     poll,
     contributions,
     existingRsvp,
@@ -344,6 +358,34 @@ export async function guestReleaseContribution(token: string, contributionId: st
 export async function guestLoadBudget(token: string) {
   const { event: ev } = await resolveInviteToken(token)
   return loadBudget(ev.id)
+}
+
+/* --------------------------- places and the legs --------------------------- */
+
+/**
+ * READS for anybody holding the link, and ONE write: a leg.
+ *
+ * "We ended up walking" is the dynamic half of #30 and it happens while the
+ * host is asleep, so it cannot need an account — which is a different judgement
+ * from the one money got in #48, and for a different reason: a leg is a note
+ * about the afternoon, not a claim on anybody's wallet. It is recorded as
+ * `isPlanned: false` and the audit records which invite link wrote it.
+ *
+ * Creating and removing PLACES stays with the planners. A guest may say how
+ * they travelled between the points of the trip; adding points to it is
+ * planning, and widening that is the owner's decision rather than this issue's.
+ */
+
+/** The places and legs of the event this link is for, narrowed for a guest. */
+export async function guestLoadGeography(token: string) {
+  const { event: ev } = await resolveInviteToken(token)
+  return loadGuestGeography(ev.id)
+}
+
+/** A guest records how they actually got from one place to another. */
+export async function guestAddLeg(token: string, input: GuestLegInput) {
+  const { event: ev } = await resolveInviteToken(token)
+  return addLegForEvent(ev.id, input)
 }
 
 /* -------------------------------- group chat ------------------------------- */
