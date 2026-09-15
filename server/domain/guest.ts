@@ -7,7 +7,7 @@ import { summariseRsvps, type EventDispatch, type RsvpStatus, type RsvpSummary }
 import { loadPoll, type PollOptionView, type PollAnswer } from './poll'
 import { addContribution, claimContribution, listContributions, releaseContribution, type ContributionView } from './contributions'
 import { loadBudget } from './expenses'
-import { addLegForEvent, loadGeography, type Geography, type GuestLegInput } from './places'
+import { addLegForEvent, loadGuestGeography, type GuestGeography, type GuestLegInput } from './places'
 import { loadSeriesContext, type SeriesContext } from './series'
 import { listMessages, postMessage } from './chat'
 import {
@@ -84,9 +84,13 @@ export interface InvitePage {
     type: string
     icon: string | null
   }>
-  /** The trip's map: the places, and the legs between them (#30). */
-  places: Geography['places']
-  legs: Geography['legs']
+  /**
+   * The trip's map: the places, and the legs between them (#30). The places are
+   * NARROWED (`guestPlaceView`) — a forwardable link carries a name and a
+   * position, never the host's note or the postal address.
+   */
+  places: GuestGeography['places']
+  legs: GuestGeography['legs']
   /** Date poll (present while the host is finding a date, i.e. status polling). */
   poll: PollOptionView[]
   contributions: ContributionView[]
@@ -116,7 +120,7 @@ export async function getInvitePage(token: string): Promise<InvitePage> {
     listContributions(ev.id),
     ev.parentId ? loadSeriesContext(ev.parentId, ev.id) : Promise.resolve(null),
     loadBudget(ev.id),
-    loadGeography(ev.id)
+    loadGuestGeography(ev.id)
   ])
 
   const attending = rsvpRows.filter(r => r.status !== 'no')
@@ -372,10 +376,10 @@ export async function guestLoadBudget(token: string) {
  * planning, and widening that is the owner's decision rather than this issue's.
  */
 
-/** The places and legs of the event this link is for. */
+/** The places and legs of the event this link is for, narrowed for a guest. */
 export async function guestLoadGeography(token: string) {
   const { event: ev } = await resolveInviteToken(token)
-  return loadGeography(ev.id)
+  return loadGuestGeography(ev.id)
 }
 
 /** A guest records how they actually got from one place to another. */

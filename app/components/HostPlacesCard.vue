@@ -56,6 +56,20 @@ const MODE_ITEMS = [
 const placeItems = computed(() => props.geography.places.map(p => ({ label: p.name, value: p.id })))
 const canAddLeg = computed(() => props.geography.places.length >= 2)
 
+/**
+ * THE ARROWS ACT ON THE UNTIMED LEGS AND NOTHING ELSE.
+ *
+ * A leg that says when it leaves is placed by its clock, here and on the guest
+ * page (`app/utils/itinerary-order.ts`), so an arrow on one would renumber a
+ * column no screen reads and the leg would not move — a 200 and a dead control,
+ * which is the failure the one-statement reorder exists to prevent. The server
+ * refuses it too (422); this is what stops anybody meeting that refusal.
+ */
+const untimed = computed(() => props.geography.legs.filter(l => !l.departsAt))
+const canMove = (leg: Leg) => !leg.departsAt
+const isFirstUntimed = (leg: Leg) => untimed.value[0]?.id === leg.id
+const isLastUntimed = (leg: Leg) => untimed.value[untimed.value.length - 1]?.id === leg.id
+
 function message(e: unknown, fallback: string): string {
   return (e as { data?: { message?: string } }).data?.message ?? fallback
 }
@@ -241,6 +255,7 @@ function coordinates(place: Place): string | null {
         </p>
         <p class="text-sm text-muted">
           Pin the hotel, the trailhead, the restaurant — coordinates optional — then say how you travel between them.
+          Guests see a place's name and its position; notes and addresses stay with the planning team.
         </p>
       </div>
     </template>
@@ -281,7 +296,7 @@ function coordinates(place: Place): string | null {
             <UTextarea
               v-model="placeDraft.note"
               :rows="2"
-              placeholder="Note (optional)"
+              placeholder="Note (optional) — only the planning team sees this"
             />
             <div class="flex gap-2">
               <UButton
@@ -402,6 +417,9 @@ function coordinates(place: Place): string | null {
         <p class="text-sm font-semibold">
           Legs
         </p>
+        <p class="text-xs text-muted">
+          A leg with a departure time sits at its time; the arrows order the ones without.
+        </p>
         <p
           v-if="!geography.legs.length"
           class="text-sm text-muted"
@@ -410,7 +428,7 @@ function coordinates(place: Place): string | null {
         </p>
 
         <div
-          v-for="(leg, index) in geography.legs"
+          v-for="leg in geography.legs"
           :key="leg.id"
           class="py-1.5 border-b border-default last:border-b-0 text-sm flex items-center justify-between gap-2"
         >
@@ -439,26 +457,32 @@ function coordinates(place: Place): string | null {
             >
               {{ leg.isPlanned ? 'planned' : 'what happened' }}
             </UBadge>
-            <UButton
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              :disabled="index === 0 || movingLeg === leg.id"
-              aria-label="Move leg up"
-              @click="moveLeg(leg.id, 'up')"
-            >
-              ↑
-            </UButton>
-            <UButton
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              :disabled="index === geography.legs.length - 1 || movingLeg === leg.id"
-              aria-label="Move leg down"
-              @click="moveLeg(leg.id, 'down')"
-            >
-              ↓
-            </UButton>
+            <span
+              v-if="!canMove(leg)"
+              class="text-xs text-muted"
+            >ordered by its departure time</span>
+            <template v-else>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :disabled="isFirstUntimed(leg) || movingLeg === leg.id"
+                aria-label="Move leg up"
+                @click="moveLeg(leg.id, 'up')"
+              >
+                ↑
+              </UButton>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :disabled="isLastUntimed(leg) || movingLeg === leg.id"
+                aria-label="Move leg down"
+                @click="moveLeg(leg.id, 'down')"
+              >
+                ↓
+              </UButton>
+            </template>
             <UButton
               size="xs"
               color="neutral"

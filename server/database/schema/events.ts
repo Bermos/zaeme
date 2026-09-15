@@ -1,5 +1,5 @@
 import { relations, sql } from 'drizzle-orm'
-import { bigint, boolean, foreignKey, index, integer, numeric, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core'
+import { bigint, boolean, check, foreignKey, index, integer, numeric, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core'
 
 /**
  * The events domain tables, namespaced `events_*`. zäme owns this schema and
@@ -257,7 +257,15 @@ export const place = pgTable('events_place', {
   index('events_place_event_idx').on(table.eventId),
   // The target of the composite foreign keys on a leg: it is what lets the
   // database refuse a leg on one trip that ends at another trip's place.
-  uniqueIndex('events_place_event_id_unique').on(table.eventId, table.id)
+  uniqueIndex('events_place_event_id_unique').on(table.eventId, table.id),
+  // BOTH OR NEITHER, enforced here and not only in `normaliseCoordinates`.
+  // Two functions write this pair today and #32's geocoder will be a third; a
+  // half-coordinate row is also UNREPAIRABLE from the product, because the edit
+  // form sends the pair back and the domain then refuses every save of that
+  // place, including a pure rename, while the screen says "no coordinates yet"
+  // and explains nothing. One line on an empty table now, a data-cleanup
+  // migration later.
+  check('events_place_coordinates_pair', sql`(lat is null) = (lng is null)`)
 ])
 
 /**
@@ -304,6 +312,19 @@ export const itineraryLeg = pgTable('events_itinerary_leg', {
   /** How long it takes, when that is known without two timestamps. */
   durationMinutes: integer('duration_minutes'),
   note: text('note'),
+  /**
+   * THE MANUAL ORDER AMONG LEGS WITH NO DEPARTURE TIME, and nothing else.
+   *
+   * An itinerary is chronological: a leg that says when it leaves is placed by
+   * its clock, on the host card and on the guest page alike, because nobody
+   * will accept 11:00 displayed above 09:00 whatever was clicked. So the
+   * up/down arrows act on the untimed legs — "we walked back at some point" —
+   * and `applyItineraryLegMove` refuses to move a timed one rather than
+   * renumbering something no screen reads.
+   *
+   * A timed leg therefore keeps whatever number it was created with and that
+   * number means nothing; it is not part of the sequence the arrows renumber.
+   */
   sortOrder: integer('sort_order').notNull().default(0),
   /** The 09:14 we intend to take (true) vs the bus we actually got on (false). */
   isPlanned: boolean('is_planned').notNull(),
@@ -323,7 +344,16 @@ export const itineraryLeg = pgTable('events_itinerary_leg', {
     columns: [table.eventId, table.toPlaceId],
     foreignColumns: [place.eventId, place.id],
     name: 'events_itinerary_leg_event_to_place_fk'
-  }).onDelete('restrict')
+  }).onDelete('restrict'),
+  // A leg goes between two DIFFERENT places. `insertLeg` refuses one that does
+  // not, and this is what keeps that true of a row written any other way — the
+  // deletion rule below leans on it: "both ends were this place" is a case that
+  // cannot arise, which is why a leg is removed only when it loses its LAST
+  // endpoint. The `is null` arm is what lets a deleted place null one end.
+  check(
+    'events_itinerary_leg_distinct_endpoints',
+    sql`from_place_id is null or from_place_id <> to_place_id`
+  )
 ])
 
 export const media = pgTable('events_media', {

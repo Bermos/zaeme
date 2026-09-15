@@ -22,7 +22,8 @@ interface TimelineItem {
   type: string
   icon: string | null
 }
-interface Place { id: string, name: string, address: string | null }
+/** What the invite link carries of a place (`guestPlaceView`): no note, no address. */
+interface Place { id: string, name: string, lat: number | null, lng: number | null }
 interface Leg {
   id: string
   fromPlaceName: string | null

@@ -300,6 +300,28 @@ describe('the schema says what it means', () => {
     expect(schema).not.toMatch(/lat: numeric\([^)]*\)[^\n]*notNull/)
   })
 
+  it('makes the database keep the rules the domain states', () => {
+    // BOTH OR NEITHER, and two different places, as CHECKs and not only as
+    // code. Two functions write the coordinate pair today and #32's geocoder
+    // will be a third; a half-coordinate row is also unrepairable from the
+    // product, because the edit form sends the pair back and every save of that
+    // place is then refused, rename included, while the screen says "no
+    // coordinates yet" and explains nothing.
+    expect(schema).toMatch(/check\(\s*'events_place_coordinates_pair'[\s\S]{0,120}\(lat is null\) = \(lng is null\)/)
+    expect(schema).toMatch(/check\(\s*'events_itinerary_leg_distinct_endpoints'[\s\S]{0,160}from_place_id is null or from_place_id <> to_place_id/)
+
+    // …and they are in the one migration this branch adds, not a follow-up.
+    const migration = readFileSync(
+      join(ROOT, 'server', 'database', 'migrations', '0007_useful_loa.sql'), 'utf8'
+    )
+    expect(migration).toMatch(/CONSTRAINT "events_place_coordinates_pair" CHECK \(\(lat is null\) = \(lng is null\)\)/)
+    expect(migration).toMatch(/CONSTRAINT "events_itinerary_leg_distinct_endpoints" CHECK/)
+    // The composite foreign keys must come AFTER the unique index they
+    // reference, or the migration aborts with 42830 on any database at all.
+    expect(migration.indexOf('CREATE UNIQUE INDEX "events_place_event_id_unique"'))
+      .toBeLessThan(migration.indexOf('events_itinerary_leg_event_from_place_fk'))
+  })
+
   it('cannot leave a leg pointing at another trip\'s place', () => {
     // The composite foreign key is what makes that the database's problem
     // rather than every future caller's. `restrict`, not `set null`: the
@@ -327,10 +349,80 @@ describe('the schema says what it means', () => {
     // create the very tie this exists to remove.
     const body = /export async function applyItineraryLegMove[\s\S]*?\n}/.exec(places)?.[0] ?? ''
     expect(body).toMatch(/order by id for update/)
-    expect(body).toMatch(/row_number\(\) over \(order by sort_order, departs_at nulls last, created_at, id\)/)
+    expect(body).toMatch(/row_number\(\) over \(order by sort_order, created_at, id\)/)
     expect(body).toMatch(/where t\.id = renumbered\.id\n\s*and t\.event_id = \$\{eventId\}/)
     // One UPDATE, not two: a pair of writes is the shape that half-applies.
     expect((body.match(/update events_itinerary_leg/g) ?? []).length).toBe(1)
+  })
+
+  it('actually TRANSPOSES, rather than only renumbering', () => {
+    // The arm below is the whole difference between a move and a no-op, and
+    // dropping it is invisible to everything else in this file: the window, the
+    // scoped UPDATE and the lock all survive it. Worse than inert — without the
+    // second line the moved leg takes the target's index while the leg already
+    // there keeps it, so two rows share a number, which is the brick #8 spent a
+    // whole statement removing.
+    const body = /export async function applyItineraryLegMove[\s\S]*?\n}/.exec(places)?.[0] ?? ''
+    expect(body).toMatch(/when o\.id = \$\{legId\} then \(select idx from target\)/)
+    expect(body).toMatch(/when o\.idx = \(select idx from target\) then \(select idx from moved\)/)
+  })
+
+  it('moves only the legs the arrows are drawn on', () => {
+    // An itinerary is chronological: a timed leg is placed by its clock on the
+    // host card and on the guest page alike, so renumbering one would change a
+    // column no screen reads — a 200 and a leg that does not move. The refusal
+    // is 422 (the domain understood it), the statement touches only the untimed
+    // block, and the host card hides the arrows so nobody meets the refusal.
+    const body = /export async function applyItineraryLegMove[\s\S]*?\n}/.exec(places)?.[0] ?? ''
+    expect(body).toMatch(/departs_at !== null/)
+    expect(body).toMatch(/statusCode: 422/)
+    expect(body).toMatch(/where event_id = \$\{eventId\}\n\s*and departs_at is null/)
+    expect(body).toMatch(/and t\.departs_at is null/)
+
+    const card = readFileSync(join(ROOT, 'app', 'components', 'HostPlacesCard.vue'), 'utf8')
+    expect(card).toMatch(/const canMove = \(leg: Leg\) => !leg\.departsAt/)
+    expect(card).toMatch(/v-if="!canMove\(leg\)"/)
+    expect(card).toMatch(/ordered by its departure time/)
+  })
+
+  it('reads the legs in the order the guest page draws them', () => {
+    // THE BUG THIS PAIRING EXISTS TO CATCH: while this query led with
+    // `sort_order` and `mergeItinerary` led with the clock, a planner could
+    // reorder a timed leg on the host card, watch it move there, open the
+    // invite link and find nothing had changed — for every leg with a
+    // departure time, which is the normal case for a planned one.
+    const body = /export async function loadGeography[\s\S]*?\n}/.exec(places)?.[0] ?? ''
+    const keys = /\.orderBy\(([\s\S]*?)\)\n/.exec(body)?.[1] ?? ''
+    expect(keys.indexOf('departsAt')).toBeGreaterThan(-1)
+    expect(keys.indexOf('departsAt')).toBeLessThan(keys.indexOf('sortOrder'))
+    expect(keys.indexOf('sortOrder')).toBeLessThan(keys.indexOf('createdAt'))
+    expect(keys.indexOf('createdAt')).toBeLessThan(keys.indexOf('itineraryLeg.id'))
+
+    // …and the browser half keys on the same four, in the same order.
+    const order = readFileSync(join(ROOT, 'app', 'utils', 'itinerary-order.ts'), 'utf8')
+    const compare = /function byLegOrder[\s\S]*?\n}/.exec(order)?.[0] ?? ''
+    expect(compare.indexOf('departsAt')).toBeLessThan(compare.indexOf('sortOrder'))
+    expect(compare.indexOf('sortOrder')).toBeLessThan(compare.indexOf('createdAt'))
+  })
+
+  it('carries a place to the invite link with no note and no address', () => {
+    // The capability URL is forwardable and the guest page is SSR'd, so
+    // anything answered here is in the page source for whoever the link
+    // reached. A place's `note` is where a host writes "lockbox 4417".
+    expect(places).toMatch(/export function guestPlaceView/)
+    const view = /export function guestPlaceView[\s\S]*?\n}/.exec(places)?.[0] ?? ''
+    expect(view).toMatch(/id: place\.id/)
+    expect(view).toMatch(/name: place\.name/)
+    // The coordinates STAY — a pinned place's position is the point of it.
+    expect(view).toMatch(/lat: place\.lat/)
+    expect(view).toMatch(/lng: place\.lng/)
+    expect(view).not.toMatch(/note|address|osm/i)
+
+    // Both guest reads go through it, so there is one answer to "what does the
+    // link carry" rather than two that drift.
+    const guest = readFileSync(join(ROOT, 'server', 'domain', 'guest.ts'), 'utf8')
+    expect(guest).toMatch(/loadGuestGeography\(ev\.id\)/)
+    expect(guest).not.toMatch(/loadGeography\(ev\.id\)/)
   })
 
   it('reads the legs BEFORE the places it names them from', () => {

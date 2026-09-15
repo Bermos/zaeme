@@ -166,6 +166,38 @@ export interface Geography {
   legs: LegView[]
 }
 
+/**
+ * WHAT THE INVITE LINK SEES OF A PLACE, and it is deliberately less.
+ *
+ * The capability URL is forwardable: whoever a link reaches can read the guest
+ * page, and they have typed nothing to get there. A place's `note` is where a
+ * host writes "lockbox 4417, back door"; `address`, `osm_type` and `osm_id` are
+ * planning detail no guest screen draws. Answering the whole row because it was
+ * convenient would have changed what an EXISTING invite URL reaches — the
+ * `addedByEmail` shape from #61, with the discoverability half added, since it
+ * would sit in the SSR'd page source of `/i/<token>`.
+ *
+ * The coordinates STAY: a pinned place's position is the point of the feature
+ * and #33's map is a guest surface. If a guest screen later needs the address,
+ * that is a deliberate addition then, made by somebody who has decided it.
+ */
+export interface GuestPlaceView {
+  id: string
+  name: string
+  lat: number | null
+  lng: number | null
+}
+
+export interface GuestGeography {
+  places: GuestPlaceView[]
+  legs: LegView[]
+}
+
+/** The narrowing itself, in one place so both guest reads share it. */
+export function guestPlaceView(place: PlaceView): GuestPlaceView {
+  return { id: place.id, name: place.name, lat: place.lat, lng: place.lng }
+}
+
 function placeView(row: typeof tables.place.$inferSelect): PlaceView {
   return {
     id: row.id,
@@ -212,10 +244,21 @@ function legView(row: typeof tables.itineraryLeg.$inferSelect, names: Map<string
  * endpoint is not in the map and whose name renders as nothing. `loadBudget`
  * had exactly this bug with accounts and lines (#61).
  *
- * The leg order is `sort_order`, then `departs_at` (nulls last), then
- * `created_at`, then `id` — the same four keys `applyItineraryLegMove`
- * renumbers from and that `app/utils/itinerary-order.ts` breaks ties on. All
- * three must stay in step or the arrows move the wrong row.
+ * THE LEG ORDER IS THE CLOCK FIRST: `departs_at` with nulls last, then
+ * `sort_order`, then `created_at`, then `id`.
+ *
+ * That is the order the guest page renders (`mergeItinerary` slots each timed
+ * leg in by its departure and leaves the untimed ones at the end, in
+ * `sort_order`), so the host card and the invite link agree about where a leg
+ * is — which they did NOT when this read led with `sort_order`: a planner
+ * clicked ↑ on a timed leg, the host list moved it, and the guest itinerary
+ * showed the same order as before, for every leg with a departure time.
+ *
+ * `sort_order` therefore orders the UNTIMED legs and nothing else, and
+ * `applyItineraryLegMove` renumbers exactly that block. All three — this
+ * query, that statement and `app/utils/itinerary-order.ts` — key on the same
+ * columns in the same order, and have to keep doing so or the arrows move a
+ * different row than the one somebody pointed at.
  */
 export async function loadGeography(eventId: string): Promise<Geography> {
   const db = useDb()
@@ -224,9 +267,12 @@ export async function loadGeography(eventId: string): Promise<Geography> {
     .select()
     .from(tables.itineraryLeg)
     .where(eq(tables.itineraryLeg.eventId, eventId))
+    // `departs_at` first, nulls LAST — drizzle's `asc()` renders Postgres's
+    // default, which puts nulls last on an ascending sort, so the untimed legs
+    // land after the timed ones exactly as the guest page draws them.
     .orderBy(
-      asc(tables.itineraryLeg.sortOrder),
       asc(tables.itineraryLeg.departsAt),
+      asc(tables.itineraryLeg.sortOrder),
       asc(tables.itineraryLeg.createdAt),
       asc(tables.itineraryLeg.id)
     )
@@ -608,18 +654,29 @@ export interface ApplyItineraryLegMove {
 }
 
 /**
- * Re-order the legs in ONE statement — `applyTimelineItemMove`'s mechanism
- * (`server/domain/events-data.ts`), applied to this table.
+ * Re-order the UNTIMED legs in ONE statement — `applyTimelineItemMove`'s
+ * mechanism (`server/domain/events-data.ts`), applied to this table.
+ *
+ * ⚠️ IT REFUSES A LEG THAT HAS A DEPARTURE TIME, and that refusal is the point
+ * rather than a restriction. An itinerary is chronological: `loadGeography` and
+ * `mergeItinerary` both place a timed leg by its clock, so renumbering one
+ * would change a column no screen reads and the leg would not move — a 200 and
+ * a dead arrow, which is exactly the failure mode #8's whole statement exists
+ * to remove, wearing a different hat. `sort_order` is the manual order among
+ * the legs that have no clock, and this renumbers precisely that block. The
+ * host card hides the arrows on a timed leg and says why, so this 422 is the
+ * backstop rather than the message anybody normally reads.
  *
  * It is a second copy rather than a shared helper on purpose, and the reason is
  * worth stating so the next person can overrule it deliberately: the statement
  * is a `sql` template whose table name and whose ORDERING COLUMNS both differ
- * (`departs_at` here, `starts_at` there), so sharing it means interpolating
- * identifiers — and drizzle renders an interpolated column UNQUALIFIED inside a
- * `sql` template, which Postgres then resolves against whatever table is in
- * scope without erroring. That is the bug the note at the top of `admin.ts`
- * documents at length. Refactoring #8's proven statement to carry a parameter
- * is also not this issue's to do.
+ * (`sort_order` over an untimed subset here, `sort_order, starts_at, …` over
+ * every row there), so sharing it means interpolating identifiers — and drizzle
+ * renders an interpolated column UNQUALIFIED inside a `sql` template, which
+ * Postgres then resolves against whatever table is in scope without erroring.
+ * That is the bug the note at the top of `admin.ts` documents at length.
+ * Refactoring #8's proven statement to carry a parameter is also not this
+ * issue's to do.
  *
  * Everything the original's comment says applies here unchanged, and these are
  * the parts that are load-bearing rather than decorative:
@@ -631,28 +688,35 @@ export interface ApplyItineraryLegMove {
  *  - the `select … for update` is what stops two planners reordering at once
  *    from producing the tie this exists to remove — `is distinct from` skips
  *    unchanged rows and in doing so drops them from the lock set. Ordering that
- *    lock by `id` also stops the two of them deadlocking.
- *
- * The display order below must agree with the order the ARROWS were drawn from,
- * down to the last tiebreak: `loadGeography` and `app/utils/itinerary-order.ts`
- * end on the same `…, created_at, id` for that reason.
+ *    lock by `id` also stops the two of them deadlocking. Every leg of the
+ *    event is locked, not only the untimed ones: a concurrent PATCH that gives
+ *    a leg a departure time moves it OUT of this block, and the lock is what
+ *    makes the two of them take turns.
  */
 export async function applyItineraryLegMove({ eventId, legId, direction }: ApplyItineraryLegMove): Promise<void> {
   const delta = direction === 'up' ? -1 : 1
 
   await useDb().transaction(async (tx) => {
     const locked = await tx.execute(sql`
-      select id from events_itinerary_leg where event_id = ${eventId} order by id for update
+      select id, departs_at from events_itinerary_leg where event_id = ${eventId} order by id for update
     `)
-    const ids = new Set((locked.rows as Array<{ id: string }>).map(r => r.id))
-    if (!ids.has(legId)) throw createError({ statusCode: 404, message: 'Leg not found' })
+    const rows = locked.rows as Array<{ id: string, departs_at: string | null }>
+    const leg = rows.find(r => r.id === legId)
+    if (!leg) throw createError({ statusCode: 404, message: 'Leg not found' })
+    if (leg.departs_at !== null) {
+      throw createError({
+        statusCode: 422,
+        message: 'This leg is ordered by its departure time — change the time to move it'
+      })
+    }
 
     await tx.execute(sql`
       with ordered as (
         select id,
-               (row_number() over (order by sort_order, departs_at nulls last, created_at, id) - 1)::int as idx
+               (row_number() over (order by sort_order, created_at, id) - 1)::int as idx
           from events_itinerary_leg
          where event_id = ${eventId}
+           and departs_at is null
       ),
       moved as (select idx from ordered where id = ${legId}),
       target as (
@@ -677,6 +741,7 @@ export async function applyItineraryLegMove({ eventId, legId, direction }: Apply
         from renumbered
        where t.id = renumbered.id
          and t.event_id = ${eventId}
+         and t.departs_at is null
          and t.sort_order is distinct from renumbered.idx * 10
     `)
   })
@@ -712,7 +777,18 @@ export interface GuestLegInput {
  * guest.ts`), which is what applies revocation, expiry, the use-count limit and
  * the `draft`/`cancelled` refusal. Nothing in this module may read a session.
  */
-export async function addLegForEvent(eventId: string, input: GuestLegInput): Promise<Geography> {
+export async function addLegForEvent(eventId: string, input: GuestLegInput): Promise<GuestGeography> {
   await insertLeg(eventId, { ...input, isPlanned: false })
-  return loadGeography(eventId)
+  return loadGuestGeography(eventId)
+}
+
+/**
+ * The map as the invite link may see it: every leg, and each place narrowed to
+ * what a guest screen draws. Both guest reads go through here rather than
+ * through `loadGeography`, so there is one answer to "what does the link
+ * carry" instead of two that drift.
+ */
+export async function loadGuestGeography(eventId: string): Promise<GuestGeography> {
+  const { places, legs } = await loadGeography(eventId)
+  return { places: places.map(guestPlaceView), legs }
 }

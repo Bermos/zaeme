@@ -1,5 +1,5 @@
 {
-  "id": "15365b2f-c91f-4313-893b-5c87f8eb2a13",
+  "id": "3de84240-8e3d-43b9-9931-22d33f8f3537",
   "prevId": "757fdde1-17c7-4522-af51-8234e382eee0",
   "version": "7",
   "dialect": "postgresql",
@@ -1747,7 +1747,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "events_itinerary_leg_distinct_endpoints": {
+          "name": "events_itinerary_leg_distinct_endpoints",
+          "value": "from_place_id is null or from_place_id <> to_place_id"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.events_media": {
@@ -2241,7 +2246,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "events_place_coordinates_pair": {
+          "name": "events_place_coordinates_pair",
+          "value": "(lat is null) = (lng is null)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.events_planner_invite": {

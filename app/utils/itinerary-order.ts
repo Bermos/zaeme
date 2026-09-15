@@ -6,7 +6,7 @@
  * It is a function rather than four lines inside `EventTimeline.vue` because
  * the merge is the one thing on that screen somebody could point at and call
  * wrong, and a computed property in a template is not something a test can
- * hold. `test/itinerary-order.test.ts` calls it directly; nothing in here
+ * hold. `test/places-and-legs.test.ts` calls it directly; nothing in here
  * throws or touches h3 or the database, and it runs identically during SSR and
  * after a client-side refresh — which is what stops a leg from jumping to a
  * different place in the list the moment the page hydrates.
@@ -37,6 +37,10 @@
  * Items with no `startsAt` are not sorting points — a leg is never placed
  * relative to something that does not say when it is — but they keep their
  * position in the item order, which is rule 1.
+ *
+ * The LEGS come out of `loadGeography` already in this order, so the host card
+ * and the guest page show the same sequence. That is the whole reason the two
+ * key lists are written out identically in both places.
  */
 
 /** The shape this needs of a timeline item. Anything else rides along. */
@@ -67,19 +71,25 @@ function ms(value: string | Date | null | undefined): number | null {
 /**
  * The order legs are considered in, and the order the untimed ones end up in.
  *
- * It is the SAME four keys, in the same order, that `loadGeography` reads them
- * in and that `applyItineraryLegMove` renumbers from: `sort_order`, then
- * `departs_at` with nulls last, then `created_at`, then `id`. `id` last and not
- * optional, for the reason `listTimeline` gives: ids are cuid2 and do not sort
- * by age, and rows written in one statement share a `created_at` to the
- * microsecond, so a list that stops one column short of the order the move
- * renumbers from disagrees with it about which row is where — and the first
- * click on the arrows moves a different leg than the one pointed at.
+ * THE SAME FOUR KEYS, in the same order, that `loadGeography` reads them in:
+ * `departs_at` with nulls last, then `sort_order`, then `created_at`, then
+ * `id`. That agreement is load-bearing and was once broken — this function led
+ * with `sort_order` while the query led with it too, and both disagreed with
+ * what the page displayed, so a planner could reorder a timed leg on the host
+ * card and see nothing move on the invite link.
+ *
+ * The clock wins because an itinerary is chronological; `sort_order` is the
+ * manual order among the legs that have no clock, which is the block the
+ * up/down arrows act on and the only block `applyItineraryLegMove` renumbers.
+ *
+ * `id` last and not optional, for the reason `listTimeline` gives: ids are
+ * cuid2 and do not sort by age, and rows written in one statement share a
+ * `created_at` to the microsecond, so a list that stops one column short of the
+ * order the move renumbers from disagrees with it about which row is where —
+ * and the first click on the arrows moves a different leg than the one pointed
+ * at.
  */
 function byLegOrder(a: OrderableLeg, b: OrderableLeg): number {
-  const sa = a.sortOrder ?? 0
-  const sb = b.sortOrder ?? 0
-  if (sa !== sb) return sa - sb
   const da = ms(a.departsAt)
   const db = ms(b.departsAt)
   if (da !== db) {
@@ -87,6 +97,9 @@ function byLegOrder(a: OrderableLeg, b: OrderableLeg): number {
     if (db === null) return -1
     return da - db
   }
+  const sa = a.sortOrder ?? 0
+  const sb = b.sortOrder ?? 0
+  if (sa !== sb) return sa - sb
   const ca = ms(a.createdAt) ?? 0
   const cb = ms(b.createdAt) ?? 0
   if (ca !== cb) return ca - cb

@@ -16,7 +16,8 @@
 --     exists and would strand production on the previous release.
 --   * the foreign key added to that column validates against a column that is
 --     NULL on every existing row, so it has nothing to check.
---   * both new tables are empty, so their constraints and indexes are free.
+--   * both new tables are empty, so their constraints and indexes are free —
+--     including the two CHECKs, which are validated against no rows at all.
 --
 -- It is therefore re-runnable in the only sense that matters here — drizzle
 -- records what it has applied and never re-applies it — and a retry of the
@@ -36,7 +37,8 @@ CREATE TABLE "events_itinerary_leg" (
 	"sort_order" integer DEFAULT 0 NOT NULL,
 	"is_planned" boolean NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "events_itinerary_leg_distinct_endpoints" CHECK (from_place_id is null or from_place_id <> to_place_id)
 );
 --> statement-breakpoint
 CREATE TABLE "events_place" (
@@ -51,18 +53,23 @@ CREATE TABLE "events_place" (
 	"note" text,
 	"created_by_user_id" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "events_place_coordinates_pair" CHECK ((lat is null) = (lng is null))
 );
 --> statement-breakpoint
 -- The unique index the two composite foreign keys below REFERENCE, moved ahead
--- of them by hand: drizzle-kit emits every constraint before every index, and
+-- of them by hand. drizzle-kit emits every constraint before every index, and
 -- Postgres refuses a foreign key whose target has no unique constraint yet
--- (`42830`, "there is no unique constraint matching given keys"). The generated
--- order aborts on the first statement, on an empty database and a full one
--- alike — which as the Kitchen `migrate` task means a deploy that strands
--- production on the previous release. Same set of statements, same final
--- shape, so the snapshot still matches and `pnpm db:generate` still says there
--- is nothing to write.
+-- (`42830`, "there is no unique constraint matching given keys"). In the
+-- generated order this migration aborts on its first foreign key — on an empty
+-- database and a full one alike — which as the Kitchen `migrate` task means a
+-- deploy that strands production on the previous release. Same set of
+-- statements and the same final shape, so the snapshot still matches and
+-- `pnpm db:generate` still reports nothing to write.
+--
+-- `0006_red_redwing.sql` has the same shape and got away with it: its
+-- composite foreign key targets an index created in an EARLIER migration.
+-- Check this ordering by hand every time a composite foreign key is added.
 CREATE UNIQUE INDEX "events_place_event_id_unique" ON "events_place" USING btree ("event_id","id");
 --> statement-breakpoint
 ALTER TABLE "events_timeline_item" ADD COLUMN "place_id" text;
