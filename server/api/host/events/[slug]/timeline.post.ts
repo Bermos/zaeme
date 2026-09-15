@@ -9,6 +9,8 @@ const bodySchema = z.object({
   startsAt: z.string().datetime({ offset: true }).optional().nullable(),
   endsAt: z.string().datetime({ offset: true }).optional().nullable(),
   location: z.string().max(500).optional().nullable(),
+  /** Pin the item to one of the event's places (#30); optional, always. */
+  placeId: z.string().min(1).max(64).optional().nullable(),
   type: z.enum(['transport', 'activity', 'accommodation', 'meal', 'other']).optional()
 })
 

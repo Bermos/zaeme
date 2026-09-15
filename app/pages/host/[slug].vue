@@ -665,7 +665,17 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
         v-if="!isSeries"
         :slug="slug"
         :timeline="data.timeline"
+        :places="data.geography.places"
         :trip="isTrip"
+        @updated="refresh"
+      />
+
+      <!-- The trip's map: the places, and the legs between them (#30). A trip
+           surface, plus any event that has already collected some. -->
+      <HostPlacesCard
+        v-if="isTrip || data.geography.places.length || data.geography.legs.length"
+        :slug="slug"
+        :geography="data.geography"
         @updated="refresh"
       />
 

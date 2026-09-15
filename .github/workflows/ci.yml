@@ -99,17 +99,30 @@ concurrency:
 # this path correctly holds nothing), and the chart of accounts driven through
 # /api/me and /api/host, which is where people actually write. 221 -> 278.
 #
-# #63 adds JOBS, not checks, and leaves this at 278. The `upgrade` job runs this
+# #63 adds JOBS, not checks, and left this at 278. The `upgrade` job runs this
 # same suite a second time against a migrated database and asserts the same
 # floor; the run it does against the PREVIOUS release asserts that release's own
 # floor, read out of that commit's copy of this file, because a new floor is
 # never true of an old build.
 #
+# #30 gives a trip PLACES and the legs between them, and adds 48. They execute
+# what the source cannot show: a place kept with no coordinates at all and given
+# some later (rounded by hand here to the six decimals the column holds), the
+# two halves of a coordinate refused apart, a leg reordered and the whole list
+# renumbered — the only evidence `applyItineraryLegMove` transposes anything —
+# and the delete cascade counted off a lopsided fixture, four legs detached and
+# none removed by the first delete, three removed and one detached by the
+# second. The guest half is there for the reason #60 taught: the invite link is
+# a second schema and a second credential for one feature, and `isPlanned`
+# defaults to the OPPOSITE value on each surface, so one shared default passes
+# exactly one of that pair, and the guest page's own SSR payload is read
+# rather than only the route that refreshes it. 278 -> 329.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '278'
+  MIN_SMOKE_CHECKS: '329'
 
 jobs:
   ci:

@@ -33,6 +33,12 @@ import { bigint, boolean, foreignKey, index, integer, numeric, pgTable, text, ti
  *  - `events_date_option` + `events_date_vote` — the date-finding poll.
  *  - `events_contribution` — the bring list (food & drink coordination).
  *  - `events_timeline_item` — the itinerary.
+ *  - `events_place` + `events_itinerary_leg` — the GEOGRAPHY of a trip (#30):
+ *    the places an itinerary happens at (coordinates optional — a place can be
+ *    typed by hand and never geocoded) and the connections between them, which
+ *    is the thing an itinerary of sorted strings could not express. A leg
+ *    records whether it is the 09:14 somebody INTENDS to take or the bus they
+ *    actually got on.
  *  - `events_media` — the shared gallery, documents and tickets.
  *  - `events_series_member` — the standing group of a recurring series: each
  *    new occurrence auto-invites every member.
@@ -158,6 +164,27 @@ export const timelineItem = pgTable('events_timeline_item', {
   startsAt: timestamp('starts_at', { withTimezone: true }),
   endsAt: timestamp('ends_at', { withTimezone: true }),
   location: text('location'),
+  /**
+   * The place this item happens at, when somebody has pinned one (#30).
+   *
+   * NULLABLE AND STAYING THAT WAY, and `location` above is not going anywhere
+   * either: an itinerary item typed as "Ana's flat" has no place, no
+   * coordinates and no reason to acquire either, and that is the ordinary case
+   * for every event that is not a trip. An item with no place renders from
+   * `location` exactly as it did before this column existed.
+   *
+   * `on delete set null` rather than a cascade: deleting a place must not
+   * delete the plan. The item keeps its free-text `location` and simply stops
+   * pointing at a pin.
+   *
+   * A plain reference, not the composite `(event_id, place_id)` the legs below
+   * carry, because `on delete set null` on a composite key would try to null
+   * `event_id` too (Postgres 15's `SET NULL (column_list)` is not something
+   * drizzle-kit emits). `addTimelineItem`/`applyTimelineItemUpdate` check the
+   * place belongs to this event instead — see `assertPlaceOnEvent` in
+   * `server/domain/places.ts`.
+   */
+  placeId: text('place_id').references(() => place.id, { onDelete: 'set null' }),
   type: text('type', { enum: ['transport', 'activity', 'accommodation', 'meal', 'other'] }).notNull().default('other'),
   icon: text('icon'),
   sortOrder: integer('sort_order').notNull().default(0),
@@ -166,7 +193,137 @@ export const timelineItem = pgTable('events_timeline_item', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
 }, table => [
   index('events_timeline_item_event_idx').on(table.eventId),
-  index('events_timeline_item_sort_idx').on(table.eventId, table.sortOrder)
+  index('events_timeline_item_sort_idx').on(table.eventId, table.sortOrder),
+  index('events_timeline_item_place_idx').on(table.placeId)
+])
+
+/* --------------------- places, and the legs between them ------------------- */
+
+/**
+ * A PLACE on one event's map (#30): the hotel, the trailhead, the restaurant
+ * somebody found. Before this, an itinerary was a sorted list of strings with
+ * one free-text `location` each — no pin, no coordinate, and nothing two items
+ * could share.
+ *
+ * A PLACE WITH NO COORDINATES IS A FIRST-CLASS STATE, not a half-filled row.
+ * "Ana's flat" and "the usual spot by the lake" are places a group names and
+ * never geocodes, and the geocoding search (#32) has to be able to leave them
+ * alone. So `lat`/`lng` are nullable — together, never one of them: half a
+ * coordinate is not a location, and `addPlace` refuses it rather than storing
+ * a number nothing can use. Coordinates can be added later, which is the whole
+ * point of them being nullable rather than required.
+ *
+ * `osm_type`/`osm_id` are where a geocoded place records WHAT IT MATCHED, so
+ * #32 can tell "we looked this up" from "somebody typed it". Both null on a
+ * hand-typed place. They are deliberately NOT unique per event: whether
+ * looking up the same café twice is a duplicate to be merged or two pins the
+ * group meant is #32's decision, not this one's.
+ *
+ * WHY `numeric(9, 6)` AND NOT A FLOAT OR A STRING. Six decimal places is about
+ * 11 cm at the equator — far finer than anything a trip planner needs, and the
+ * precision Nominatim answers with. `numeric` stores what was typed EXACTLY, so
+ * a coordinate round-trips unchanged through an edit instead of acquiring a
+ * seventeenth digit; it sorts and indexes, so "the places inside this bounding
+ * box" is an ordinary range query; and arithmetic that genuinely needs floating
+ * point — a haversine distance, the clustering that #33 wants so a day's stops
+ * can be the ones near each other — casts to `float8` at the point of use,
+ * which is what the trig functions take anyway. Three integer digits is exactly
+ * enough for a longitude (-180..180) and two more than a latitude needs.
+ *
+ * `created_by_user_id` and no guest twin: places are created on the host
+ * surface only. A `created_by_guest_email` here would be a column nothing ever
+ * writes, which is the shape of the `events_expense.currency` bug (#25) —
+ * stored, typed, rendered and read by nothing. Guests add LEGS, and the audit
+ * records the invite that added one.
+ */
+export const place = pgTable('events_place', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
+  /** What the group calls it — "Hotel Bellevue", "the trailhead". */
+  name: text('name').notNull(),
+  /** The postal address, when there is one. */
+  address: text('address'),
+  /** Both or neither; see the note above. Degrees, WGS84. */
+  lat: numeric('lat', { precision: 9, scale: 6 }),
+  lng: numeric('lng', { precision: 9, scale: 6 }),
+  /** What a geocoded place matched in OpenStreetMap. Null when hand-typed. */
+  osmType: text('osm_type', { enum: ['node', 'way', 'relation'] }),
+  osmId: text('osm_id'),
+  note: text('note'),
+  createdByUserId: text('created_by_user_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
+}, table => [
+  index('events_place_event_idx').on(table.eventId),
+  // The target of the composite foreign keys on a leg: it is what lets the
+  // database refuse a leg on one trip that ends at another trip's place.
+  uniqueIndex('events_place_event_id_unique').on(table.eventId, table.id)
+])
+
+/**
+ * A LEG: how you get from one place to another (#30) — the edge the itinerary
+ * never had. "Zug → Lugano, the 09:14" is a leg; so is "we ended up walking",
+ * which is the half of this that arrives from a guest while the host is asleep.
+ *
+ * `is_planned` is the difference between those two, and it is the reason this
+ * table exists rather than another timeline item: the 09:14 we INTEND to take
+ * and the bus we ACTUALLY got on are both worth keeping, and one does not
+ * replace the other. The host surface defaults it to true (it is planning) and
+ * the guest surface to false (it is reporting) — see the two handlers.
+ *
+ * ENDPOINTS ARE NULLABLE COLUMNS THAT THE API REQUIRES. Both `from_place_id`
+ * and `to_place_id` are set on every leg anyone can write; they are nullable so
+ * that deleting a place has somewhere to put the hole. `deletePlace`
+ * (`server/domain/places.ts`) nulls the endpoints that pointed at it and
+ * removes outright any leg whose BOTH ends were that place, in one transaction
+ * — so a dangling id is impossible and a leg never quietly becomes a journey
+ * from nowhere to nowhere.
+ *
+ * The foreign keys are therefore `restrict` and COMPOSITE: `(event_id,
+ * place_id)` against `events_place(event_id, id)`, which is what stops a leg on
+ * one trip from ending at another trip's place — unreachable through today's
+ * handlers, and cheaper for the database to refuse than for every future caller
+ * to remember. `restrict` is what makes the deletion order above explicit
+ * rather than silent.
+ *
+ * `sort_order` is the same mechanism the itinerary uses, deliberately: it is
+ * renumbered from the display order in ONE statement by
+ * `applyItineraryLegMove`, never by two PATCHes that swap a pair of numbers.
+ * See `applyTimelineItemMove` in `server/domain/events-data.ts` for why that
+ * shape is not a style preference.
+ */
+export const itineraryLeg = pgTable('events_itinerary_leg', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
+  fromPlaceId: text('from_place_id'),
+  toPlaceId: text('to_place_id'),
+  mode: text('mode', { enum: ['walk', 'bike', 'car', 'train', 'bus', 'ferry', 'plane', 'other'] }).notNull(),
+  /** Nullable: "we walked back at some point" is a leg with no clock on it. */
+  departsAt: timestamp('departs_at', { withTimezone: true }),
+  arrivesAt: timestamp('arrives_at', { withTimezone: true }),
+  /** How long it takes, when that is known without two timestamps. */
+  durationMinutes: integer('duration_minutes'),
+  note: text('note'),
+  sortOrder: integer('sort_order').notNull().default(0),
+  /** The 09:14 we intend to take (true) vs the bus we actually got on (false). */
+  isPlanned: boolean('is_planned').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
+}, table => [
+  index('events_itinerary_leg_event_idx').on(table.eventId),
+  index('events_itinerary_leg_sort_idx').on(table.eventId, table.sortOrder),
+  index('events_itinerary_leg_from_idx').on(table.fromPlaceId),
+  index('events_itinerary_leg_to_idx').on(table.toPlaceId),
+  foreignKey({
+    columns: [table.eventId, table.fromPlaceId],
+    foreignColumns: [place.eventId, place.id],
+    name: 'events_itinerary_leg_event_from_place_fk'
+  }).onDelete('restrict'),
+  foreignKey({
+    columns: [table.eventId, table.toPlaceId],
+    foreignColumns: [place.eventId, place.id],
+    name: 'events_itinerary_leg_event_to_place_fk'
+  }).onDelete('restrict')
 ])
 
 export const media = pgTable('events_media', {
@@ -657,6 +814,8 @@ export const eventsSchema = {
   invite,
   rsvp,
   timelineItem,
+  place,
+  itineraryLeg,
   media,
   icalToken,
   dateOption,

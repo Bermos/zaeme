@@ -1,7 +1,15 @@
 <script setup lang="ts">
 /**
  * The plan — arrive, food, the film, … For a multi-day event (a trip) the
- * items group under day headings so the itinerary reads like an itinerary.
+ * entries group under day headings so the itinerary reads like an itinerary.
+ *
+ * Since #30 an itinerary can also carry LEGS — how you get from one place to
+ * the next — and they are shown in the same list rather than in a box of their
+ * own, because "the 09:14" only means anything between the two things it joins.
+ * `mergeItinerary` (`app/utils/itinerary-order.ts`) decides where each one
+ * lands: the items keep the host's order exactly, and a leg slots in ahead of
+ * the first item that starts after it. An event with no legs renders exactly as
+ * it did before that function existed, which is the point.
  */
 interface TimelineItem {
   id: string
@@ -9,11 +17,31 @@ interface TimelineItem {
   description: string | null
   startsAt: string | null
   location: string | null
+  /** Pinned to a place, when the group has one (#30). */
+  placeId?: string | null
   type: string
   icon: string | null
 }
+interface Place { id: string, name: string, address: string | null }
+interface Leg {
+  id: string
+  fromPlaceName: string | null
+  toPlaceName: string | null
+  mode: string
+  departsAt: string | null
+  arrivesAt: string | null
+  durationMinutes: number | null
+  note: string | null
+  isPlanned: boolean
+  sortOrder?: number
+  createdAt?: string
+}
 
-const props = defineProps<{ timeline: TimelineItem[] }>()
+const props = withDefaults(defineProps<{
+  timeline: TimelineItem[]
+  legs?: Leg[]
+  places?: Place[]
+}>(), { legs: () => [], places: () => [] })
 
 const TYPE_ICONS: Record<string, string> = {
   transport: '🚆',
@@ -23,33 +51,61 @@ const TYPE_ICONS: Record<string, string> = {
   other: '📍'
 }
 
+const MODE_ICONS: Record<string, string> = {
+  walk: '🚶', bike: '🚲', car: '🚗', train: '🚆', bus: '🚌', ferry: '⛴️', plane: '✈️', other: '➡️'
+}
+
+const placeNames = computed(() => new Map(props.places.map(p => [p.id, p.name])))
+
 function at(iso: string | null): string | null {
   return iso ? new Date(iso).toLocaleTimeString('en-CH', { hour: '2-digit', minute: '2-digit' }) : null
 }
 
-function dayKey(iso: string | null): string {
+function dayKey(iso: string | null | undefined): string {
   return iso ? new Date(iso).toDateString() : 'unscheduled'
 }
 
-/** Group under day headings only when the items actually span multiple days. */
+/** Where an item or a leg sits on the calendar — the only thing days need. */
+function entryTime(entry: { kind: 'item' | 'leg', item?: TimelineItem, leg?: Leg }): string | null {
+  return entry.kind === 'item' ? entry.item!.startsAt : entry.leg!.departsAt
+}
+
+const entries = computed(() => mergeItinerary(props.timeline, props.legs))
+
+/** Group under day headings only when the entries actually span multiple days. */
 const groups = computed(() => {
-  const days = new Set(props.timeline.filter(t => t.startsAt).map(t => dayKey(t.startsAt)))
+  const days = new Set(entries.value.map(entryTime).filter(Boolean).map(t => dayKey(t)))
   if (days.size <= 1) {
-    return [{ label: null as string | null, items: props.timeline }]
+    return [{ label: null as string | null, items: entries.value }]
   }
-  const byDay = new Map<string, TimelineItem[]>()
-  for (const item of props.timeline) {
-    const key = dayKey(item.startsAt)
+  const byDay = new Map<string, typeof entries.value>()
+  for (const entry of entries.value) {
+    const key = dayKey(entryTime(entry))
     if (!byDay.has(key)) byDay.set(key, [])
-    byDay.get(key)!.push(item)
+    byDay.get(key)!.push(entry)
   }
   return [...byDay.entries()].map(([key, items]) => ({
     label: key === 'unscheduled'
       ? 'Sometime'
-      : new Date(items[0]!.startsAt!).toLocaleDateString('en-CH', { weekday: 'long', day: 'numeric', month: 'long' }),
+      : new Date(entryTime(items[0]!)!).toLocaleDateString('en-CH', { weekday: 'long', day: 'numeric', month: 'long' }),
     items
   }))
 })
+
+function legLine(leg: Leg): string {
+  const from = leg.fromPlaceName ?? 'somewhere'
+  const to = leg.toPlaceName ?? 'somewhere'
+  return `${from} → ${to}`
+}
+
+function legDetail(leg: Leg): string | null {
+  const bits = [
+    leg.durationMinutes ? `${leg.durationMinutes} min` : null,
+    at(leg.arrivesAt) ? `arrives ${at(leg.arrivesAt)}` : null,
+    leg.note
+  ].filter(Boolean)
+  return bits.length ? bits.join(' · ') : null
+}
 </script>
 
 <template>
@@ -73,32 +129,71 @@ const groups = computed(() => {
         </p>
         <ol class="flex flex-col gap-3">
           <li
-            v-for="item in group.items"
-            :key="item.id"
+            v-for="entry in group.items"
+            :key="`${entry.kind}-${entry.id}`"
             class="flex gap-3"
           >
-            <span class="text-lg leading-6">{{ item.icon || TYPE_ICONS[item.type] || '📍' }}</span>
-            <div>
-              <p class="font-medium">
-                <span
-                  v-if="at(item.startsAt)"
-                  class="text-muted tabular-nums mr-2"
-                >{{ at(item.startsAt) }}</span>
-                {{ item.title }}
-              </p>
-              <p
-                v-if="item.description"
-                class="text-sm text-muted"
-              >
-                {{ item.description }}
-              </p>
-              <p
-                v-if="item.location"
-                class="text-sm text-muted"
-              >
-                📍 {{ item.location }}
-              </p>
-            </div>
+            <template v-if="entry.kind === 'item'">
+              <span class="text-lg leading-6">{{ entry.item.icon || TYPE_ICONS[entry.item.type] || '📍' }}</span>
+              <div>
+                <p class="font-medium">
+                  <span
+                    v-if="at(entry.item.startsAt)"
+                    class="text-muted tabular-nums mr-2"
+                  >{{ at(entry.item.startsAt) }}</span>
+                  {{ entry.item.title }}
+                </p>
+                <p
+                  v-if="entry.item.description"
+                  class="text-sm text-muted"
+                >
+                  {{ entry.item.description }}
+                </p>
+                <!-- The pinned place if there is one, and the free text if
+                     there is not: an item that never had a place reads exactly
+                     as it did before places existed. -->
+                <p
+                  v-if="entry.item.placeId && placeNames.get(entry.item.placeId)"
+                  class="text-sm text-muted"
+                >
+                  📍 {{ placeNames.get(entry.item.placeId) }}
+                </p>
+                <p
+                  v-else-if="entry.item.location"
+                  class="text-sm text-muted"
+                >
+                  📍 {{ entry.item.location }}
+                </p>
+              </div>
+            </template>
+
+            <template v-else>
+              <span class="text-lg leading-6">{{ MODE_ICONS[entry.leg.mode] || '➡️' }}</span>
+              <div>
+                <p class="font-medium">
+                  <span
+                    v-if="at(entry.leg.departsAt)"
+                    class="text-muted tabular-nums mr-2"
+                  >{{ at(entry.leg.departsAt) }}</span>
+                  {{ legLine(entry.leg) }}
+                  <UBadge
+                    v-if="!entry.leg.isPlanned"
+                    color="neutral"
+                    variant="subtle"
+                    size="sm"
+                    class="ml-1"
+                  >
+                    what happened
+                  </UBadge>
+                </p>
+                <p
+                  v-if="legDetail(entry.leg)"
+                  class="text-sm text-muted"
+                >
+                  {{ legDetail(entry.leg) }}
+                </p>
+              </div>
+            </template>
           </li>
         </ol>
       </div>

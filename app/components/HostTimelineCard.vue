@@ -13,11 +13,17 @@ interface TimelineItem {
   description: string | null
   startsAt: string | Date | null
   location: string | null
+  /** The pinned place, when the trip has places to pin to (#30). */
+  placeId?: string | null
   type: string
   sortOrder?: number
 }
+interface Place { id: string, name: string }
 
-const props = defineProps<{ slug: string, timeline: TimelineItem[], trip?: boolean }>()
+const props = withDefaults(
+  defineProps<{ slug: string, timeline: TimelineItem[], places?: Place[], trip?: boolean }>(),
+  { places: () => [] }
+)
 const emit = defineEmits<{ updated: [] }>()
 
 const toast = useToast()
@@ -33,10 +39,22 @@ const TYPE_ICONS: Record<string, string> = {
   transport: '🚆', accommodation: '🛏️', activity: '🎬', meal: '🍕', other: '📍'
 }
 
+/**
+ * The places this event has, as a picker — plus "no place", which is not a
+ * cosmetic entry: `location` is the free-text fallback and unpinning an item
+ * back to it has to be possible from the same control that pinned it.
+ */
+const PLACE_NONE = ''
+const placeItems = computed(() => [
+  { label: 'No place', value: PLACE_NONE },
+  ...props.places.map(p => ({ label: `📍 ${p.name}`, value: p.id }))
+])
+
 const itemType = ref('activity')
 const itemTitle = ref('')
 const itemWhen = ref('')
 const itemLocation = ref('')
+const itemPlaceId = ref(PLACE_NONE)
 const adding = ref(false)
 
 /** `datetime-local` wants `YYYY-MM-DDTHH:mm` in LOCAL time, not an ISO string. */
@@ -57,12 +75,14 @@ async function addItem() {
         title: itemTitle.value,
         type: itemType.value,
         startsAt: itemWhen.value ? new Date(itemWhen.value).toISOString() : null,
-        location: itemLocation.value || null
+        location: itemLocation.value || null,
+        placeId: itemPlaceId.value || null
       }
     })
     itemTitle.value = ''
     itemWhen.value = ''
     itemLocation.value = ''
+    itemPlaceId.value = PLACE_NONE
     emit('updated')
   } catch (e) {
     toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not add that', color: 'error' })
@@ -79,7 +99,7 @@ async function removeItem(id: string) {
 /* ---- edit in place ---- */
 const editingId = ref<string | null>(null)
 const saving = ref(false)
-const draft = reactive({ title: '', type: 'other', when: '', location: '', description: '' })
+const draft = reactive({ title: '', type: 'other', when: '', location: '', description: '', placeId: PLACE_NONE })
 
 function startEdit(item: TimelineItem) {
   editingId.value = item.id
@@ -88,6 +108,7 @@ function startEdit(item: TimelineItem) {
   draft.when = toLocalInput(item.startsAt)
   draft.location = item.location ?? ''
   draft.description = item.description ?? ''
+  draft.placeId = item.placeId ?? PLACE_NONE
 }
 
 async function saveEdit(id: string) {
@@ -101,7 +122,8 @@ async function saveEdit(id: string) {
         type: draft.type,
         startsAt: draft.when ? new Date(draft.when).toISOString() : null,
         location: draft.location || null,
-        description: draft.description || null
+        description: draft.description || null,
+        placeId: draft.placeId || null
       }
     })
     editingId.value = null
@@ -135,6 +157,10 @@ async function move(id: string, direction: 'up' | 'down') {
   } finally {
     moving.value = null
   }
+}
+
+function placeName(id: string): string | undefined {
+  return props.places.find(p => p.id === id)?.name
 }
 
 function when(iso: string | Date | null): string | null {
@@ -189,6 +215,11 @@ function when(iso: string | Date | null): string | null {
             v-model="draft.location"
             placeholder="Where (optional)"
           />
+          <USelect
+            v-if="places.length"
+            v-model="draft.placeId"
+            :items="placeItems"
+          />
           <UTextarea
             v-model="draft.description"
             :rows="2"
@@ -226,7 +257,11 @@ function when(iso: string | Date | null): string | null {
             >{{ when(item.startsAt) }}</span>
             <span class="font-medium">{{ item.title }}</span>
             <span
-              v-if="item.location"
+              v-if="item.placeId && placeName(item.placeId)"
+              class="text-muted"
+            > · 📍 {{ placeName(item.placeId) }}</span>
+            <span
+              v-else-if="item.location"
               class="text-muted"
             > · {{ item.location }}</span>
           </p>
@@ -289,6 +324,12 @@ function when(iso: string | Date | null): string | null {
           v-model="itemWhen"
           type="datetime-local"
           class="sm:w-52"
+        />
+        <USelect
+          v-if="places.length"
+          v-model="itemPlaceId"
+          :items="placeItems"
+          class="sm:w-44"
         />
         <UButton
           type="submit"
