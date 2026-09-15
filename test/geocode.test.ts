@@ -17,6 +17,10 @@ import {
   searchPlaces,
   userAgent,
   type CachedGeocode,
+  foldQuery,
+  geocoderBase,
+  type GateOutcome,
+  type GeocodeAnswer,
   type GeocodeCacheStore,
   type GeocoderProvider,
   type PlaceSuggestion,
@@ -90,10 +94,20 @@ function stubProvider(answer: () => Promise<PlaceSuggestion[]>) {
 
 /** A gate that always allows, so a cache test is not also a limiter test. */
 const openGate: RateGate = {
-  async take() {
-    return true
+  async take(): Promise<GateOutcome> {
+    return 'go'
   },
   block() {}
+}
+
+/** A gate refusing for the two different reasons it can refuse for. */
+function shutGate(outcome: 'busy' | 'cooldown'): RateGate {
+  return {
+    async take(): Promise<GateOutcome> {
+      return outcome
+    },
+    block() {}
+  }
 }
 
 const bridge: PlaceSuggestion = {
@@ -177,46 +191,46 @@ describe('one question is one cache key', () => {
 
 /* ------------------------------- the limiter ------------------------------ */
 
-describe('at most one request a second, whatever the browser does', () => {
-  /**
-   * A VIRTUAL CLOCK WHERE SLEEPS OVERLAP, which is the only kind that can tell
-   * this limiter from a broken one.
-   *
-   * The obvious fake — `sleep: async ms => { t += ms }` — advances the shared
-   * clock the instant it is called, so three concurrent callers are serialised
-   * into three sequential ones and the wrong implementation (read the clock,
-   * sleep, and only then reserve the slot) produces exactly the same numbers as
-   * the right one. Here a sleep is a pending wake-up, time moves once when the
-   * earliest of them is released, and callers genuinely wait side by side.
-   */
-  function fakeClock() {
-    let t = 1000
-    const pending: Array<{ at: number, wake: () => void }> = []
-    const sleep = (ms: number) => new Promise<void>((wake) => {
-      pending.push({ at: t + ms, wake })
-    })
-    /** Run time forward until nothing is waiting. */
-    const drain = async () => {
-      // Let everything that did NOT have to wait resolve at the current time
-      // first — otherwise the caller who was let straight through records the
-      // clock as it stands after the first wake-up, and the one moment this
-      // test is about (a caller going through with no wait at all) is lost.
+/**
+ * A VIRTUAL CLOCK WHERE SLEEPS OVERLAP, which is the only kind that can tell
+ * this limiter from a broken one.
+ *
+ * The obvious fake — `sleep: async ms => { t += ms }` — advances the shared
+ * clock the instant it is called, so three concurrent callers are serialised
+ * into three sequential ones and the wrong implementation (read the clock,
+ * sleep, and only then reserve the slot) produces exactly the same numbers as
+ * the right one. Here a sleep is a pending wake-up, time moves once when the
+ * earliest of them is released, and callers genuinely wait side by side.
+ */
+function fakeClock() {
+  let t = 1000
+  const pending: Array<{ at: number, wake: () => void }> = []
+  const sleep = (ms: number) => new Promise<void>((wake) => {
+    pending.push({ at: t + ms, wake })
+  })
+  /** Run time forward until nothing is waiting. */
+  const drain = async () => {
+    // Let everything that did NOT have to wait resolve at the current time
+    // first — otherwise the caller who was let straight through records the
+    // clock as it stands after the first wake-up, and the one moment this
+    // test is about (a caller going through with no wait at all) is lost.
+    await new Promise(r => setTimeout(r, 0))
+    // A bounded loop: a limiter that re-slept for ever would hang the suite.
+    for (let i = 0; i < 100 && pending.length; i++) {
+      pending.sort((a, b) => a.at - b.at)
+      const next = pending.shift()!
+      t = Math.max(t, next.at)
+      next.wake()
       await new Promise(r => setTimeout(r, 0))
-      // A bounded loop: a limiter that re-slept for ever would hang the suite.
-      for (let i = 0; i < 100 && pending.length; i++) {
-        pending.sort((a, b) => a.at - b.at)
-        const next = pending.shift()!
-        t = Math.max(t, next.at)
-        next.wake()
-        await new Promise(r => setTimeout(r, 0))
-      }
     }
-    return { now: () => t, sleep, drain, at: () => t }
   }
+  return { now: () => t, sleep, drain, at: () => t }
+}
 
+describe('at most one request a second, whatever the browser does', () => {
   /** Three planners typing at the same moment, and when each was let through. */
   async function burst(gate: RateGate, clock: ReturnType<typeof fakeClock>, n = 3) {
-    const lets: Array<{ ok: boolean, at: number }> = []
+    const lets: Array<{ ok: GateOutcome, at: number }> = []
     const takes = Array.from({ length: n }, async () => {
       const ok = await gate.take()
       lets.push({ ok, at: clock.at() })
@@ -229,11 +243,11 @@ describe('at most one request a second, whatever the browser does', () => {
   it('spaces sequential callers a second apart', async () => {
     const clock = fakeClock()
     const gate = createRateGate(clock)
-    expect(await gate.take()).toBe(true)
+    expect(await gate.take()).toBe('go')
     const first = clock.at()
     const second = gate.take()
     await clock.drain()
-    expect(await second).toBe(true)
+    expect(await second).toBe('go')
     expect(clock.at() - first).toBe(1100)
   })
 
@@ -245,7 +259,7 @@ describe('at most one request a second, whatever the browser does', () => {
     // 1000; the reservation being synchronous is what spreads them.
     const clock = fakeClock()
     const lets = await burst(createRateGate(clock), clock)
-    expect(lets.map(l => l.ok)).toEqual([true, true, true])
+    expect(lets.map(l => l.ok)).toEqual(['go', 'go', 'go'])
     expect(lets.map(l => l.at)).toEqual([1000, 2100, 3200])
   })
 
@@ -256,26 +270,46 @@ describe('at most one request a second, whatever the browser does', () => {
     const clock = fakeClock()
     const gate = createRateGate({ ...clock, maxWaitMs: 2000 })
     const lets = await burst(gate, clock)
-    expect(lets.map(l => l.ok).sort()).toEqual([false, true, true])
+    expect(lets.map(l => l.ok).sort()).toEqual(['busy', 'go', 'go'])
     // …and the refused caller left the queue where it found it. The second
     // took the slot at 2100 and reserved to 3200, so a fourth arriving now is
     // let through THERE — a gate that reserved for the caller it turned away
     // would make it wait to 4300 instead.
     const fourth = gate.take()
     await clock.drain()
-    expect(await fourth).toBe(true)
+    expect(await fourth).toBe('go')
     expect(clock.at()).toBe(3200)
+  })
+
+  it('reaches a caller who was already asleep when the block landed', async () => {
+    // THE HALF THAT WAS MISSING. `block()` fires while two callers are mid-sleep
+    // — they have already passed the check at the top of `take()` — so a gate
+    // that tests the cooldown only before waiting lets them wake up and call the
+    // provider that has just told us to stop. Three refusals for one 429.
+    const clock = fakeClock()
+    const gate = createRateGate(clock)
+    const outcomes: GateOutcome[] = []
+    const takes = [0, 1, 2].map(async () => {
+      outcomes.push(await gate.take())
+    })
+    // The first is through immediately; the other two are asleep. Block now.
+    await new Promise(r => setTimeout(r, 0))
+    gate.block(300000)
+    await clock.drain()
+    await Promise.all(takes)
+    expect(outcomes).toEqual(['go', 'cooldown', 'cooldown'])
   })
 
   it('stops entirely when the provider has said to stop', async () => {
     let t = 1000
     const gate = createRateGate({ now: () => t, sleep: async () => {} })
     gate.block(5000)
-    expect(await gate.take()).toBe(false)
-    expect(await gate.take()).toBe(false)
+    // 'cooldown', not 'busy': the provider said stop, our queue is empty.
+    expect(await gate.take()).toBe('cooldown')
+    expect(await gate.take()).toBe('cooldown')
     // …and starts again once the cooldown has passed, rather than latching off.
     t += 5001
-    expect(await gate.take()).toBe(true)
+    expect(await gate.take()).toBe('go')
   })
 })
 
@@ -400,13 +434,7 @@ describe('a geocoder that cannot be reached is not a failed page', () => {
   it('says busy — a third thing again — when the queue is too long', async () => {
     const { store } = memoryStore()
     const { provider, calls } = stubProvider(async () => [bridge])
-    const shut: RateGate = {
-      async take() {
-        return false
-      },
-      block() {}
-    }
-    const answer = await searchPlaces('zug hb', { provider, store, gate: shut })
+    const answer = await searchPlaces('zug hb', { provider, store, gate: shutGate('busy') })
     expect(answer).toMatchObject({ status: 'unavailable', reason: 'geocoder_busy', results: [] })
     expect(calls()).toBe(0)
   })
@@ -421,14 +449,121 @@ describe('a geocoder that cannot be reached is not a failed page', () => {
     const down = stubProvider(async () => {
       throw new Error('ETIMEDOUT')
     })
-    const shut: RateGate = {
-      async take() {
-        return false
-      },
-      block() {}
-    }
-    const answer = await searchPlaces('zug hb', { provider: down.provider, store, gate: shut })
+    const answer = await searchPlaces('zug hb', { provider: down.provider, store, gate: shutGate('busy') })
     expect(answer).toMatchObject({ status: 'ok', cached: true, results: [bridge] })
+  })
+
+  it('answers one 429 with ONE request, not with the three behind it', async () => {
+    // The end-to-end version of the gate test above, through `searchPlaces`:
+    // three planners typing at the same moment against a provider that is
+    // refusing. Without the re-check after the sleep this is four calls to a
+    // service that has just said stop — over three seconds, which is exactly
+    // how a rate limit becomes a ban.
+    const { store } = memoryStore()
+    const { provider, calls } = stubProvider(async () => {
+      throw new GeocoderRefused(429)
+    })
+    const clock = fakeClock()
+    const gate = createRateGate(clock)
+
+    const answers: GeocodeAnswer[] = []
+    const searches = ['zug hb', 'lakeside', 'ana flat'].map(async (q) => {
+      answers.push(await searchPlaces(q, { provider, store, gate }))
+    })
+    await clock.drain()
+    await Promise.all(searches)
+
+    expect(calls()).toBe(1)
+    // …and all three say the same true thing about why.
+    expect(answers.map(a => a.reason)).toEqual([
+      'geocoder_rate_limited', 'geocoder_rate_limited', 'geocoder_rate_limited'
+    ])
+  })
+
+  it('keeps saying "rate limited" for the whole cooldown, not "busy"', async () => {
+    // The five minutes after a 429 are refused by the GATE, not by the fetch,
+    // and mapping that to `geocoder_busy` reports our own queue — the opposite
+    // diagnosis, for 299 of the 300 seconds. Asserting only `status` here looks
+    // like coverage of exactly this and is not.
+    const { store } = memoryStore()
+    const { provider, calls } = stubProvider(async () => {
+      throw new GeocoderRefused(403)
+    })
+    let t = 1000
+    const gate = createRateGate({ now: () => t, sleep: async () => {} })
+
+    const first = await searchPlaces('zug hb', { provider, store, gate })
+    expect(first.reason).toBe('geocoder_rate_limited')
+    t += 60_000
+    const later = await searchPlaces('lakeside', { provider, store, gate })
+    expect(later).toMatchObject({ status: 'unavailable', reason: 'geocoder_rate_limited' })
+    expect(calls()).toBe(1)
+  })
+
+  it('serves a STALE answer rather than nothing when the geocoder is down', async () => {
+    // The thirty-day ttl is the argument that place names do not move, and that
+    // argument does not stop being true at midnight on the thirty-first day. An
+    // expired row with results in it is still the right answer; throwing it away
+    // to say "unavailable" loses something the instance already has.
+    const { store } = memoryStore()
+    let t = new Date('2027-06-01T10:00:00Z')
+    const up = stubProvider(async () => [bridge])
+    await searchPlaces('zug hb', { provider: up.provider, store, gate: openGate, now: () => t })
+
+    t = new Date(t.getTime() + CACHE_TTL_MS + 1)
+    const down = stubProvider(async () => {
+      throw new Error('ETIMEDOUT')
+    })
+    const answer = await searchPlaces('zug hb', { provider: down.provider, store, gate: openGate, now: () => t })
+    expect(answer).toMatchObject({ status: 'ok', cached: true, results: [bridge] })
+    // It tried first: a stale answer is the fallback, never the plan.
+    expect(down.calls()).toBe(1)
+  })
+
+  it('…and does NOT re-serve a stale "no matches"', async () => {
+    // The one-day ttl exists because an empty answer is also what a bad
+    // afternoon produces. Re-serving it past its life hardens somebody else's
+    // outage into our own answer, which is the opposite of the rule above.
+    const { store } = memoryStore()
+    let t = new Date('2027-06-01T10:00:00Z')
+    const empty = stubProvider(async () => [])
+    await searchPlaces('qqqqzz', { provider: empty.provider, store, gate: openGate, now: () => t })
+
+    t = new Date(t.getTime() + EMPTY_CACHE_TTL_MS + 1)
+    const down = stubProvider(async () => {
+      throw new Error('ETIMEDOUT')
+    })
+    const answer = await searchPlaces('qqqqzz', { provider: down.provider, store, gate: openGate, now: () => t })
+    expect(answer).toMatchObject({ status: 'unavailable', reason: 'geocoder_unreachable', results: [] })
+  })
+
+  it('falls back on a stale answer when the gate refuses too', async () => {
+    // Not only on a failed fetch: during a cooldown nothing may leave the
+    // process at all, and a row that was good yesterday is still the best thing
+    // this instance can say.
+    const { store } = memoryStore()
+    let t = new Date('2027-06-01T10:00:00Z')
+    const up = stubProvider(async () => [bridge])
+    await searchPlaces('zug hb', { provider: up.provider, store, gate: openGate, now: () => t })
+
+    t = new Date(t.getTime() + CACHE_TTL_MS + 1)
+    const answer = await searchPlaces('zug hb', {
+      provider: up.provider, store, gate: shutGate('cooldown'), now: () => t
+    })
+    expect(answer).toMatchObject({ status: 'ok', cached: true, results: [bridge] })
+    expect(up.calls()).toBe(1)
+  })
+
+  it('tells "type more" from "that is not a place name"', async () => {
+    // Opposite advice, and one shared message told whoever pasted a paragraph
+    // into the box to type at least two characters.
+    const { store } = memoryStore()
+    const { provider, calls } = stubProvider(async () => [bridge])
+    await expect(searchPlaces('z', { provider, store, gate: openGate }))
+      .rejects.toMatchObject({ statusCode: 422, message: expect.stringMatching(/at least 2 characters/) })
+    await expect(searchPlaces('x'.repeat(161), { provider, store, gate: openGate }))
+      .rejects.toMatchObject({ statusCode: 422, message: expect.stringMatching(/at most 160 characters/) })
+    expect(calls()).toBe(0)
   })
 
   it('refuses a query too short to be one, rather than answering it empty', async () => {
@@ -541,6 +676,86 @@ describe('the outbound request identifies this instance', () => {
       throw new Error('ETIMEDOUT')
     })
     await expect(timedOut.search('zug hb')).rejects.not.toBeInstanceOf(GeocoderRefused)
+  })
+})
+
+describe('the geocoder has one lever over it', () => {
+  const SAVED = process.env.ZAEME_GEOCODER_URL
+  afterEach(() => {
+    if (SAVED === undefined) delete process.env.ZAEME_GEOCODER_URL
+    else process.env.ZAEME_GEOCODER_URL = SAVED
+  })
+
+  it('is Nominatim when nothing is configured, which is every real instance', () => {
+    delete process.env.ZAEME_GEOCODER_URL
+    expect(geocoderBase()).toBe('https://nominatim.openstreetmap.org')
+    // …and a value that is not an http(s) URL is ignored rather than turned
+    // into a request to nowhere: a typo must not silently break search.
+    process.env.ZAEME_GEOCODER_URL = 'nominatim.openstreetmap.org'
+    expect(geocoderBase()).toBe('https://nominatim.openstreetmap.org')
+  })
+
+  it('points somewhere else when it is, and the provider goes there', async () => {
+    // The whole point: CI aims this at a stub so a test suite never sends live
+    // traffic under this software's User-Agent, and an instance that has been
+    // told to stop calling aims it at an address that refuses connections.
+    process.env.ZAEME_GEOCODER_URL = 'http://127.0.0.1:3333/'
+    expect(geocoderBase()).toBe('http://127.0.0.1:3333')
+
+    const seen: string[] = []
+    const provider = createNominatimProvider(async (url) => {
+      seen.push(url)
+      return []
+    })
+    await provider.search('zug hb')
+    expect(seen).toEqual(['http://127.0.0.1:3333/search'])
+  })
+
+  it('is read per call, not frozen at import', () => {
+    // A module-level constant cannot be changed from outside the process, which
+    // is the one thing this variable exists to allow.
+    process.env.ZAEME_GEOCODER_URL = 'http://127.0.0.1:1'
+    expect(geocoderBase()).toBe('http://127.0.0.1:1')
+    process.env.ZAEME_GEOCODER_URL = 'http://127.0.0.1:2'
+    expect(geocoderBase()).toBe('http://127.0.0.1:2')
+  })
+
+  it('folds a query the same way whatever its length', () => {
+    // `foldQuery` is the folding with no opinion about length, which is what
+    // lets the two out-of-bounds refusals be different sentences.
+    expect(foldQuery('  Ponte   25 DE Abril ')).toBe('ponte 25 de abril')
+    expect(foldQuery('x'.repeat(200))).toHaveLength(200)
+    expect(foldQuery('z')).toBe('z')
+  })
+
+  it('is aimed at the stub in CI, in BOTH jobs that boot a server', () => {
+    // The claim "the suite sends OpenStreetMap nothing" is a property of this
+    // workflow file, and it is one line away from silently stopping being true.
+    // The smoke queries are salted per run on purpose, so the cache cannot
+    // spare the request: without the override every CI run is live traffic from
+    // a shared address under the `zaeme/1.0` prefix production also sends.
+    const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
+    expect((workflow.match(/ZAEME_GEOCODER_URL: http/g) ?? []).length).toBe(2)
+    expect((workflow.match(/name: Boot the geocoder stub/g) ?? []).length).toBe(2)
+    // …and booted is not the same as up: a stub that never answered would let
+    // every shape assertion pass on the degrade path instead.
+    expect(workflow).toMatch(/\$ZAEME_GEOCODER_URL\/healthz/)
+    expect(existsSync(join(ROOT, 'scripts', 'geocoder-stub.mjs'))).toBe(true)
+  })
+
+  it('has a stub that answers the two paths in the shape the mapping parses', () => {
+    // A stub that answered a different shape would make every CI run prove the
+    // degrade path while reading as coverage of the feature.
+    const stub = readFileSync(join(ROOT, 'scripts', 'geocoder-stub.mjs'), 'utf8')
+    expect(stub).toMatch(/'\/search'/)
+    expect(stub).toMatch(/'\/reverse'/)
+    // Seven decimals, like the real service — so the rounding to the column's
+    // six is exercised rather than pre-empted.
+    expect(stub).toMatch(/lat: '38\.6894441'/)
+    expect(mapNominatimResult({
+      osm_type: 'way', osm_id: 4306103, lat: '38.6894441', lon: '-9.1772221',
+      type: 'bridge', name: 'Ponte 25 de Abril', display_name: 'Ponte 25 de Abril, Lisboa, Portugal'
+    })).toMatchObject({ lat: 38.689444, osmType: 'way' })
   })
 })
 

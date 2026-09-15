@@ -1403,6 +1403,12 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   check "a search with no query at all"           400 "${PLN32[@]}" "$HSEARCH"
   check "a one-character search"                  422 "${PLN32[@]}" "$HSEARCH?q=z"
   contains "...and says to type more"                  "$(body "${PLN32[@]}" "$HSEARCH?q=z")" 'Type at least 2 characters'
+  # The OPPOSITE advice, and it used to be the same sentence: 161 characters is
+  # past what the domain will key, and "type at least 2 characters" is the one
+  # thing that cannot help whoever pasted a paragraph into the box.
+  LONG32=$(printf 'x%.0s' $(seq 1 170))
+  check "a search longer than a place name"       422 "${PLN32[@]}" --get --data-urlencode "q=$LONG32" "$HSEARCH"
+  contains "...and says to shorten it instead"         "$(body "${PLN32[@]}" --get --data-urlencode "q=$LONG32" "$HSEARCH")" 'at most 160 characters'
   check "a pin that is not on the planet"         422 "${PLN32[@]}" "$HREVERSE?lat=91&lng=0"
   check "half a pin"                              422 "${PLN32[@]}" "$HREVERSE?lat=38.68944&lng="
   contains "...says both or neither, like a place"     "$(body "${PLN32[@]}" "$HREVERSE?lat=38.68944&lng=")" 'both a latitude and a longitude'
@@ -1483,6 +1489,14 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # applied only on the add would leave open.
   FLAT32=$(place_id "$(body "${PLN32[@]}" "$HPLACES32")" "Ana flat")
   check "an edit cannot take another place's feature" 409 "${PLN32[@]}" "${JSON[@]}" -X PATCH "$HPLACES32/$FLAT32" -d "{$BRIDGE32}"
+  # …AND A PLACE IS NOT A DUPLICATE OF ITSELF. The self-exclusion in
+  # `assertOsmRefFree` is the one line that makes the edit branch usable at all,
+  # and nothing else here can see it: replacing the `find` with `rows[0]` leaves
+  # every other check in this suite and every unit test green, while every save
+  # of a geocoded place 409s against itself.
+  BRIDGEID32=$(place_id "$(body "${PLN32[@]}" "$HPLACES32")" "Ponte 25 de Abril")
+  check "a geocoded place may be saved again"     200 "${PLN32[@]}" "${JSON[@]}" -X PATCH "$HPLACES32/$BRIDGEID32" -d "{\"name\":\"Ponte 25 de Abril\",$BRIDGE32}"
+  contains "...and still holds the feature after"      "$(body "${PLN32[@]}" "$HPLACES32")" '"osmType":"way","osmId":"4306103"'
   check "...while a place keeps its own on a rename" 200 "${PLN32[@]}" "${JSON[@]}" -X PATCH "$HPLACES32/$FLAT32" -d '{"name":"Ana upstairs flat"}'
   KEPT=$(body "${PLN32[@]}" "$HPLACES32")
   contains "the renamed place is still on the trip"    "$KEPT" '"name":"Ana upstairs flat"'

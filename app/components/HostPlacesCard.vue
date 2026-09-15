@@ -38,6 +38,15 @@ interface Place {
   address: string | null
   lat: number | null
   lng: number | null
+  /**
+   * What this place matched in OpenStreetMap, when it came from the search.
+   *
+   * Carried through the EDIT form as well as the add, which is not decoration:
+   * one feature is one place per event, so a reference the form could set and
+   * never show is a rule a planner can hit and cannot get out of.
+   */
+  osmType: string | null
+  osmId: string | null
   note: string | null
 }
 interface Leg {
@@ -187,8 +196,52 @@ function useSuggestion(s: Suggestion) {
   newPlace.lng = String(s.lng)
   newPlace.osmType = s.osmType ?? ''
   newPlace.osmId = s.osmId ?? ''
+  matched.name = newPlace.name
+  matched.lat = newPlace.lat
+  matched.lng = newPlace.lng
   showCoords.value = true
   clearSearch()
+}
+
+/**
+ * WHAT THE SUGGESTION SAID, so the form can tell when it is no longer true.
+ *
+ * A reference is a claim: "this place IS OpenStreetMap way 4306103". Edit the
+ * name or drag the latitude and the claim stops being one — the place saved
+ * would assert a feature at coordinates that are not it, and it would hold that
+ * feature's slot in the one-per-event rule against the place that really is it.
+ * So the claim is dropped the moment the thing it was about is edited away,
+ * which the watcher below does and the ✕ beside the badge does explicitly.
+ *
+ * THE EXPLICIT CONTROL IS NOT A NICETY. "A group that wants two pins on one
+ * building names the second by hand" is the whole escape from the uniqueness
+ * rule, and without a way to drop the reference a second attempt is refused
+ * whatever it is renamed to — the only way out being a page reload.
+ */
+const matched = reactive({ name: '', lat: '', lng: '' })
+
+function forgetMatch() {
+  newPlace.osmType = ''
+  newPlace.osmId = ''
+  matched.name = ''
+  matched.lat = ''
+  matched.lng = ''
+}
+
+watch(
+  () => [newPlace.name, newPlace.lat, newPlace.lng].join('|'),
+  () => {
+    if (!newPlace.osmId) return
+    if (newPlace.name !== matched.name || newPlace.lat !== matched.lat || newPlace.lng !== matched.lng) {
+      forgetMatch()
+    }
+  }
+)
+
+/** The same claim on the edit form, and the same way out of it. */
+function forgetDraftMatch() {
+  placeDraft.osmType = ''
+  placeDraft.osmId = ''
 }
 
 /** Dropping a pin should name a place: the same search, the other way round. */
@@ -211,6 +264,11 @@ async function nameThisPin() {
       newPlace.address = found.address ?? ''
       newPlace.osmType = found.osmType ?? ''
       newPlace.osmId = found.osmId ?? ''
+      // The pin the planner typed is what was asked about, so it — not the
+      // result's own position — is what the claim is anchored to.
+      matched.name = newPlace.name
+      matched.lat = newPlace.lat
+      matched.lng = newPlace.lng
     }
   } catch (e) {
     toast.add({ title: message(e, 'Could not look that pin up'), color: 'error' })
@@ -233,8 +291,9 @@ async function addPlace() {
         // when only one of the two arrives.
         lat: newPlace.lat || null,
         lng: newPlace.lng || null,
-        // Both or neither here too, which is why they are cleared together
-        // below: a place whose coordinates were typed over has no OSM feature.
+        // Both or neither here too. They are dropped the moment the name or
+        // the coordinates are edited away from what the suggestion said — see
+        // `matched` — so what is sent here is only ever a claim still true.
         osmType: newPlace.osmType || null,
         osmId: newPlace.osmId || null,
         note: newPlace.note || null
@@ -245,8 +304,7 @@ async function addPlace() {
     newPlace.lat = ''
     newPlace.lng = ''
     newPlace.note = ''
-    newPlace.osmType = ''
-    newPlace.osmId = ''
+    forgetMatch()
     emit('updated')
   } catch (e) {
     toast.add({ title: message(e, 'Could not add that place'), color: 'error' })
@@ -257,7 +315,7 @@ async function addPlace() {
 
 const editingPlace = ref<string | null>(null)
 const savingPlace = ref(false)
-const placeDraft = reactive({ name: '', address: '', lat: '', lng: '', note: '' })
+const placeDraft = reactive({ name: '', address: '', lat: '', lng: '', note: '', osmType: '', osmId: '' })
 
 function startEditPlace(place: Place) {
   editingPlace.value = place.id
@@ -266,6 +324,10 @@ function startEditPlace(place: Place) {
   placeDraft.lat = place.lat === null ? '' : String(place.lat)
   placeDraft.lng = place.lng === null ? '' : String(place.lng)
   placeDraft.note = place.note ?? ''
+  // Read back and sent again below, so a rename does not silently drop the
+  // reference — and so the ✕ beside it is the way to give the feature up.
+  placeDraft.osmType = place.osmType ?? ''
+  placeDraft.osmId = place.osmId ?? ''
 }
 
 async function savePlace(id: string) {
@@ -279,6 +341,8 @@ async function savePlace(id: string) {
         address: placeDraft.address || null,
         lat: placeDraft.lat || null,
         lng: placeDraft.lng || null,
+        osmType: placeDraft.osmType || null,
+        osmId: placeDraft.osmId || null,
         note: placeDraft.note || null
       }
     })
@@ -438,6 +502,20 @@ function coordinates(place: Place): string | null {
                 placeholder="Longitude (optional)"
                 class="flex-1"
               />
+            </div>
+            <div
+              v-if="placeDraft.osmId"
+              class="flex items-center gap-2 text-xs text-muted"
+            >
+              <span>Matched OpenStreetMap {{ placeDraft.osmType }}/{{ placeDraft.osmId }}</span>
+              <UButton
+                size="xs"
+                variant="ghost"
+                color="neutral"
+                @click="forgetDraftMatch"
+              >
+                Not this one
+              </UButton>
             </div>
             <UTextarea
               v-model="placeDraft.note"
@@ -610,6 +688,25 @@ function coordinates(place: Place): string | null {
               @click="nameThisPin"
             >
               Name this pin
+            </UButton>
+          </div>
+          <!--
+            The claim, and the way out of it. One OpenStreetMap feature is one
+            place per trip, so without this a second pin on the same building is
+            refused whatever it is renamed to.
+          -->
+          <div
+            v-if="newPlace.osmId"
+            class="flex items-center gap-2 text-xs text-muted"
+          >
+            <span>Matched OpenStreetMap {{ newPlace.osmType }}/{{ newPlace.osmId }}</span>
+            <UButton
+              size="xs"
+              variant="ghost"
+              color="neutral"
+              @click="forgetMatch"
+            >
+              Not this one
             </UButton>
           </div>
         </form>

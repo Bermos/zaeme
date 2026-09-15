@@ -151,13 +151,21 @@ concurrency:
 # both halves are executed — the same bridge twice is a 409 naming the place
 # already there, on the edit as well as on the add, while two hand-typed places
 # with no reference at all are not duplicates of each other — the ordinary case,
-# and the one a uniqueness rule is most likely to break. 337 -> 374.
+# and the one a uniqueness rule is most likely to break.
+#
+# Four of the 41 came out of the review, and two are worth naming. A geocoded
+# place saved again with its OWN reference must answer 200: the self-exclusion
+# in `assertOsmRefFree` is one `find` predicate, replacing it with `rows[0]`
+# left every unit test and every other check here green while making every save
+# of a searched place 409 against itself. And a 170-character query is refused
+# with the OPPOSITE advice to a one-character one — they shared a sentence, so
+# whoever pasted a paragraph was told to type at least two characters. 337 -> 378.
 #
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '374'
+  MIN_SMOKE_CHECKS: '378'
 
 jobs:
   ci:
@@ -313,6 +321,17 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
+      # THE SMOKE SUITE SENDS OPENSTREETMAP NOTHING (#32). The place-search
+      # checks salt their queries per run on purpose, so the cache cannot spare
+      # the request — which is the right way to test a cache and the wrong
+      # thing to point at somebody else's public service twice per CI run, from
+      # a shared runner address, under the same `zaeme/1.0` User-Agent prefix a
+      # real deployment sends. A block earned here is a block served to the
+      # owner's instance. `scripts/geocoder-stub.mjs` answers instead, in
+      # Nominatim's own shape, so everything between the route and the socket
+      # is still the real thing. Unset — which is every real instance — means
+      # Nominatim; see `geocoderBase` in server/domain/geocode.ts.
+      ZAEME_GEOCODER_URL: http://127.0.0.1:3333
       # MIN_SMOKE_CHECKS is set once at the top of this file, for this job and
       # for `upgrade` together.
       # RESEND_API_KEY and KITCHEN_SERVICE_MAIL are deliberately absent: mail
@@ -354,6 +373,24 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      # The stub the two `ZAEME_GEOCODER_URL` above point at. Booted before
+      # anything that could search, and WAITED FOR rather than assumed: if it
+      # were not up, the app would degrade to "search is unavailable" and every
+      # shape assertion would still pass — green, and proving the outage path
+      # twice instead of the feature.
+      - name: Boot the geocoder stub
+        run: |
+          nohup node scripts/geocoder-stub.mjs > geocoder-stub.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS "$ZAEME_GEOCODER_URL/healthz" > /dev/null; then
+              echo "the geocoder stub is up on $ZAEME_GEOCODER_URL"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the geocoder stub never answered at $ZAEME_GEOCODER_URL"
+          cat geocoder-stub.log
+          exit 1
 
       - name: Wait for object storage
         run: |
@@ -498,6 +535,11 @@ jobs:
       S3_BUCKET: zaeme-ci
       S3_ENDPOINT: http://127.0.0.1:9090
       S3_REGION: us-east-1
+      # See `api`: the geocoder is a stub here too, so neither release booted by
+      # this job sends a live request. The previous release ignores it (#32 is
+      # what introduced the variable), which is exactly what "anything added
+      # there belongs here" is for.
+      ZAEME_GEOCODER_URL: http://127.0.0.1:3333
 
     steps:
       - name: Checkout
@@ -573,6 +615,24 @@ jobs:
       - name: Build the previous release
         working-directory: ${{ runner.temp }}/previous
         run: pnpm build
+
+      # The stub the two `ZAEME_GEOCODER_URL` above point at. Booted before
+      # anything that could search, and WAITED FOR rather than assumed: if it
+      # were not up, the app would degrade to "search is unavailable" and every
+      # shape assertion would still pass — green, and proving the outage path
+      # twice instead of the feature.
+      - name: Boot the geocoder stub
+        run: |
+          nohup node scripts/geocoder-stub.mjs > geocoder-stub.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS "$ZAEME_GEOCODER_URL/healthz" > /dev/null; then
+              echo "the geocoder stub is up on $ZAEME_GEOCODER_URL"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the geocoder stub never answered at $ZAEME_GEOCODER_URL"
+          cat geocoder-stub.log
+          exit 1
 
       - name: Wait for object storage
         run: |

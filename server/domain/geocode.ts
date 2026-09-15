@@ -61,8 +61,14 @@ import { assertPlanner, loadEventBySlug } from './permissions'
  *    normalised query. In normal use the rate limit is therefore unreachable:
  *    a group planning a trip asks about a dozen places, once;
  *  - a provider that answers 429 or 403 has told us to stop, so `rateGate`
- *    stops — for five minutes, without asking again. Retrying into a refusal is
- *    how a rate limit becomes a ban.
+ *    stops — for five minutes, without asking again, INCLUDING the callers
+ *    already asleep in the queue when the refusal arrived. Retrying into a
+ *    refusal is how a rate limit becomes a ban, and three of them arriving over
+ *    the next three seconds is the shape that mistake actually takes;
+ *  - `ZAEME_GEOCODER_URL` is the lever over all of it (see `geocoderBase`):
+ *    unset means Nominatim, CI points it at a stub so a test suite never sends
+ *    live traffic under this software's User-Agent, and an instance that has to
+ *    stop calling right now points it at an address that refuses connections.
  *
  * ── DEGRADING ──────────────────────────────────────────────────────────────
  *
@@ -100,6 +106,14 @@ export interface PlaceSuggestion {
  * they are three different things to say and one of them is temporary in a way
  * the person can feel ("try again in a moment" vs "this instance cannot reach
  * the geocoder at all").
+ *
+ * THE PERSON AT THE KEYBOARD IS NOT THE AUDIENCE FOR THIS. Every one of the
+ * three renders as one sentence on the card — "search is unavailable, type the
+ * name" — because there is nothing a planner can do about any of them. The
+ * audience is whoever runs the instance, through the log line
+ * `reportUnavailable` writes: `geocoder_rate_limited` means OpenStreetMap has
+ * told this deployment to stop, which needs a person, and the other two do not.
+ * A field nothing reads would be a comment pretending to be an enum.
  */
 export type GeocodeUnavailable = 'geocoder_unreachable' | 'geocoder_rate_limited' | 'geocoder_busy'
 
@@ -169,12 +183,23 @@ const MAX_QUERY_LENGTH = 160
  * character: the same word, two byte strings, and — being a cache key — two
  * separate requests for the same answer.
  *
- * Returns null when there is nothing to search for; the caller turns that into
- * a refusal rather than an empty answer, so "type more" never reads as "no such
- * place".
+ * `foldQuery` is the folding on its own, with no opinion about length;
+ * `normaliseQuery` adds the bounds and returns null outside them. They are two
+ * functions because THE TWO WAYS OF BEING OUT OF BOUNDS ARE OPPOSITE ADVICE: a
+ * single null told somebody who pasted a paragraph to "type at least 2
+ * characters", which is the one thing that cannot help them.
+ */
+export function foldQuery(raw: string): string {
+  return raw.normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+/**
+ * The folded query, or null when there is nothing to search for; the caller
+ * turns that into a refusal rather than an empty answer, so "type more" never
+ * reads as "no such place".
  */
 export function normaliseQuery(raw: string): string | null {
-  const q = raw.normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase()
+  const q = foldQuery(raw)
   if (q.length < MIN_QUERY_LENGTH || q.length > MAX_QUERY_LENGTH) return null
   return q
 }
@@ -245,9 +270,20 @@ const MAX_WAIT_MS = 4000
 /** A provider that answered 429 or 403 is left alone for this long. */
 const COOLDOWN_MS = 5 * 60 * 1000
 
+/**
+ * What the gate said, and the two refusals are NOT the same sentence.
+ *
+ * `busy` is ours — the queue in this process is longer than anybody will wait.
+ * `cooldown` is theirs — the provider answered 429 or 403 and we are leaving it
+ * alone. Collapsing them tells the owner "our queue is too long" for the five
+ * minutes after a block, which is the opposite diagnosis and points at the
+ * wrong fix.
+ */
+export type GateOutcome = 'go' | 'busy' | 'cooldown'
+
 export interface RateGate {
-  /** True if the caller may make its request now (after any wait it did). */
-  take(): Promise<boolean>
+  /** Whether the caller may make its request now, after any wait it did. */
+  take(): Promise<GateOutcome>
   /** Stop calling for `ms`; the provider has said so. */
   block(ms: number): void
 }
@@ -272,6 +308,15 @@ export interface RateGateOptions {
  * A caller whose turn is further away than `maxWaitMs` takes NO slot and is
  * told to give up, so the queue is bounded by time rather than by a count of
  * things that might be waiting.
+ *
+ * ⚠️ THE COOLDOWN IS CHECKED TWICE, BEFORE THE WAIT AND AFTER IT, and the
+ * second check is the one that matters. A caller who reserved its slot and is
+ * asleep has already passed the first; `block()` fires while it sleeps, and
+ * without the re-check it wakes up and calls the provider that has just told us
+ * to stop — as do the two or three behind it, so one 429 is answered with three
+ * more requests over the following three seconds. That is precisely the "retry
+ * into a refusal" this file says it does not do. Checking only before the sleep
+ * tests both halves of the gate and never their interaction.
  */
 export function createRateGate(options: RateGateOptions = {}): RateGate {
   const now = options.now ?? (() => Date.now())
@@ -283,15 +328,17 @@ export function createRateGate(options: RateGateOptions = {}): RateGate {
   let blockedUntil = 0
 
   return {
-    async take() {
+    async take(): Promise<GateOutcome> {
       const t = now()
-      if (t < blockedUntil) return false
+      if (t < blockedUntil) return 'cooldown'
       const start = Math.max(t, releaseAt)
       const wait = start - t
-      if (wait > maxWait) return false
+      if (wait > maxWait) return 'busy'
       releaseAt = start + minInterval
       if (wait > 0) await sleep(wait)
-      return true
+      // The provider may have refused somebody else while this caller slept.
+      if (now() < blockedUntil) return 'cooldown'
+      return 'go'
     },
     block(ms: number) {
       blockedUntil = Math.max(blockedUntil, now() + ms)
@@ -302,6 +349,36 @@ export function createRateGate(options: RateGateOptions = {}): RateGate {
 /* ---------------------------- the Nominatim client ------------------------ */
 
 const NOMINATIM = 'https://nominatim.openstreetmap.org'
+
+/**
+ * WHERE THE GEOCODER IS, AND THE ONE LEVER OVER IT.
+ *
+ * Unset — which is every real instance — means Nominatim, so nothing about the
+ * owner's deployment changes and there is nothing to configure. The variable
+ * exists for two situations that both arrive at a bad moment:
+ *
+ *  - A TEST HARNESS MUST NOT SEND LIVE TRAFFIC. `scripts/api-smoke.sh` exercises
+ *    this feature with queries salted per run, precisely so the cache cannot
+ *    spare the request — and that suite runs twice per CI run, on every push
+ *    and every pull request, from shared runner addresses, under the same
+ *    `zaeme/1.0` User-Agent prefix production sends. A block earned by CI is a
+ *    block served to the owner's instance. So CI points this at
+ *    `scripts/geocoder-stub.mjs` and sends OpenStreetMap nothing.
+ *  - AN INSTANCE MAY NEED SEARCH OFF NOW. Point it at an address that refuses
+ *    connections (`http://127.0.0.1:1`) and every search degrades immediately
+ *    to "search is unavailable, type the name" — no timeout, no outbound
+ *    request. That is the lever you want to already exist on the day somebody
+ *    is told to stop calling, and inventing it under pressure is how it gets
+ *    invented badly.
+ *
+ * Read per call rather than at import: a module-level constant cannot be
+ * changed by a test without reloading the module, and the whole point is that
+ * this is reachable from outside the process.
+ */
+export function geocoderBase(): string {
+  const configured = (process.env.ZAEME_GEOCODER_URL ?? '').trim().replace(/\/+$/, '')
+  return /^https?:\/\//i.test(configured) ? configured : NOMINATIM
+}
 
 /** How long a person at a keyboard waits for a geocoder before giving up. */
 const TIMEOUT_MS = 4000
@@ -420,7 +497,7 @@ export function createNominatimProvider(fetchImpl?: GeocoderFetch): GeocoderProv
     // ("excessive stack depth"). `GeocoderFetch` is the shape actually used.
     const doFetch = fetchImpl ?? ($fetch as unknown as GeocoderFetch)
     try {
-      return await doFetch(`${NOMINATIM}${path}`, {
+      return await doFetch(`${geocoderBase()}${path}`, {
         query: { format: 'jsonv2', ...query },
         headers: { 'User-Agent': userAgent(), 'Accept': 'application/json' },
         timeout: TIMEOUT_MS,
@@ -511,6 +588,25 @@ export interface GeocodeDeps {
 }
 
 /**
+ * WHY A FAILED SEARCH IS WORTH A LOG LINE.
+ *
+ * `reason` is the only place the difference between "OpenStreetMap is having a
+ * bad afternoon" and "this instance has been blocked" exists, and no screen may
+ * show it: every planner sees one sentence, "search is unavailable, type the
+ * name", which is the right thing to say to somebody who wants to add a place
+ * and useless to the person who has to fix it. Without this line the owner's
+ * only signal that their instance is on a blocklist is a feature that stopped
+ * working for everybody at once, with nothing anywhere saying why.
+ *
+ * The QUERY IS NOT LOGGED, deliberately: the same reasoning as the cache
+ * table's — an instance-wide record of what its users are looking for is a
+ * decision for the owner, not a field somebody adds while debugging.
+ */
+function reportUnavailable(reason: GeocodeUnavailable, kind: GeocodeKind, providerName: string): void {
+  console.warn('[zaeme:geocode] unavailable', { reason, kind, provider: providerName })
+}
+
+/**
  * Cache, then gate, then provider — and write back only a real answer.
  *
  * The order is the whole design. A cached answer costs nothing and is checked
@@ -518,6 +614,17 @@ export interface GeocodeDeps {
  * consulted only when something is actually about to leave the process; and a
  * failure is NEVER written to the cache, because caching "we could not ask"
  * turns a thirty-second outage into a thirty-day one.
+ *
+ * A STALE ANSWER BEATS NO ANSWER, but only when it has something in it. The
+ * thirty-day ttl is an argument — place names do not move — and that argument
+ * does not stop being true at midnight on the thirty-first day: if the geocoder
+ * cannot be reached, an expired row with results in it is still the right
+ * answer to give, and throwing it away to say "unavailable" is losing
+ * information the instance already has. An expired EMPTY row is the opposite:
+ * "no matches" is the answer a bad afternoon produces, it keeps for a day for
+ * that reason, and re-serving it past its life would harden somebody else's
+ * outage into our own answer. The sweep runs only after a SUCCESSFUL fetch, so
+ * an outage never deletes the rows this rule leans on.
  */
 async function answer(
   kind: GeocodeKind,
@@ -537,9 +644,21 @@ async function answer(
   if (hit && hit.expiresAt.getTime() > now().getTime()) {
     return { status: 'ok', reason: null, results: hit.results, cached: true, ...base }
   }
+  /** An expired row worth falling back on: see the note above. */
+  const stale = hit && hit.results.length > 0 ? hit.results : null
 
-  if (!await gate.take()) {
-    return { status: 'unavailable', reason: 'geocoder_busy', results: [], cached: false, ...base }
+  const unavailable = (reason: GeocodeUnavailable): GeocodeAnswer => {
+    if (stale) return { status: 'ok', reason: null, results: stale, cached: true, ...base }
+    reportUnavailable(reason, kind, p.name)
+    return { status: 'unavailable', reason, results: [], cached: false, ...base }
+  }
+
+  const gated = await gate.take()
+  if (gated !== 'go') {
+    // `cooldown` and `busy` are different sentences: the provider told us to
+    // stop, or our own queue is too long. Mapping both to "busy" reports the
+    // wrong one for the whole five minutes after a block.
+    return unavailable(gated === 'cooldown' ? 'geocoder_rate_limited' : 'geocoder_busy')
   }
 
   let results: PlaceSuggestion[]
@@ -548,9 +667,9 @@ async function answer(
   } catch (err) {
     if (err instanceof GeocoderRefused) {
       gate.block(COOLDOWN_MS)
-      return { status: 'unavailable', reason: 'geocoder_rate_limited', results: [], cached: false, ...base }
+      return unavailable('geocoder_rate_limited')
     }
-    return { status: 'unavailable', reason: 'geocoder_unreachable', results: [], cached: false, ...base }
+    return unavailable('geocoder_unreachable')
   }
 
   // A miss is the one moment something here is already paying for a round trip,
@@ -570,13 +689,25 @@ async function answer(
   return { status: 'ok', reason: null, results, cached: false, ...base }
 }
 
-/** "ponte 25 de abril" → the bridge. Refuses a query too short to be one. */
+/**
+ * "ponte 25 de abril" → the bridge.
+ *
+ * The two refusals are SEPARATE SENTENCES because they are opposite advice: one
+ * asks for more and the other for less, and a shared message told whoever
+ * pasted a paragraph into the box to type at least two characters.
+ */
 export async function searchPlaces(raw: string, deps: GeocodeDeps = {}): Promise<GeocodeAnswer> {
-  const query = normaliseQuery(raw)
-  if (query === null) {
+  const query = foldQuery(raw)
+  if (query.length < MIN_QUERY_LENGTH) {
     throw createError({
       statusCode: 422,
       message: `Type at least ${MIN_QUERY_LENGTH} characters to search for a place`
+    })
+  }
+  if (query.length > MAX_QUERY_LENGTH) {
+    throw createError({
+      statusCode: 422,
+      message: `That is longer than a place name — search for at most ${MAX_QUERY_LENGTH} characters`
     })
   }
   return answer('search', query, p => p.search(query), deps)
