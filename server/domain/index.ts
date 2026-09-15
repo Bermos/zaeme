@@ -1,7 +1,8 @@
 /**
  * The zäme events domain — schema tables, invite credentials, permissions,
  * planner operations, the guest surface, the date poll, the bring list, the
- * trip budget, the places and legs of a trip, the series group, chat and media.
+ * trip budget, the places and legs of a trip and the geocoder behind searching
+ * for one, the series group, chat and media.
  *
  * This was `@enterprise/events-core` while zäme lived inside the Enterprise
  * monorepo; it is now plain internal modules under `server/domain/`. It stays
@@ -17,6 +18,7 @@ export * from './permissions'
 export * from './slugify'
 export * from './events-data'
 export * from './places'
+export * from './geocode'
 export * from './poll'
 export * from './contributions'
 export * from './guest'
