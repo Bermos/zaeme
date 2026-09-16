@@ -1146,6 +1146,32 @@ describe('what a ticket says is written by a planner, on the host surface only',
     expect(hostCard).toMatch(/draft\.validUntil = rezoneInputValue\(draft\.validUntil, seededZone, zone\)/)
   })
 
+  it('pins a step from the host surface and from no other credential (#38)', () => {
+    // THE HALF THE ROLE-SET LOOP BELOW DOES NOT COVER, and its absence was
+    // demonstrated rather than argued: a VERBATIM copy of the host route
+    // dropped at `server/api/me/events/[slug]/media/[id]/timeline-item.put.ts`
+    // left all 475 tests green. `assertPlanner` inside the domain would still
+    // have refused a non-planner, so nothing escalated — but "which credential
+    // may reach this verb" stopped being a thing any check had an opinion
+    // about, which is the whole job of this file.
+    //
+    // THE VERB, NOT A WORD IN A PATH — the #74 lesson `setTicketDetail` above
+    // is written out of: a route called `step.put.ts` calling this function
+    // would walk through a filename rule untouched. What may not appear
+    // outside `server/api/host/**` is the DOMAIN FUNCTION.
+    const PIN = join(API_ROOT, 'host', 'events', '[slug]', 'media', '[id]', 'timeline-item.put.ts')
+    expect(existsSync(PIN), PIN).toBe(true)
+    expect(readFileSync(PIN, 'utf8')).toMatch(/requireGuestUser\(/)
+
+    const elsewhere = [...guestHandlers, ...accountHandlers, ...machineHandlers, ...adminHandlers]
+      .filter(f => /\bsetMediaTimelineItem\b/.test(readFileSync(f, 'utf8')))
+    expect(elsewhere.map(rel)).toEqual([])
+    // …and the host surface really does call it, or the line above is a rule
+    // about a function nothing uses.
+    expect(hostHandlers.filter(f => /\bsetMediaTimelineItem\b/.test(readFileSync(f, 'utf8'))).map(rel))
+      .toEqual([rel(PIN)])
+  })
+
   it('asks the same gate assignment and deletion ask', () => {
     // ASK WHAT A GUARD PERMITS, NOT WHAT IT FORBIDS (#74). `logistics` is a
     // planner row and is deliberately not one of these two: a ticket is

@@ -185,12 +185,28 @@ async function move(id: string, direction: 'up' | 'down') {
 /* ------------------- the papers pinned to each step (#38) ------------------ */
 
 /**
- * ITS OWN READ, NOT A PROP, and that is the same choice `HostMediaCard` makes
- * two cards down: media URLs are short-lived signatures, so the list cannot
- * come down with the SSR'd page the way `timeline` and `places` do. `$fetch`
- * into a ref rather than `useFetch` because two cards asking the same URL with
- * auto-generated keys is a cache relationship that is invisible in both files;
- * an explicit load is one request this card owns and can re-run after a write.
+ * ONE READ, SHARED WITH `HostMediaCard`, UNDER A KEY BOTH FILES SPELL OUT.
+ *
+ * It cannot be a prop: media URLs are short-lived signatures, so the list is
+ * fetched in the BROWSER and does not come down with the SSR'd page the way
+ * `timeline` and `places` do.
+ *
+ * THE FIRST VERSION OF THIS WAS A PRIVATE `$fetch` AND IT BROKE THE FLOW THE
+ * ISSUE EXISTS TO CREATE. `HostMediaCard` is where a planner uploads the train
+ * ticket; this card is where they pin it to the 09:14. Two unrelated client
+ * GETs of the same URL meant that card's `refresh()` after an upload, an
+ * assignment or a delete moved its own copy and not this one — so the ticket
+ * you had just uploaded was missing from the picker until a page reload, which
+ * is precisely the "round trip to the media page" #38 is about removing.
+ *
+ * `MEDIA_KEY` IS WHY THIS IS NOT THE THING I REFUSED. The objection to
+ * `useFetch` here was never sharing — it was an AUTO-GENERATED key, which makes
+ * two components silently one cache entry with nothing in either file saying
+ * so. An explicit key is the opposite: it is written out in both, it dedupes
+ * the request (the host page signed every media item twice before this), and
+ * `refresh()` from either card invalidates the one entry both render.
+ * `test/pinned-media.test.ts` pins the literal in both files, because a key
+ * that drifts by one character silently restores the bug.
  *
  * A 501 (no object storage on this instance) or a transient failure leaves the
  * list empty, and an empty list renders the itinerary exactly as it did before
@@ -202,14 +218,11 @@ interface HostMediaItem extends PinnableMedia {
   fileName: string
   caption: string | null
 }
-const media = ref<HostMediaItem[]>([])
-async function loadMedia() {
-  try {
-    const res = await $fetch<{ media: HostMediaItem[] }>(`/api/host/events/${props.slug}/media`)
-    media.value = res.media
-  } catch { /* storage unconfigured (501) or transient — the pins just stay hidden */ }
-}
-onMounted(loadMedia)
+const { data, refresh } = useFetch<{ media: HostMediaItem[] }>(
+  `/api/host/events/${props.slug}/media`,
+  { key: `host-media-${props.slug}`, server: false, default: () => ({ media: [] }) }
+)
+const media = computed(() => data.value?.media ?? [])
 
 /** Everything on the event that may go on a step — tickets and papers, never photos. */
 const pinnable = computed(() => pinnableToTimeline(media.value))
@@ -254,12 +267,12 @@ async function setPin(mediaId: string, timelineItemId: string | null) {
       method: 'PUT',
       body: { timelineItemId }
     })
-    await loadMedia()
+    await refresh()
   } catch (e) {
     toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not pin that', color: 'error' })
     // The control renders the server's answer, so a failed call must not leave
     // the screen showing a pin that did not take.
-    await loadMedia()
+    await refresh()
   } finally {
     pinning.value = null
   }

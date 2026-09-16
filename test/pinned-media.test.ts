@@ -306,13 +306,42 @@ describe('the host itinerary', () => {
     // …AND THE WRITE IS FOLLOWED BY A RE-READ. The reply is a domain view with
     // a storage key and no signed URL, so a card that rendered it would show a
     // dead link — `HostMediaCard` discards the same answer for the same reason.
-    expect(body).toMatch(/await loadMedia\(\)/)
+    expect(body).toMatch(/await refresh\(\)/)
 
     // THE GROUPING IS OVER THE CARD'S OWN LIST, pinned verbatim: `([])` here
     // renders an itinerary that never shows what is already attached, so a
     // planner pins the same ticket twice and sees nothing either time.
     expect(body).toMatch(/pinnedMediaByTimelineItem\(media\.value\)/)
     expect(body).toMatch(/pinnableToTimeline\(media\.value\)/)
+  })
+
+  it('reads the media list under the SAME key the upload card writes', () => {
+    // THE BUG THIS REPLACED WAS SHIPPED AND REAL, not hypothetical. This card
+    // held its own `$fetch` into a private ref while `HostMediaCard` — where a
+    // planner actually uploads the ticket — held a separate `useFetch` of the
+    // same URL and `refresh()`ed only itself. So: upload the train ticket,
+    // scroll down, and it is absent from the picker until a page reload, which
+    // is the exact "round trip to the media page" #38 exists to delete.
+    //
+    // ONE EXPLICIT KEY IN BOTH FILES IS THE FIX, and the key is what this
+    // checks, because everything else about the two files can look right while
+    // the strings differ by one character — at which point they are two cache
+    // entries again, silently, and the flow breaks the same way. An
+    // auto-generated key would be worse still: sharing invisible in both files.
+    const KEY = 'key: `host-media-${props.slug}`'
+    for (const file of ['HostTimelineCard.vue', 'HostMediaCard.vue']) {
+      const src = script(sfc('components', file))
+      expect(src, `${file} does not read the media list under the shared key`).toContain(KEY)
+      // …and it is the SAME URL under that key, or one card keys a different
+      // request and the entry they share answers one of them wrongly.
+      expect(src, `${file} keys a different URL`).toContain('`/api/host/events/${props.slug}/media`')
+    }
+    // AND THIS CARD NO LONGER OWNS A PRIVATE COPY. A stray `$fetch` of the same
+    // list beside the keyed one would re-open the gap while both assertions
+    // above still passed.
+    const timeline = script(sfc('components', 'HostTimelineCard.vue'))
+    expect(timeline, 'the itinerary card still fetches the media list privately')
+      .not.toMatch(/\$fetch[^\n]*\/media`/)
   })
 
   it('offers the pin and the un-pin on the step, in the template', () => {
@@ -348,17 +377,59 @@ describe('what the server sends', () => {
     expect(src).not.toMatch(/^ {4}timelineItemId: (null|undefined),$/m)
   })
 
-  it('refuses a photo on a step, and refuses a step from another trip', () => {
+  it('names the shared type rule and the event scope in its guards', () => {
+    // READ THE TITLE LITERALLY: this asserts the two guards are WRITTEN, not
+    // that they REFUSE anything. It is a presence grep over source, and a
+    // presence grep survives a disabled guard —
+    // `if (false && !isPinnableToTimeline(item.type))` keeps every assertion
+    // below green, and so would `and(` becoming `or(` in the step lookup.
+    //
+    // THE LOAD-BEARING HALF IS IN `scripts/api-smoke.sh`, and unlike the two
+    // human-rendering halves of this issue it genuinely runs in CI (the `api`
+    // job, and twice in `upgrade`). It pins a photo and asserts **422**, then
+    // re-reads the item to confirm it really was not pinned; it names a step on
+    // another trip and asserts **404**, then re-reads the step it was aimed at
+    // to confirm nothing moved. Those execute the refusals against a live
+    // Postgres, which nothing in vitest can do — there is no database here and
+    // the event scope is a SQL predicate.
+    //
+    // So this check is worth keeping and is worth exactly what it says: the
+    // guards are still spelled the way the smoke block assumes, and the type
+    // rule is the SHARED one, so the host's picker and the server's refusal
+    // cannot drift apart about what a step may carry. If you are changing
+    // either guard, the smoke block is the thing that tells you whether it
+    // still works.
     const src = readFileSync(join(ROOT, 'server', 'domain', 'media.ts'), 'utf8')
     const start = src.indexOf('export async function setMediaTimelineItem(')
     expect(start, 'setMediaTimelineItem is gone').toBeGreaterThan(-1)
     const body = src.slice(start, src.indexOf('\n}\n', start))
-    // The type rule is the SHARED one, so the host's picker and this refusal
-    // cannot drift apart about what a step may carry.
     expect(body).toMatch(/isPinnableToTimeline\(item\.type\)/)
-    // THE STEP IS CHECKED ON THE EVENT. `timeline_item_id` is a plain foreign
-    // key with no composite behind it, so Postgres would accept a step id from
-    // another trip — which pins somebody's ticket where nobody can see it.
+    // `timeline_item_id` is a plain foreign key with no composite behind it, so
+    // Postgres would accept a step id from another trip — which pins somebody's
+    // ticket where nobody can see it.
     expect(body).toMatch(/eq\(tables\.timelineItem\.eventId, ev\.id\)/)
+  })
+
+  it('keeps the smoke block that actually executes those two refusals', () => {
+    // THE OTHER HALF OF THE CHECK ABOVE, and the reason it is here: the comment
+    // saying "the smoke block proves this" is prose, and nothing in CI reads
+    // prose. Deleting those smoke lines would leave the refusals proved by
+    // nothing at all while the presence greps above stayed green and still
+    // claimed the smoke block had them covered.
+    //
+    // Pinned on the STATUS CODES, because they are the finding: a 422 says the
+    // schema let the request through and the DOMAIN declined, a 400 would say
+    // zod refused it and the domain was never asked. And on the re-reads, which
+    // are what tell a refusal from a silent success.
+    const smoke = readFileSync(join(ROOT, 'scripts', 'api-smoke.sh'), 'utf8')
+    const start = smoke.indexOf('== a ticket on the step it belongs to')
+    expect(start, 'the #38 smoke block is gone').toBeGreaterThan(-1)
+    const block = smoke.slice(start, smoke.indexOf('\necho "== ', start + 1))
+
+    expect(block, 'nothing asserts a photograph is refused').toMatch(/a photograph does not go on a step"\s+422/)
+    expect(block, 'nothing re-reads after the type refusal').toMatch(/it really was not pinned/)
+    expect(block, 'nothing asserts a step from another trip is refused')
+      .toMatch(/a step belonging to another trip"\s+404/)
+    expect(block, 'nothing re-reads after the scope refusal').toMatch(/the refusal moved nothing/)
   })
 })
