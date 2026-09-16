@@ -334,6 +334,36 @@ export function isoFromZonedInput(local: string | null | undefined, zone: string
   return new Date(settled).toISOString()
 }
 
+/**
+ * THE SAME MOMENT, RE-READ AGAINST A DIFFERENT WALL CLOCK — what an open
+ * `datetime-local` field has to do when the event's zone changes underneath it.
+ *
+ * A form seeded with `toZonedInputValue(instant, A)` holds a wall clock in A. If
+ * the trip's zone becomes B while that form is open, the field still SAYS the A
+ * reading, and `isoFromZonedInput(field, B)` then resolves it as a B wall clock
+ * — a different instant, silently, on a field nobody touched. #77's review
+ * measured exactly that: a ticket stored at 22:59Z, seeded as `23:59` in
+ * `Europe/Lisbon`, saved after a switch to `America/New_York` as 03:59Z the
+ * next morning. Five hours, on an untouched field.
+ *
+ * So this converts: read the text against the zone it was written in, and
+ * re-render that instant in the zone now in force. It preserves whatever the
+ * person had typed AND the moment they meant by it, which re-seeding from the
+ * server would not — that would silently drop an unsaved edit.
+ *
+ * Empty in, empty out, and unparseable in, empty out: a caller re-seeding a
+ * field has nothing better to put there than what a blank field holds, and
+ * inventing a time on a form is worse than clearing one.
+ */
+export function rezoneInputValue(
+  local: string | null | undefined,
+  from: string | null | undefined,
+  to: string | null | undefined
+): string {
+  const iso = isoFromZonedInput(local, from)
+  return iso ? toZonedInputValue(iso, to) : ''
+}
+
 /* --------------------------- choosing a zone ------------------------------ */
 
 /**

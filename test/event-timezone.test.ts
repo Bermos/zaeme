@@ -29,7 +29,7 @@ afterAll(() => {
   else process.env.TZ = AMBIENT_TZ
 })
 
-const { canonicalTimezone, formatInZone, isBlankTimezone, isoFromZonedInput, sameZone, timezoneChoices, zonesToOffer, timezonesForCountry, toZonedInputValue, zoneDayKey, zoneNote }
+const { canonicalTimezone, formatInZone, isBlankTimezone, isoFromZonedInput, rezoneInputValue, sameZone, timezoneChoices, zonesToOffer, timezonesForCountry, toZonedInputValue, zoneDayKey, zoneNote }
   = await import('../shared/utils/timezone')
 
 /**
@@ -322,6 +322,70 @@ describe('a daylight-saving boundary inside the trip', () => {
     // against anybody's wall clock.
     expect(isoFromZonedInput('2026-07-01T08:14:00Z', 'Europe/Lisbon')).toBe('2026-07-01T08:14:00.000Z')
     expect(isoFromZonedInput('2026-07-01T09:14:00+01:00', 'Pacific/Chatham')).toBe('2026-07-01T08:14:00.000Z')
+  })
+
+  /*
+   * AND WHAT AN OPEN FORM DOES WHEN THE ZONE MOVES UNDER IT (#35, found by
+   * #77's review).
+   *
+   * A `datetime-local` seeded with `toZonedInputValue(instant, A)` holds a wall
+   * clock in A. If the event's zone becomes B while the form is open, the field
+   * still SAYS the A reading and `isoFromZonedInput(field, B)` resolves it as a
+   * B wall clock — a different instant, on a field nobody touched. Measured on
+   * the host ticket card: 22:59Z seeded as `23:59` in Europe/Lisbon, saved
+   * after a switch to America/New_York as 03:59Z the next morning.
+   *
+   * `rezoneInputValue` is the conversion, and it lives here rather than in the
+   * card for the reason the whole of #31 exists: nothing in this repository
+   * drives a browser, so a decision inside a `watch` is executed by nothing.
+   */
+  describe('re-reading an open field when the event zone changes', () => {
+    it('keeps the instant and changes the reading', () => {
+      // The measured bug, as an assertion. The field says 23:59 Lisbon; after
+      // the switch it must say 18:59 New York, which is the SAME moment — and
+      // must not say 23:59, which is what an unconverted field would keep.
+      const moved = rezoneInputValue('2026-07-01T23:59', 'Europe/Lisbon', 'America/New_York')
+      expect(moved).toBe('2026-07-01T18:59')
+      expect(isoFromZonedInput(moved, 'America/New_York')).toBe('2026-07-01T22:59:00.000Z')
+      // …and the instant is the one it started as, which is the whole claim.
+      expect(isoFromZonedInput(moved, 'America/New_York'))
+        .toBe(isoFromZonedInput('2026-07-01T23:59', 'Europe/Lisbon'))
+    })
+
+    it('crosses a calendar day when the new zone is far enough away', () => {
+      // A same-day pair cannot tell "converted" from "re-read the time and kept
+      // the date", which is the fixture question #31's review taught. Chatham
+      // is +12:45, so this also proves the quarter-hour survives.
+      expect(rezoneInputValue('2026-07-01T23:59', 'Europe/Lisbon', 'Pacific/Chatham'))
+        .toBe('2026-07-02T11:44')
+    })
+
+    it('is identity when the zone has not actually moved', () => {
+      // `Europe/Kyiv` and `Europe/Kiev` are one zone with two spellings, and a
+      // host picking the alias must not have every open field shifted.
+      expect(rezoneInputValue('2026-07-01T23:59', 'Europe/Lisbon', 'Europe/Lisbon'))
+        .toBe('2026-07-01T23:59')
+      expect(rezoneInputValue('2026-07-01T23:59', 'Europe/Kyiv', 'Europe/Kiev'))
+        .toBe('2026-07-01T23:59')
+    })
+
+    it('reads a null zone as the reader\'s own, on both sides', () => {
+      // Clearing the zone is a value (#31), so it has to convert like any
+      // other change: out of Chatham, which is where this file stands.
+      expect(rezoneInputValue('2026-07-02T11:44', null, 'Europe/Lisbon'))
+        .toBe('2026-07-01T23:59')
+      expect(rezoneInputValue('2026-07-01T23:59', 'Europe/Lisbon', null))
+        .toBe('2026-07-02T11:44')
+    })
+
+    it('leaves an empty field empty rather than inventing a time', () => {
+      // A caller re-seeding a blank field has nothing better to put there, and
+      // a form that fills itself in is the one thing #35 may not do.
+      expect(rezoneInputValue('', 'Europe/Lisbon', 'America/New_York')).toBe('')
+      expect(rezoneInputValue(null, 'Europe/Lisbon', 'America/New_York')).toBe('')
+      expect(rezoneInputValue(undefined, 'Europe/Lisbon', 'America/New_York')).toBe('')
+      expect(rezoneInputValue('not a date', 'Europe/Lisbon', 'America/New_York')).toBe('')
+    })
   })
 })
 

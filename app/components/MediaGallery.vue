@@ -27,10 +27,22 @@ const props = defineProps<{
   documents: MediaItem[]
   tickets: MediaItem[]
   /**
-   * The event's display zone (#31), for the validity of a ticket. Null means
+   * The event's display zone (#31), for the validity of a ticket. `null` means
    * the reader's own clock, which is what every screen does without one.
+   *
+   * REQUIRED, AND NOT OPTIONAL WITH A DEFAULT — the difference is the whole of
+   * whether the clock half of #35 works. `formatInZone` falls back to the
+   * ambient zone for `undefined` BY DESIGN (a stored zone ICU stops resolving
+   * must not take an SSR'd page down), so an omitted prop renders every
+   * attendee's ticket against the reader's clock and says nothing at all: the
+   * #77 review deleted the one binding on the guest page and got eslint clean,
+   * typecheck clean, 426 vitest passed and 731 smoke checks passed, with a
+   * Lisbon ticket reading 00:59 the next morning in Zürich. Required means
+   * `nuxt typecheck` refuses the omission at the call site; `null` is how a
+   * caller SAYS "the reader's own", which is a different statement from
+   * forgetting.
    */
-  timezone?: string | null
+  timezone: string | null
   /** Presign/confirm endpoints; absent = read-only. */
   presignUrl?: string
   confirmUrl?: string

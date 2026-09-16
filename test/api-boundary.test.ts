@@ -1041,11 +1041,101 @@ describe('what a ticket says is written by a planner, on the host surface only',
   it('lives beside assignment, and on no other credential', () => {
     expect(existsSync(DETAIL), DETAIL).toBe(true)
     expect(readFileSync(DETAIL, 'utf8')).toMatch(/requireGuestUser\(/)
-    // The capability URL gains nothing. A guest may not upload a ticket, so a
-    // guest may not annotate one either.
+    // THE VERB, NOT A WORD IN A PATH. The first version of this filtered the
+    // other surfaces' handlers on `/detail/i` over their filenames, which is
+    // the shape #74's review threw out: `server/api/me/events/[slug]/media/
+    // [id]/seat.put.ts` calling `setTicketDetail` passes a filename rule
+    // whole. What may not appear outside `server/api/host/**` is the DOMAIN
+    // FUNCTION, whatever the route around it is called.
     const elsewhere = [...guestHandlers, ...accountHandlers, ...machineHandlers, ...adminHandlers]
-      .filter(f => /detail/i.test(rel(f)))
+      .filter(f => /\bsetTicketDetail\b/.test(readFileSync(f, 'utf8')))
     expect(elsewhere.map(rel)).toEqual([])
+    // …and the host surface really does call it, or the line above is a rule
+    // about a function nothing uses.
+    expect(hostHandlers.filter(f => /\bsetTicketDetail\b/.test(readFileSync(f, 'utf8'))).map(rel))
+      .toEqual([rel(DETAIL)])
+  })
+
+  /**
+   * THE ARGUMENT, NOT THE FUNCTION — the half #77's review found unproved.
+   *
+   * Moving the formatting into `shared/utils/ticket-detail.ts` made the RULE
+   * testable, and `test/ticket-detail.test.ts` executes it. What no test
+   * touched was the value that function is HANDED. The reviewer deleted
+   * `:timezone="page.event.timezone"` from the guest page and got eslint
+   * clean, `nuxt typecheck` clean, 426 vitest passed and 731 smoke checks
+   * passed — while every attendee's ticket rendered against the reader's clock
+   * on the SSR'd page.
+   *
+   * It is silent because `formatInZone` falls back to the ambient zone for
+   * `undefined` BY DESIGN (a stored zone ICU stops resolving must not take a
+   * page down), so a missing prop and "the reader's own" are the same value.
+   * The props are REQUIRED now, which makes `nuxt typecheck` refuse an omitted
+   * binding at the call site; this asserts the requirement itself, because
+   * turning one back into `timezone?:` is a one-character change that restores
+   * the silence.
+   *
+   * A STRUCTURAL RULE OVER A TEMPLATE, which this file already does for
+   * `<NuxtPage />` — and with the same caveat that taught: only the template
+   * counts, since the prose above these bindings mentions them.
+   */
+  it('hands the event zone to both cards that render a ticket', () => {
+    const PAGES = join(ROOT, 'app')
+    const sfc = (...parts: string[]) => readFileSync(join(PAGES, ...parts), 'utf8')
+    const template = (src: string) => /<template>([\s\S]*)<\/template>/.exec(src)?.[1] ?? ''
+
+    for (const parts of [['components', 'MediaGallery.vue'], ['components', 'HostMediaCard.vue']]) {
+      const src = sfc(...parts)
+      // REQUIRED. `timezone?: string | null` is the shape that goes quiet.
+      expect(src, parts.join('/')).toMatch(/^ {2}timezone: string \| null$/m)
+      expect(src, parts.join('/')).not.toMatch(/^ {2}timezone\?:/m)
+      // …and it is the zone that reaches the renderer, not some other value.
+      expect(template(src), parts.join('/')).toMatch(/ticketDetailLines\([^)]*,\s*timezone\)/)
+    }
+
+    // EVERY CALL SITE BINDS IT. This is the assertion the deleted line breaks.
+    const bindings: string[] = []
+    const visit = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          visit(full)
+          continue
+        }
+        if (!entry.name.endsWith('.vue')) continue
+        const body = template(readFileSync(full, 'utf8'))
+        for (const tag of ['MediaGallery', 'HostMediaCard']) {
+          for (const at of [...body.matchAll(new RegExp(`<${tag}(?![\\w-])`, 'g'))].map(m => m.index!)) {
+            const open = body.slice(at, body.indexOf('>', at))
+            if (!/:timezone=/.test(open)) bindings.push(`${rel(full)}: <${tag}> with no :timezone`)
+          }
+        }
+      }
+    }
+    visit(PAGES)
+    expect(bindings).toEqual([])
+    // THE ANTI-VACUITY GUARD. `bindings` is empty both when every call site
+    // binds the zone and when the walk found no call sites at all — a renamed
+    // component, a moved directory — so the three that exist today are named.
+    const sites = [
+      template(sfc('pages', 'i', '[token].vue')),
+      template(sfc('pages', 'host', '[slug].vue')),
+      template(sfc('components', 'HostMediaCard.vue'))
+    ]
+    expect(sites.filter(t => /:timezone=/.test(t))).toHaveLength(3)
+
+    // AND THE HOST CARD WATCHES THE ZONE, not only its own fetch. Its ticket
+    // drafts hold a WALL CLOCK, seeded eagerly at mount, so a zone edited
+    // further up the page moves `props.timezone` while the card's `useFetch`
+    // does not re-run — and `saveDetail` then resolves a stale reading against
+    // the new zone. Measured at five hours on an untouched field. The call site
+    // is pinned rather than the symbol, because extracting the source into a
+    // helper would satisfy a `/rezoneInputValue/` over the file while the
+    // watcher went on watching only `tickets`.
+    const hostCard = sfc('components', 'HostMediaCard.vue')
+    expect(hostCard).toMatch(/watch\(\[tickets, \(\) => props\.timezone\]/)
+    expect(hostCard).toMatch(/draft\.validFrom = rezoneInputValue\(draft\.validFrom, seededZone, zone\)/)
+    expect(hostCard).toMatch(/draft\.validUntil = rezoneInputValue\(draft\.validUntil, seededZone, zone\)/)
   })
 
   it('asks the same gate assignment and deletion ask', () => {

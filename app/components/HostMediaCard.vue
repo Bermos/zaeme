@@ -23,8 +23,17 @@ interface Rsvp { id: string, guestName: string | null, guestEmail: string | null
 const props = defineProps<{
   slug: string
   rsvps: Rsvp[]
-  /** The event's display zone (#31) — the clock a ticket's validity is typed and read in. */
-  timezone?: string | null
+  /**
+   * The event's display zone (#31) — the clock a ticket's validity is typed in
+   * and read back in. `null` is "the reader's own".
+   *
+   * REQUIRED, for the reason spelled out on `MediaGallery`'s copy of this prop:
+   * an omitted one is indistinguishable from `null` to `formatInZone`, which
+   * falls back to the ambient zone by design, so forgetting it is silent in
+   * every check this repository has. Required makes `nuxt typecheck` the thing
+   * that notices.
+   */
+  timezone: string | null
 }>()
 
 const { data, refresh } = await useFetch<{ media: MediaItem[] }>(
@@ -111,8 +120,36 @@ function toDraft(d: TicketDetailFields | null | undefined): Draft {
  * Only tickets with no draft yet are seeded, so typing survives a refresh; a
  * save deletes its own draft, which is what makes the next seed re-read the
  * server's answer.
+ *
+ * AND IT WATCHES THE ZONE, which is the half #77's review found missing. The
+ * drafts are seeded EAGERLY for every ticket the moment this card loads, and
+ * they hold a WALL CLOCK — so when the host edits the trip's zone further up
+ * the page, `data.event.timezone` moves reactively while this card's own
+ * `useFetch` does not re-run, and every open draft is left saying the old
+ * zone's reading while `saveDetail` resolves it against the new one. Measured:
+ * 22:59Z seeded as `23:59` in `Europe/Lisbon`, saved after a switch to
+ * `America/New_York` as 03:59Z the next morning — five hours, on a field
+ * nobody touched, for the whole lifetime of the page.
+ *
+ * `rezoneInputValue` re-reads each field against the zone it was written in and
+ * re-renders that same instant in the new one, so an unsaved edit survives the
+ * change carrying the moment it meant. Re-seeding from the server would fix the
+ * stored value and silently drop that edit.
+ *
+ * `seededZone` is the zone THE DRAFTS HOLD, which is not `props.timezone` — it
+ * is whatever `props.timezone` was when they were last written. `undefined` is
+ * "nothing seeded yet" and is unambiguous, because the prop is required and is
+ * `string | null`.
  */
-watch(tickets, (list) => {
+let seededZone: string | null | undefined
+watch([tickets, () => props.timezone], ([list, zone]) => {
+  if (seededZone !== undefined && seededZone !== zone) {
+    for (const draft of Object.values(drafts.value)) {
+      draft.validFrom = rezoneInputValue(draft.validFrom, seededZone, zone)
+      draft.validUntil = rezoneInputValue(draft.validUntil, seededZone, zone)
+    }
+  }
+  seededZone = zone
   for (const t of list) {
     if (!drafts.value[t.id]) drafts.value[t.id] = toDraft(t.ticket)
   }
@@ -151,6 +188,22 @@ async function saveDetail(mediaId: string) {
   }
 }
 
+/**
+ * TWO CLOCK LABELS IN ONE CARD, AND THEY LABEL TWO DIFFERENT THINGS.
+ *
+ * This one — "Times are in Europe/Lisbon" — captions the `datetime-local`
+ * INPUTS. An empty field holds no instant, so there is no offset to abbreviate
+ * and nothing that could say `WEST`; what the host needs to know is which wall
+ * clock they are typing against, which is the zone's name.
+ *
+ * The rendered line a couple of elements above (`ticketDetailLines`) stamps
+ * each validity with `WEST`/`WET` instead, because by then it IS an instant and
+ * `shared/utils/timezone.ts` says in terms why the abbreviation is right for
+ * one and wrong for the other: `WEST` is true of a moment, not of a week. The
+ * two registers reading differently in one card is deliberate rather than an
+ * oversight, and the alternative — one label for both — is wrong in whichever
+ * half it is borrowed from.
+ */
 const zoneLine = computed(() => zoneNote(props.timezone))
 </script>
 
@@ -160,6 +213,7 @@ const zoneLine = computed(() => zoneNote(props.timezone))
       :gallery="gallery"
       :documents="documents"
       :tickets="[]"
+      :timezone="timezone"
       :presign-url="`/api/host/events/${slug}/media/presign`"
       :confirm-url="`/api/host/events/${slug}/media/confirm`"
       :upload-types="['photo', 'video', 'document', 'ticket']"
