@@ -11,7 +11,7 @@ import {
   type LedgerLineView
 } from '../server/domain/expenses'
 import { recordSettlement } from '../server/domain/settlements'
-import { isSettlement } from '../shared/utils/settlement'
+import { isSettlement, settlementTitle } from '../shared/utils/settlement'
 
 /**
  * SETTLING UP (#28), as arithmetic.
@@ -244,6 +244,24 @@ describe('telling a settlement from an expense', () => {
     // nothing but payments and vanishes out of the total.
     expect(isSettlement({})).toBe(false)
     expect(isSettlement({ categoryAccountId: undefined })).toBe(false)
+  })
+})
+
+describe('what a payment is called', () => {
+  it('is derived from the two people in it, and trims what it is given', () => {
+    expect(settlementTitle('Cleo', 'Ana')).toBe('Cleo → Ana')
+    expect(settlementTitle('  Cleo ', ' Ana  ')).toBe('Cleo → Ana')
+  })
+
+  it('is the SAME rule on both write paths, so a correction renames the entry', () => {
+    // The record and the correction ask one function, which is the whole point:
+    // a title frozen at write time goes on naming the pair it used to be the
+    // moment somebody fixes a mistyped recipient, and `/api/v1` and the audit
+    // log read `title` where the card reads the fields (#74 review).
+    const recorded = settlementTitle('Ben', 'Ana')
+    const corrected = settlementTitle('Ben', 'Cleo')
+    expect(recorded).not.toBe(corrected)
+    expect(corrected).toBe('Ben → Cleo')
   })
 })
 

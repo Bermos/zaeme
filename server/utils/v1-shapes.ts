@@ -216,6 +216,11 @@ export function contribution(row: object) {
  * `Uncategorised`), so a client that writes them keeps working; what comes back
  * is the account's name, which a group can rename and add to.
  *
+ * BOTH ARE NULL ON A SETTLEMENT (#28): a payment between two people touches no
+ * category account, so it has no category to name. `category` answered
+ * `Uncategorised` there at first, which filed every transfer under a real
+ * account it had never touched for any client grouping on the string alone.
+ *
  * `lines` is the entry itself: every posting, credits included, summing to zero.
  * The residual line on the event's `Rounding` account — the cents between the
  * converted total and the sum of the converted shares — appears only there.

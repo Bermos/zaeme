@@ -9,6 +9,7 @@ import {
   loadBudget,
   type ParticipantActor
 } from './expenses'
+import { settlementTitle } from '../../shared/utils/settlement'
 
 /**
  * SETTLING UP (#28): saying that a debt the plan suggested has actually been
@@ -87,20 +88,6 @@ export interface RecordSettlementInput {
 }
 
 /**
- * What the entry is called. It is a real column on a real row, so it has to say
- * something, and what a reader of an audit log, a `/api/v1` budget or a list of
- * entries wants to know about a transfer is who paid whom.
- *
- * The names are FROZEN at write time, exactly like `paid_by_name` on an expense
- * — `ensureMemberAccounts` refreshes an account's name retroactively and this
- * does not move with it, so an old settlement can say "Ana" while the balances
- * say "Anna". Nothing computes anything from either; the identity is the email.
- */
-function settlementTitle(fromName: string, toName: string): string {
-  return `${fromName} → ${toName}`
-}
-
-/**
  * Record a payment one person made to another, as one balanced entry.
  *
  * The gates below decide who may; this decides what is written, and it is
@@ -128,7 +115,10 @@ export async function recordSettlement(eventId: string, input: RecordSettlementI
   }
 
   return addExpense(eventId, {
-    title: settlementTitle(input.fromName.trim(), input.toName.trim()),
+    // The title is DERIVED, here and in `updateExpense`, from the one rule in
+    // `shared/utils/settlement.ts` — so correcting either name later renames
+    // the entry with it rather than leaving it naming the pair it used to be.
+    title: settlementTitle(input.fromName, input.toName),
     amountCents: input.amountCents,
     currency: input.currency,
     fxRate: input.fxRate,

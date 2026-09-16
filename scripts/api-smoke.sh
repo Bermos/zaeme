@@ -1848,7 +1848,11 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # category line on the transfer, and this is 400.00.
   equals "...while the trip still cost what it cost"     "$(json_field "$PAID1" budget.totalCents)" "30000"
   equals "a payment is TWO lines and no more"            "$(entry_lines "$PAID1" "Cleo → Ana")" "2"
-  contains "...posting to no category account at all"    "$PAID1" '"title":"Cleo → Ana","category":"Uncategorised","categoryAccountId":null'
+  # `"category":null` AND `"categoryAccountId":null`, together: an entry with no
+  # category line has no category, and answering "Uncategorised" filed every
+  # transfer under a real account it never touched for anything grouping on the
+  # name alone (#74 review).
+  contains "...posting to no category account at all"    "$PAID1" '"title":"Cleo → Ana","category":null,"categoryAccountId":null'
   equals "...in a ledger that still balances"            "$(ledger_imbalance "$PAID1")" "0"
   equals "...and a plan that still closes"               "$(plan_closes "$PAID1")" "closed"
 
@@ -1867,7 +1871,13 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # …AND IT CAN BE TAKEN BACK. A settlement is a claim about the physical world;
   # a mistyped one that nobody can undo leaves the ledger asserting a transfer
   # that never happened.
-  PART_ID=$(expense_id "$PART" "Ben → Ana")
+  # THE ID COMES FROM THE WRITE THAT MADE IT, never from the title. A payment's
+  # title is GENERATED from the two names, so two payments between one pair are
+  # two entries with one name and `expense_id` answers about the FIRST — which
+  # silently deletes the wrong row and fails five checks downstream for reasons
+  # that have nothing to do with what they test. Every settlement write answers
+  # with `budget.expenseId`, which is exactly the row it just wrote.
+  PART_ID=$(json_field "$PART" budget.expenseId)
   UNDO=$(body "${SETR[@]}" -X DELETE "$SETTLE/$PART_ID")
   contains "removing it restores the balance exactly" "$UNDO" '"email":"ben@e.com","paidCents":0,"owedCents":15000,"netCents":-15000'
   equals "...and the entry is gone with it"           "$(entry_lines "$UNDO" "Ben → Ana")" "no-such-entry"
@@ -1885,7 +1895,7 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
     "$(json_field "$OVER" budget.settlements.0.fromName)>$(json_field "$OVER" budget.settlements.0.toName):$(json_field "$OVER" budget.settlements.0.amountCents)" \
     "Ana>Ben:5000"
   contains "...and the payer is now the one owed"        "$OVER" '"email":"ben@e.com","paidCents":20000,"owedCents":15000,"netCents":5000'
-  OVER_ID=$(expense_id "$OVER" "Ben → Ana")
+  OVER_ID=$(json_field "$OVER" budget.expenseId)
   BACK=$(body "${SETR[@]}" -X DELETE "$SETTLE/$OVER_ID")
   equals "...until it is taken back off again"           \
     "$(json_field "$BACK" budget.settlements.0.fromName)>$(json_field "$BACK" budget.settlements.0.toName):$(json_field "$BACK" budget.settlements.0.amountCents)" \
@@ -1905,7 +1915,7 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   check "...as is a payment of nothing"              400 "${SETR[@]}" "${JSON[@]}" -X POST "$SETTLE" \
     -d '{"fromName":"Ben","fromEmail":"ben@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":0}'
   CHALET_ID=$(expense_id "$SQUARE" "Chalet")
-  SETTLED_ID=$(expense_id "$SQUARE" "Ben → Ana")
+  SETTLED_ID=$(json_field "$SQUARE" budget.expenseId)
   # The payments route is not a way around `removeExpense`'s narrower rule.
   check "an EXPENSE cannot be removed as a payment" 422 "${SETR[@]}" -X DELETE "$SETTLE/$CHALET_ID"
   # …and a transfer cannot be relabelled a cost, which would put money people
@@ -1930,7 +1940,7 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # settles for is re-expressed (EUR 106.45), the rate on the row says so, and it
   # STILL touches no category account. An `entry_shares` assertion would have
   # passed unchanged here — an as-spent share is the same before and after.
-  contains "...with the transfer re-expressed with them" "$EUR" '"title":"Cleo → Ana","category":"Uncategorised","categoryAccountId":null,"amountCents":10000,"currency":"CHF","amountBaseCents":10645,"baseCurrency":"EUR","fxRate":"1.0645","fxRateSource":"fetched"'
+  contains "...with the transfer re-expressed with them" "$EUR" '"title":"Cleo → Ana","category":null,"categoryAccountId":null,"amountCents":10000,"currency":"CHF","amountBaseCents":10645,"baseCurrency":"EUR","fxRate":"1.0645","fxRateSource":"fetched"'
   contains "...down to its single debit"                 "$EUR" '"shares":[{"name":"Ana","email":"ana@e.com","amountCents":10000,"amountBaseCents":10645,"weight":null}]'
   # THE CENTIME THE RECOMPUTE LEAVES, asserted rather than described. Converting
   # three debts one at a time gives 53.23 + 159.68 + 106.45 = 319.36 against a
@@ -1961,6 +1971,75 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
     -d '{"fromName":"Ben","fromEmail":"ben@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":3193}')
   equals "a payment recorded on the HOST surface settles it" "$(json_field "$HOSTPAY" budget.settlements.length)" "0"
   contains "...landing the person who owed it on zero"       "$HOSTPAY" '"email":"ben@e.com","paidCents":19161,"owedCents":19161,"netCents":0'
+
+  # WHAT AN EDIT MAY NOT DO TO A TRANSFER (#74 review). A settlement is a SHAPE
+  # — one credit, one debit, no category — and `updateExpense` is reachable from
+  # three surfaces, so each field that would break it is refused rather than
+  # left to be discovered. All 422 and not 400: the DOMAIN understood the
+  # request and said no, which is a different finding from a schema that never
+  # let it through.
+  HOSTPAY_ID=$(json_field "$HOSTPAY" budget.expenseId)
+  check "a payment cannot be split between three people" 422 "${SETR[@]}" "${JSON[@]}" -X PATCH "$SEXP/$HOSTPAY_ID" \
+    -d '{"participants":[{"name":"Ana","email":"ana@e.com"},{"name":"Ben","email":"ben@e.com"},{"name":"Cleo","email":"cleo@e.com"}]}'
+  check "...nor given a split mode"                      422 "${SETR[@]}" "${JSON[@]}" -X PATCH "$SEXP/$HOSTPAY_ID" \
+    -d '{"splitMode":"exact","participants":[{"name":"Ana","email":"ana@e.com","amountCents":3193}]}'
+  check "...nor titled by hand"                          422 "${SETR[@]}" "${JSON[@]}" -X PATCH "$SEXP/$HOSTPAY_ID" \
+    -d '{"title":"Dinner, obviously"}'
+  # …and the refusals WROTE NOTHING, read back from a third surface rather than
+  # inferred from the 422s. Not `entry_lines "Ben → Ana"`: two payments between
+  # that pair exist by now and the helper answers about the FIRST, so it would
+  # pass while the second had been split three ways. The total says no category
+  # line was added, and Cleo's balance says nobody was debited who should not
+  # have been — both figures move under exactly the writes being refused.
+  RETRY=$(body "${AUTH[@]}" "$API/events/$STRIP/budget")
+  equals "...and no category line was written"           "$(json_field "$RETRY" totalCents)" "38322"
+  contains "...nor anybody debited by the refused split" "$RETRY" '"email":"cleo@e.com","paidCents":10645,"owedCents":10645,"netCents":0'
+
+  # WHAT AN EDIT MAY DO: correct who was paid. The title is DERIVED from the two
+  # names, so it moves with them — frozen, it would go on naming a pair that had
+  # been corrected, which the card hides (it reads the fields) and `/api/v1` and
+  # the audit log do not.
+  RETARGET=$(body "${SETR[@]}" "${JSON[@]}" -X PATCH "$SEXP/$HOSTPAY_ID" \
+    -d '{"participants":[{"name":"Cleo","email":"cleo@e.com"}]}')
+  contains "correcting who was paid renames the payment"  "$RETARGET" '"title":"Ben → Cleo","category":null,"categoryAccountId":null'
+  equals "...and is still the same two-line transfer"     "$(entry_lines "$RETARGET" "Ben → Cleo")" "2"
+  contains "...with the money on the new recipient"       "$RETARGET" '"email":"cleo@e.com","paidCents":10645,"owedCents":13838,"netCents":-3193'
+
+  # THE HOST SURFACE'S DELETE, EXECUTED. It was covered by nothing at first —
+  # every DELETE in this block went to /api/me — and `removeSettlementAsPlanner
+  # (userId, slug, settlementId)` is three interchangeable strings, so
+  # transposing two of them type-checks, passes all 364 vitest tests and 404s
+  # every ✕ on the host page (#74 review, MEMORY's #50 lesson on a new surface).
+  HOSTGONE=$(body "${SETR[@]}" -X DELETE "$BASE/api/host/events/$STRIP/settlements/$HOSTPAY_ID")
+  # ON THE ENTRY COUNT, not on `entry_lines … "no-such-entry"`: the mutation this
+  # check exists for makes the route 404, and an error body has no entry by that
+  # name either — so the sentinel form passed while the delete was broken, which
+  # is an assertion with two ways to pass. Four entries go in, three come back,
+  # and a 404 body answers neither.
+  equals "the HOST surface removes a payment too"         "$(json_field "$HOSTGONE" budget.expenses.length)" "3"
+  contains "...putting the debt back where it was"        "$HOSTGONE" '"email":"ben@e.com","paidCents":15968,"owedCents":19161,"netCents":-3193'
+  equals "...and the plan asks for it again"              \
+    "$(json_field "$HOSTGONE" budget.settlements.0.fromName)>$(json_field "$HOSTGONE" budget.settlements.0.toName):$(json_field "$HOSTGONE" budget.settlements.0.amountCents)" \
+    "Ben>Ana:3193"
+
+  # A `logistics` PLANNER MAY NOT MOVE MONEY, executed rather than grepped. The
+  # gate is shared with the expense writes precisely so the two cannot disagree
+  # about this role (#48 shipped that bug once), and until now the only 403 here
+  # came from an account with no standing at all — a different question.
+  if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+    LOGTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$STRIP/planner-invites" -d '{"role":"logistics"}' \
+      | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    # The acceptance is asserted, because a 403 from an invite that never landed
+    # would be the "no standing" check again wearing this one's name.
+    contains "a second account really is a logistics planner" \
+      "$(body -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "${JSON[@]}" -X POST "$BASE/api/host/join/$LOGTOK/accept")" '"role":"logistics"'
+    check "...and a logistics planner may not record a payment" 403 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "${JSON[@]}" \
+      -X POST "$SETTLE" -d "$PAY"
+    check "...nor remove one"                                   403 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" \
+      -X DELETE "$SETTLE/$CHALET_ID"
+  else
+    echo "  skip  set ZAEME_TEST_GUEST_COOKIE to a second session to run the logistics checks"
+  fi
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
 fi

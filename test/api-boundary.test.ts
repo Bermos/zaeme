@@ -640,10 +640,17 @@ describe('a settlement is an entry, on the same credential and with no category'
       const del = join(API_ROOT, surface[0], 'events', '[slug]', 'settlements', '[id].delete.ts')
       expect(existsSync(post), post).toBe(true)
       expect(existsSync(del), del).toBe(true)
+      // PER VERB, and that is not pedantry (#74 review): `toMatch(/SettlementAsPlanner/)`
+      // over both files is satisfied by `recordSettlementAsPlanner` in the
+      // DELETE handler just as well as by `removeSettlementAsPlanner`, so it
+      // cannot tell the two apart — and `removeSettlementAsPlanner(userId, slug,
+      // settlementId)` is three interchangeable strings, which no type can.
+      // What proves the host DELETE is wired to the right function is the smoke
+      // block executing it; this stops the pair from being swapped silently.
+      expect(readFileSync(post, 'utf8'), post).toMatch(new RegExp(`recordSettlementAs${surface[1].slice(2)}\\(`))
+      expect(readFileSync(del, 'utf8'), del).toMatch(new RegExp(`removeSettlementAs${surface[1].slice(2)}\\(`))
       for (const f of [post, del]) {
-        const src = readFileSync(f, 'utf8')
-        expect(src, f).toMatch(/requireGuestUser\(/)
-        expect(src, f).toMatch(new RegExp(`SettlementAs${surface[1].slice(2)}`))
+        expect(readFileSync(f, 'utf8'), f).toMatch(/requireGuestUser\(/)
       }
     }
     // The capability URL gained nothing: a settlement written over a forwarded
@@ -694,13 +701,36 @@ describe('a settlement is an entry, on the same credential and with no category'
     expect(expenseTable).not.toMatch(/\bkind:/)
   })
 
-  it('never lets a transfer become a cost', () => {
+  it('never lets a transfer become a cost, or anything else it is not', () => {
     // On the server: an edit may correct a mistyped settlement like any other
-    // entry, but the one field that would change what it IS is refused.
+    // entry, but every field that would change what it IS is refused (#74
+    // review). A transfer is a SHAPE — one credit, one debit, no category — and
+    // each of these breaks a different part of it: a category makes a payment a
+    // cost, a second participant debits three people for a payment one person
+    // made (and takes the base column out of reach of `assertEntryBalances`,
+    // which cannot see a header disagreeing with the lines when there is no
+    // category line), a split mode records an intention nobody had, and a typed
+    // title would be discarded silently because the title is derived.
     const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
-    expect(expenses).toMatch(
-      /recordedCategory === null && \(input\.accountId !== undefined \|\| input\.category !== undefined\)/
+    const guard = expenses.slice(
+      expenses.indexOf('if (recordedCategory === null) {'),
+      expenses.indexOf('const splitMode = input.splitMode ?? row.splitMode')
     )
+    expect(guard).not.toBe('')
+    expect(guard).toMatch(/input\.accountId !== undefined \|\| input\.category !== undefined/)
+    expect(guard).toMatch(/input\.participants !== undefined && input\.participants\.length !== 1/)
+    expect(guard).toMatch(/input\.splitMode !== undefined/)
+    expect(guard).toMatch(/input\.title !== undefined/)
+    // …and the shape it protects is ASSERTED before the write, not assumed.
+    expect(expenses).toMatch(/recordedCategory === null && resolved\.length !== 1/)
+    // The title is derived on the edit path as well as the write path, from the
+    // one rule, so it cannot go on naming a pair that has been corrected.
+    expect(expenses).toMatch(/settlementTitle\(paidByName, resolved\[0\]!\.name\)/)
+    expect(expenses).not.toMatch(/title: input\.title \?\? row\.title/)
+    // The weaker invariant is written down where somebody widening the guard
+    // would read it, rather than left to be rediscovered.
+    const build = expenses.slice(expenses.indexOf('export function buildEntryLines'), expenses.indexOf('export function assertEntryBalances'))
+    expect(build).toMatch(/ZERO-SUM CHECK IS WEAKER ON A TRANSFER/)
     // On the screen: the ✎ that composes that PATCH iterates `costs`, which is
     // the list settlements are not in, and the payment form sends no category,
     // no account and no split at all — four fields and a note.
@@ -725,6 +755,15 @@ describe('a settlement is an entry, on the same credential and with no category'
     // it moves CHF 300 into the trip total.
     const shared = readFileSync(join(ROOT, 'shared', 'utils', 'settlement.ts'), 'utf8')
     expect(shared).toMatch(/export function isSettlement/)
+    // The name a transfer carries is part of the same rule, and BOTH writes ask
+    // for it here — the record and the correction — so the one place it is made
+    // is the one place it can be got wrong.
+    expect(shared).toMatch(/export function settlementTitle/)
+    for (const f of ['settlements.ts', 'expenses.ts']) {
+      const src = readFileSync(join(ROOT, 'server', 'domain', f), 'utf8')
+      expect(src, f).toMatch(/import \{ settlementTitle \} from '\.\.\/\.\.\/shared\/utils\/settlement'/)
+      expect(src, f).not.toMatch(/function settlementTitle/)
+    }
     // ABSENT IS NOT NULL: a payload without the field reads as a cost, or a
     // budget from a client that dropped it renders as nothing but payments.
     expect(shared).toMatch(/entry\.categoryAccountId === null/)

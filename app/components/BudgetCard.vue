@@ -53,8 +53,11 @@ interface Account {
 interface Expense {
   id: string
   title: string
-  /** The NAME of the category account this cost was debited to. */
-  category: string
+  /**
+   * The NAME of the category account this cost was debited to, and `null` on a
+   * settlement, which has no category line at all (#28).
+   */
+  category: string | null
   categoryAccountId?: string | null
   /** As spent, in `currency`. */
   amountCents: number
@@ -177,7 +180,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   travel: '🚆', accommodation: '🛏️', food: '🍕', tickets: '🎟️', uncategorised: '🧾'
 }
 
-function categoryIcon(name: string | undefined): string {
+function categoryIcon(name: string | null | undefined): string {
   return CATEGORY_ICONS[(name ?? '').toLowerCase()] ?? '🧾'
 }
 

@@ -30,3 +30,24 @@
 export function isSettlement(entry: { categoryAccountId?: string | null }): boolean {
   return entry.categoryAccountId === null
 }
+
+/**
+ * What a transfer's entry is CALLED. It is a real column on a real row, so it
+ * has to say something, and what a reader of an audit log, a `/api/v1` budget
+ * or a list of entries wants to know about a payment is who paid whom.
+ *
+ * DERIVED, NEVER TYPED, AND RE-DERIVED ON EVERY WRITE (#74 review). It was
+ * frozen at first, like `paid_by_name` on an expense — and that made it a lie
+ * on the one path the change itself endorsed: correcting a mistyped payer or
+ * recipient through the ordinary expense PATCH left the title naming the pair
+ * it used to be. The card reads the fields and so looked right; `/api/v1`, the
+ * audit log and every other consumer of `title` did not. So this is the one
+ * place the string is made, both writes call it, and an explicit `title` on a
+ * transfer is refused rather than silently discarded.
+ *
+ * It lives here beside `isSettlement` because it is the same rule: what a
+ * transfer IS, and what it is called, are one fact about one shape.
+ */
+export function settlementTitle(fromName: string, toName: string): string {
+  return `${fromName.trim()} → ${toName.trim()}`
+}

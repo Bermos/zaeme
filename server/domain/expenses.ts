@@ -12,8 +12,7 @@ import {
   ensureMemberAccountsWithin,
   loadEventAccounts,
   resolveCategoryAccount,
-  ROUNDING,
-  UNCATEGORISED
+  ROUNDING
 } from './accounts'
 import {
   confirmMediaUpload,
@@ -27,6 +26,7 @@ import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
 import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '../../shared/utils/split-weight'
 import { wasConverted } from '../../shared/utils/conversion'
 import { isPlainEvenSplit, splitEvenlyCents } from '../../shared/utils/even-split'
+import { settlementTitle } from '../../shared/utils/settlement'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
@@ -275,9 +275,19 @@ export interface UpdateExpenseInput {
 
 export interface ExpenseView {
   id: string
+  /**
+   * What the entry is called. A cost's is typed by a person; a TRANSFER's is
+   * derived from the two people in it (`settlementTitle`) and re-derived on
+   * every write, so it cannot go on naming a pair that has been corrected.
+   */
   title: string
-  /** The NAME of the category account this entry's cost was debited to. */
-  category: string
+  /**
+   * The NAME of the category account this entry's cost was debited to, and
+   * `null` for an entry that has no category line at all — which is what a
+   * payment between two people is (#28). It used to answer `Uncategorised`
+   * there, which is the name of a real account this entry never touched.
+   */
+  category: string | null
   /**
    * That account's id — the thing "what did accommodation cost" sums over.
    * `null` only for an entry with no category line at all, which is what a
@@ -929,6 +939,18 @@ export function buildEntryLines(input: {
   //
   // A transfer has no category line and therefore no gap to book: its own
   // credit is by construction the sum of its debits.
+  //
+  // WHICH MEANS THE ZERO-SUM CHECK IS WEAKER ON A TRANSFER, and the next person
+  // to widen what a transfer may be has to know it (#74 review). With no
+  // category line the base column closes for ANY shares — the payer is credited
+  // `-owed`, the debits sum to `owed` — so `assertEntryBalances` cannot see a
+  // header `amountBaseCents` that disagrees with them, and nothing is booked to
+  // `Rounding` to say so. It is safe only because a transfer has EXACTLY ONE
+  // share: `apportionCents([x], x, target)` is `[target]` exactly, so the sum
+  // of the debits IS the header. Two shares and the two could drift a cent
+  // apart silently. `updateExpense` refuses a second participant on a
+  // category-less entry for this reason as much as for the visible ones, and
+  // `recordSettlement` only ever writes one.
   const residual = input.categoryAccountId ? owed - input.amountBaseCents : 0
   if (residual !== 0) {
     lines.push({ accountId: input.roundingAccountId, amountCents: 0, amountBaseCents: residual, weight: null })
@@ -1158,7 +1180,13 @@ export async function loadBudget(eventId: string): Promise<{
     return {
       id: r.id,
       title: r.title,
-      category: destination?.accountName ?? UNCATEGORISED,
+      // `null`, NOT `Uncategorised` (#74 review). An entry with no category
+      // line has no category, and naming the default account here filed every
+      // transfer under it for any client that groups on this string without
+      // also reading `categoryAccountId` beside it. It is a narrowing for
+      // Enterprise — `Expense.category` becomes nullable — and it is free
+      // inside the re-vendor #270 already holds open.
+      category: destination?.accountName ?? null,
       categoryAccountId: destination?.accountId ?? null,
       amountCents: r.amountCents,
       currency: r.currency,
@@ -1790,18 +1818,54 @@ export async function updateExpense(eventId: string, expenseId: string, input: U
       l => byAccountId.get(l.accountId)?.kind === 'category' && l.amountCents > 0
     )?.accountId ?? null
 
-    // NO CATEGORY LINE MEANS THIS IS A SETTLEMENT (#28), and giving one a
-    // category would make a payment between two friends a cost: the trip total
-    // is the sum of debits into category accounts, so CHF 300 handed over to
-    // clear a debt would be counted as CHF 300 spent on something. Everything
-    // else about an edit works on a transfer — a mistyped amount is corrected
-    // here like any other — so this refuses the one field that changes what the
-    // entry IS, rather than refusing the edit.
-    if (recordedCategory === null && (input.accountId !== undefined || input.category !== undefined)) {
-      throw createError({
-        statusCode: 422,
-        message: 'This entry is a payment between two people, not a cost, so it has no category.'
-      })
+    // NO CATEGORY LINE MEANS THIS IS A SETTLEMENT (#28), and an edit may not
+    // turn one into something else. Four refusals, because a transfer is a
+    // SHAPE — one credit, one debit, no category — and each of these fields
+    // breaks a different part of it (#74 review):
+    //
+    //   category / accountId  would make a payment a cost. The trip total is
+    //     the sum of debits into category accounts, so CHF 300 handed over to
+    //     clear a debt would be counted as CHF 300 spent on something.
+    //   participants          more than one recipient is not a transfer. Three
+    //     people would be debited for a payment one person made, every balance
+    //     would move, and the shape every reader relies on — `shares` has one
+    //     entry, `lines` has two — would stop holding. It is also the condition
+    //     `buildEntryLines` needs for a transfer's base column to close against
+    //     its own header; see the note there.
+    //   splitMode             a payment is not divided, so a mode for it would
+    //     record an intention nobody had — and `even` over one person is what
+    //     keeps a corrected amount re-derivable (`resplitFromRecord`).
+    //   title                 is DERIVED for a transfer (`settlementTitle`), so
+    //     accepting one would discard it silently.
+    //
+    // Everything else works on a transfer — a mistyped amount, a note, the
+    // payer, the recipient — so this refuses the fields that change what the
+    // entry IS rather than refusing the edit.
+    if (recordedCategory === null) {
+      if (input.accountId !== undefined || input.category !== undefined) {
+        throw createError({
+          statusCode: 422,
+          message: 'This entry is a payment between two people, not a cost, so it has no category.'
+        })
+      }
+      if (input.participants !== undefined && input.participants.length !== 1) {
+        throw createError({
+          statusCode: 422,
+          message: 'A payment goes to ONE person. Send only the person who was paid, or remove it and record it again.'
+        })
+      }
+      if (input.splitMode !== undefined) {
+        throw createError({
+          statusCode: 422,
+          message: 'A payment between two people is not split, so it has no split mode.'
+        })
+      }
+      if (input.title !== undefined) {
+        throw createError({
+          statusCode: 422,
+          message: 'A payment is titled after the two people in it, so its title is not set by hand.'
+        })
+      }
     }
 
     const splitMode = input.splitMode ?? row.splitMode
@@ -1824,6 +1888,23 @@ export async function updateExpense(eventId: string, expenseId: string, input: U
 
     const paidByName = input.paidByName ?? row.paidByName
     const paidByEmail = (input.paidByEmail ?? row.paidByEmail).trim().toLowerCase()
+    // The shape a transfer must still have after the edit, asserted before
+    // anything is written rather than hoped for. The refusals above make it
+    // unreachable from a request, which is exactly why it is a 500: reaching it
+    // means this file has a bug, not that the caller sent something wrong.
+    if (recordedCategory === null && resolved.length !== 1) {
+      throw createError({
+        statusCode: 500,
+        message: 'A payment between two people has exactly one share. Nothing was changed.'
+      })
+    }
+    // …and its title is DERIVED, so correcting the payer or the recipient
+    // renames the entry with them. Frozen, it was a lie the moment either
+    // moved — and `/api/v1` and the audit log read `title` where the card
+    // reads the fields (#74 review).
+    const title = recordedCategory === null
+      ? settlementTitle(paidByName, resolved[0]!.name)
+      : (input.title ?? row.title)
     const members = await ensureMemberAccountsWithin(tx, eventId, [
       { name: paidByName, email: paidByEmail },
       ...resolved.map(r => ({ name: r.name, email: r.email }))
@@ -1853,7 +1934,7 @@ export async function updateExpense(eventId: string, expenseId: string, input: U
     assertEntryBalances(lines)
 
     await tx.update(tables.expense).set({
-      title: input.title ?? row.title,
+      title,
       amountCents,
       currency: conversion.currency,
       baseCurrency: conversion.baseCurrency,
