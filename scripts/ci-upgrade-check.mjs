@@ -116,10 +116,14 @@ const HEADERS = {
  *       account, still filed under its category)
  *   1   the trip still settles in what it settled in
  *   1   the migration invented no display zone for it (#31)
+ *   1   the migration wrote nothing on a ticket that was already there (#35) —
+ *       vacuous on the canary, which has no media at all (it is written through
+ *       `/api/v1`, which has no upload route), and counted anyway because the
+ *       vacuum is the correct state and the assertion must not go missing
  *   2   everybody who had a balance still has one; the balances still close
  *   4   the write block: readable, recorded, filed under Food, total moved
  *  ---
- *  23
+ *  24
  *
  * `snapshot` refuses to write a file unless the canary came back with both of
  * those expenses AND a category on each, so every one of the 23 is reachable —
@@ -134,7 +138,7 @@ const HEADERS = {
  * this deliberately does not depend on how many of those there are: that file
  * is free to change what it leaves behind.
  */
-const MIN_ASSERTIONS = 23
+const MIN_ASSERTIONS = 24
 
 let pass = 0
 let fail = 0
@@ -242,6 +246,34 @@ function canaryExpenses(stamp) {
   ]
 }
 
+/**
+ * WHAT THIS RELEASE SAYS IS WRITTEN ON EACH OF AN EVENT'S MEDIA ROWS (#35),
+ * recorded so `verify` can compare against it rather than against a constant.
+ *
+ * `events_ticket_detail` is a new TABLE with no backfill, which makes it the
+ * same shape of claim as #31's display zone: an existing ticket genuinely has
+ * nothing written on it, and a migration that invented a row — filling
+ * `traveller_name` from the RSVP it is assigned to, say — would put words on
+ * somebody's ticket that nobody typed. The honest fill is none.
+ *
+ * `'no-field'` means the previous release has no such field AT ALL, which is a
+ * fact about that release and not a value in its database. `verify` reads that
+ * case as "the only honest fill is null" and the other case as "leave it
+ * exactly as it was", which is what keeps this live against a future base that
+ * already has the column.
+ */
+async function mediaClaim(slug) {
+  const res = await api('GET', `/events/${slug}/media`)
+  if (res.status !== 200 || !Array.isArray(res.json)) return []
+  return res.json
+    .filter(m => m?.id)
+    .map(m => ({
+      id: m.id,
+      type: m.type ?? null,
+      ticket: Object.hasOwn(m, 'ticket') ? (m.ticket ?? null) : 'no-field'
+    }))
+}
+
 async function snapshot(file) {
   const stamp = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`
   const created = await api('POST', '/events', { title: `Upgrade canary ${stamp}`, type: 'trip' })
@@ -289,6 +321,7 @@ async function snapshot(file) {
     events.push({
       slug,
       timezone,
+      media: await mediaClaim(slug),
       currency: budget.json.currency ?? null,
       totalCents: budget.json.totalCents ?? null,
       expenses: expenses.map(e => ({
@@ -533,6 +566,43 @@ async function verify(file) {
       `${before.slug}: the migration invented no display zone for it`,
       (zoneNow.get(before.slug) ?? null) === (before.timezone ?? null),
       `was ${JSON.stringify(before.timezone ?? null)}, now ${JSON.stringify(zoneNow.get(before.slug) ?? null)}`
+    )
+
+    /*
+     * AND WROTE NOTHING ON A TICKET THAT WAS ALREADY THERE (#35). Same claim as
+     * the zone above and compared the same way: against the SNAPSHOT, because
+     * "every ticket has no detail" is a property of which release happens to be
+     * the base and goes stale the moment one can write them.
+     *
+     * It also catches a media row that DISAPPEARED. The migration adds a unique
+     * index on `events_media (event_id, id)` — it cannot drop a row, since `id`
+     * is already the primary key — but a cascade that pointed the wrong way
+     * could, and a ticket quietly deleted by a migration is the worst possible
+     * failure for the person holding the trip.
+     *
+     * ON THE CANARY THIS IS VACUOUS, and it is counted in MIN_ASSERTIONS
+     * anyway: the canary is written through `/api/v1`, which has no upload
+     * route, so it has no media and the honest answer for it is "nothing
+     * changed about nothing". The events where it bites are the smoke suite's
+     * leftovers, which include the tickets the receipt block and the ticket
+     * block both upload. Asserting the vacuum is the right answer here; what it
+     * must not do is go missing.
+     */
+    const mediaNow = new Map(((await api('GET', `/events/${before.slug}/media`)).json ?? [])
+      .filter(m => m?.id).map(m => [m.id, m]))
+    const wrongOnTicket = (before.media ?? []).filter((was) => {
+      const now = mediaNow.get(was.id)
+      if (!now) return true
+      const expected = was.ticket === 'no-field' ? null : was.ticket
+      return JSON.stringify(now.ticket ?? null) !== JSON.stringify(expected)
+    })
+    assert(
+      `${before.slug}: the migration wrote nothing on a ticket that was already there`,
+      wrongOnTicket.length === 0,
+      wrongOnTicket
+        .map(w => `${w.id} (${w.type}) was ${JSON.stringify(w.ticket)}, now `
+          + `${mediaNow.has(w.id) ? JSON.stringify(mediaNow.get(w.id).ticket ?? null) : 'GONE'}`)
+        .join('; ')
     )
 
     const nowBalances = new Map((after.balances ?? []).map(b => [b.email, b.netCents]))

@@ -1025,6 +1025,210 @@ describe('passkeys are a second way in, not a second credential', () => {
 })
 
 /**
+ * A TICKET STAYS HOST-MANAGED, AND WHAT IS PRINTED ON IT IS PART OF THE TICKET
+ * (#35).
+ *
+ * `server/domain/guest.ts` refuses a guest the UPLOAD of a ticket or a
+ * document, and the detail is the same thing said in rows: a seat number is not
+ * a fact anybody holding the forwarded link gets to write. Two ways for that to
+ * go wrong quietly — a write route on the invite token or the account surface,
+ * or the domain function reaching for a weaker gate than the one that governs
+ * assignment and deletion — and neither is visible in the shape of a handler.
+ */
+describe('what a ticket says is written by a planner, on the host surface only', () => {
+  const DETAIL = join(API_ROOT, 'host', 'events', '[slug]', 'media', '[id]', 'detail.put.ts')
+
+  it('lives beside assignment, and on no other credential', () => {
+    expect(existsSync(DETAIL), DETAIL).toBe(true)
+    expect(readFileSync(DETAIL, 'utf8')).toMatch(/requireGuestUser\(/)
+    // THE VERB, NOT A WORD IN A PATH. The first version of this filtered the
+    // other surfaces' handlers on `/detail/i` over their filenames, which is
+    // the shape #74's review threw out: `server/api/me/events/[slug]/media/
+    // [id]/seat.put.ts` calling `setTicketDetail` passes a filename rule
+    // whole. What may not appear outside `server/api/host/**` is the DOMAIN
+    // FUNCTION, whatever the route around it is called.
+    const elsewhere = [...guestHandlers, ...accountHandlers, ...machineHandlers, ...adminHandlers]
+      .filter(f => /\bsetTicketDetail\b/.test(readFileSync(f, 'utf8')))
+    expect(elsewhere.map(rel)).toEqual([])
+    // …and the host surface really does call it, or the line above is a rule
+    // about a function nothing uses.
+    expect(hostHandlers.filter(f => /\bsetTicketDetail\b/.test(readFileSync(f, 'utf8'))).map(rel))
+      .toEqual([rel(DETAIL)])
+  })
+
+  /**
+   * THE ARGUMENT, NOT THE FUNCTION — the half #77's review found unproved.
+   *
+   * Moving the formatting into `shared/utils/ticket-detail.ts` made the RULE
+   * testable, and `test/ticket-detail.test.ts` executes it. What no test
+   * touched was the value that function is HANDED. The reviewer deleted
+   * `:timezone="page.event.timezone"` from the guest page and got eslint
+   * clean, `nuxt typecheck` clean, 426 vitest passed and 731 smoke checks
+   * passed — while every attendee's ticket rendered against the reader's clock
+   * on the SSR'd page.
+   *
+   * It is silent because `formatInZone` falls back to the ambient zone for
+   * `undefined` BY DESIGN (a stored zone ICU stops resolving must not take a
+   * page down), so a missing prop and "the reader's own" are the same value.
+   * The props are REQUIRED now, which makes `nuxt typecheck` refuse an omitted
+   * binding at the call site; this asserts the requirement itself, because
+   * turning one back into `timezone?:` is a one-character change that restores
+   * the silence.
+   *
+   * A STRUCTURAL RULE OVER A TEMPLATE, which this file already does for
+   * `<NuxtPage />` — and with the same caveat that taught: only the template
+   * counts, since the prose above these bindings mentions them.
+   */
+  it('hands the event zone to both cards that render a ticket', () => {
+    const PAGES = join(ROOT, 'app')
+    const sfc = (...parts: string[]) => readFileSync(join(PAGES, ...parts), 'utf8')
+    const template = (src: string) => /<template>([\s\S]*)<\/template>/.exec(src)?.[1] ?? ''
+
+    for (const parts of [['components', 'MediaGallery.vue'], ['components', 'HostMediaCard.vue']]) {
+      const src = sfc(...parts)
+      // REQUIRED. `timezone?: string | null` is the shape that goes quiet.
+      expect(src, parts.join('/')).toMatch(/^ {2}timezone: string \| null$/m)
+      expect(src, parts.join('/')).not.toMatch(/^ {2}timezone\?:/m)
+      // …and it is the zone that reaches the renderer, not some other value.
+      expect(template(src), parts.join('/')).toMatch(/ticketDetailLines\([^)]*,\s*timezone\)/)
+    }
+
+    // EVERY CALL SITE BINDS IT. This is the assertion the deleted line breaks.
+    const bindings: string[] = []
+    let callSites = 0
+    const visit = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          visit(full)
+          continue
+        }
+        if (!entry.name.endsWith('.vue')) continue
+        const body = template(readFileSync(full, 'utf8'))
+        for (const tag of ['MediaGallery', 'HostMediaCard']) {
+          for (const at of [...body.matchAll(new RegExp(`<${tag}(?![\\w-])`, 'g'))].map(m => m.index!)) {
+            callSites += 1
+            const open = body.slice(at, body.indexOf('>', at))
+            if (!/:timezone=/.test(open)) bindings.push(`${rel(full)}: <${tag}> with no :timezone`)
+          }
+        }
+      }
+    }
+    visit(PAGES)
+    expect(bindings).toEqual([])
+    // THE ANTI-VACUITY GUARD, and it counts what the WALK found rather than
+    // what a hand-written list says. `bindings` is empty both when every call
+    // site binds the zone and when the walk found no call sites at all — a
+    // renamed component, a moved directory, a `<template>` regex that stopped
+    // matching. Three exist today: the gallery on the guest page, the host card
+    // on the host page, and the gallery nested inside the host card.
+    //
+    // Counting `:timezone=` in those three files instead would prove nothing:
+    // both pages bind a zone on `DatePoll` and `EventTimeline` too, so the
+    // count stays at three with this feature's binding deleted.
+    expect(callSites).toBe(3)
+
+    // AND THE HOST CARD WATCHES THE ZONE, not only its own fetch. Its ticket
+    // drafts hold a WALL CLOCK, seeded eagerly at mount, so a zone edited
+    // further up the page moves `props.timezone` while the card's `useFetch`
+    // does not re-run — and `saveDetail` then resolves a stale reading against
+    // the new zone. Measured at five hours on an untouched field. The call site
+    // is pinned rather than the symbol, because extracting the source into a
+    // helper would satisfy a `/rezoneInputValue/` over the file while the
+    // watcher went on watching only `tickets`.
+    const hostCard = sfc('components', 'HostMediaCard.vue')
+    expect(hostCard).toMatch(/watch\(\[tickets, \(\) => props\.timezone\]/)
+    expect(hostCard).toMatch(/draft\.validFrom = rezoneInputValue\(draft\.validFrom, seededZone, zone\)/)
+    expect(hostCard).toMatch(/draft\.validUntil = rezoneInputValue\(draft\.validUntil, seededZone, zone\)/)
+  })
+
+  it('asks the same gate assignment and deletion ask', () => {
+    // ASK WHAT A GUARD PERMITS, NOT WHAT IT FORBIDS (#74). `logistics` is a
+    // planner row and is deliberately not one of these two: a ticket is
+    // somebody's seat, and the role set that may re-assign it is the role set
+    // that may say what is on it. Pinned per function, because a regex over
+    // the whole file passes on any one of the three matching.
+    const src = readFileSync(join(ROOT, 'server', 'domain', 'media.ts'), 'utf8')
+    for (const fn of ['assignTicket', 'deleteMedia', 'setTicketDetail']) {
+      const start = src.indexOf(`export async function ${fn}(`)
+      expect(start, fn).toBeGreaterThan(-1)
+      const body = src.slice(start, src.indexOf('\n}\n', start))
+      expect(body, fn).toMatch(/assertPlanner\([^)]*roles: \['owner', 'co_planner'\]/s)
+    }
+  })
+
+  it('keeps tickets and documents off the guest upload list', () => {
+    // The rule this issue must not move. Read as a VALUE rather than as "does
+    // not contain 'ticket'": the refusal message beside it names both words,
+    // so a substring test passes on a list that has gained them.
+    const guest = readFileSync(join(ROOT, 'server', 'domain', 'guest.ts'), 'utf8')
+    const list = /const GUEST_UPLOAD_TYPES: MediaType\[\] = \[([^\]]*)\]/.exec(guest)?.[1]
+    expect(list).toBeDefined()
+    const types = list!.split(',').map(s => s.trim().replace(/'/g, '')).filter(Boolean)
+    expect(types).toEqual(['photo', 'video'])
+  })
+
+  it('never makes a field required, on the wire or in the database', () => {
+    // THE RULE THE ISSUE STATES IN TERMS: this must never become a form
+    // somebody has to complete before uploading a PDF. Two places can break it
+    // independently — a `.min(1)` in the route's zod schema, or a `.notNull()`
+    // on one of the eight columns — so both are read.
+    const route = readFileSync(DETAIL, 'utf8')
+    const schema = route.slice(route.indexOf('const bodySchema'), route.indexOf('export default'))
+    expect(schema).not.toMatch(/\.min\(/)
+    // Every declared field is `.nullish()`: optional AND nullable, which is
+    // what makes `{}` a legal body that clears the lot.
+    const fields = [...schema.matchAll(/^ {2}(\w+):/gm)].map(m => m[1])
+    expect(fields).toEqual([
+      'bookingRef', 'carrier', 'seat', 'coach', 'travellerName', 'validFrom', 'validUntil', 'note'
+    ])
+    expect([...schema.matchAll(/\.nullish\(\)/g)]).toHaveLength(fields.length)
+
+    const events = readFileSync(join(ROOT, 'server', 'database', 'schema', 'events.ts'), 'utf8')
+    const table = events.slice(
+      events.indexOf('export const ticketDetail = pgTable('),
+      events.indexOf('export const icalToken = pgTable(')
+    )
+    expect(table).not.toBe('')
+    for (const column of fields) {
+      const line = new RegExp(`^  ${column}: .*$`, 'm').exec(table)?.[0]
+      expect(line, column).toBeDefined()
+      expect(line, column).not.toMatch(/notNull\(\)/)
+    }
+    // …and the two that ARE not-null are the bookkeeping, not the content.
+    expect(table).toMatch(/eventId: text\('event_id'\)\.notNull\(\)/)
+    expect(table).toMatch(/mediaId: text\('media_id'\)\.notNull\(\)/)
+  })
+
+  it('cannot point at a ticket on another event', () => {
+    // A plain `media_id` reference would let a detail row on one trip name a
+    // ticket on another, with only the handler's `eventId` filter between a
+    // seat number and the wrong event. The composite key makes Postgres refuse
+    // it, and it needs the unique index on `events_media (event_id, id)` as
+    // its target — which is why the generated migration had to be re-ordered.
+    const events = readFileSync(join(ROOT, 'server', 'database', 'schema', 'events.ts'), 'utf8')
+    expect(events).toMatch(/foreignColumns: \[media\.eventId, media\.id\]/)
+    expect(events).toMatch(/uniqueIndex\('events_media_event_id_unique'\)\.on\(table\.eventId, table\.id\)/)
+
+    // THE `42830` TRAP, asserted on the file that would abort the deploy. A
+    // foreign key naming `events_media (event_id, id)` must come AFTER the
+    // unique index backing it, and drizzle-kit emits every constraint before
+    // every index — so this ordering is hand-edited and nothing but this reads
+    // it. `pnpm test` runs no SQL; without this the first sign is the Kitchen
+    // `migrate` task failing, with production left on the previous release.
+    const sql = readFileSync(
+      join(ROOT, 'server', 'database', 'migrations', '0012_worried_silver_centurion.sql'),
+      'utf8'
+    )
+    const index = sql.indexOf('CREATE UNIQUE INDEX "events_media_event_id_unique"')
+    const fk = sql.indexOf('ADD CONSTRAINT "events_ticket_detail_event_media_fk"')
+    expect(index).toBeGreaterThan(-1)
+    expect(fk).toBeGreaterThan(-1)
+    expect(index).toBeLessThan(fk)
+  })
+})
+
+/**
  * Nuxt's file-based router has one trap this app has already fallen into, and
  * it is invisible to every test that talks to the API instead of the pages.
  *

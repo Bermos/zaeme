@@ -207,11 +207,32 @@ export async function listTimeline(userId: string, slug: string) {
     )
 }
 
-/** Ready media metadata for a planner of the event (no presigned URLs). */
+/**
+ * Ready media metadata for a planner of the event (no presigned URLs).
+ *
+ * THE SECOND READ PATH, and worth saying so out loud: `listMediaForPlanner` in
+ * `server/domain/media.ts` answers the host screen and this one answers
+ * `/api/v1`, with a different projection and a different order. A field added
+ * to one and not to the other is INVISIBLE to `pnpm test` — the contract test
+ * polices paths and methods and is blind to fields — and #35 shipped exactly
+ * that for one smoke run: the machine surface reported `ticket: null` on a
+ * ticket with a seat number written on it, because `v1-shapes.mediaItem` can
+ * only project what it is handed.
+ *
+ * ONE LEFT JOIN rather than a second query: a gallery is read whole, and a
+ * per-item lookup here is the N+1 `server/domain/admin.ts` has a note about at
+ * the top of it.
+ *
+ * The detail's columns are selected FLAT and the object rebuilt below, because
+ * a nested selection over a left join makes "no row" and "a row of nulls"
+ * indistinguishable — which is the one distinction this table exists to keep
+ * (an emptied detail is a state, not an absence). `detailId` is the sentinel
+ * and it is a primary key, so it is null exactly when there is no row.
+ */
 export async function listMedia(userId: string, slug: string) {
   const ev = await loadEventBySlug(slug)
   await assertPlanner(ev.id, userId)
-  return useDb()
+  const rows = await useDb()
     .select({
       id: tables.media.id,
       type: tables.media.type,
@@ -223,11 +244,31 @@ export async function listMedia(userId: string, slug: string) {
       // The expense this item is the receipt for (#29). An id, not a URL: the
       // bytes stay in zäme and are served to guests there.
       expenseId: tables.media.expenseId,
-      createdAt: tables.media.createdAt
+      createdAt: tables.media.createdAt,
+      // What is printed on the ticket (#35).
+      detailId: tables.ticketDetail.id,
+      bookingRef: tables.ticketDetail.bookingRef,
+      carrier: tables.ticketDetail.carrier,
+      seat: tables.ticketDetail.seat,
+      coach: tables.ticketDetail.coach,
+      travellerName: tables.ticketDetail.travellerName,
+      validFrom: tables.ticketDetail.validFrom,
+      validUntil: tables.ticketDetail.validUntil,
+      note: tables.ticketDetail.note
     })
     .from(tables.media)
+    .leftJoin(tables.ticketDetail, eq(tables.ticketDetail.mediaId, tables.media.id))
     .where(and(eq(tables.media.eventId, ev.id), eq(tables.media.status, 'ready')))
     .orderBy(desc(tables.media.createdAt))
+
+  return rows.map(({
+    detailId, bookingRef, carrier, seat, coach, travellerName, validFrom, validUntil, note, ...media
+  }) => ({
+    ...media,
+    ticket: detailId === null
+      ? null
+      : { bookingRef, carrier, seat, coach, travellerName, validFrom, validUntil, note }
+  }))
 }
 
 /* -------------------------------- writes --------------------------------- */

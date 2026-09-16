@@ -157,7 +157,35 @@ export function mediaItem(row: object) {
     // rather than a URL for the same reason as everything else here: the bytes
     // stay in zäme and are served to guests there.
     expenseId: r.expenseId ?? null,
+    // What the ticket SAYS (#35) — booking reference, coach, seat — or null for
+    // everything that is not a ticket and for every ticket nobody has written
+    // anything on. Additive and read-only here: writing it is a planner's, on
+    // zäme's own host surface, and adding a verb to /api/v1 is the owner's
+    // decision and not this issue's (#8).
+    //
+    // THE OBJECT IS NOT MANUFACTURED, and that is the one thing to get right
+    // here: `null` means there is no detail row, while an object whose every
+    // field is null means somebody opened this ticket and left it blank. A
+    // projection that answered `{bookingRef: null, …}` for a missing row would
+    // tell Enterprise the second when the truth is the first.
+    ticket: ticketDetail(r.ticket),
     createdAt: r.createdAt
+  }
+}
+
+/** `components.schemas.TicketDetail` — every field nullable, by design (#35). */
+function ticketDetail(value: unknown) {
+  if (!value || typeof value !== 'object') return null
+  const d = asRow(value)
+  return {
+    bookingRef: d.bookingRef ?? null,
+    carrier: d.carrier ?? null,
+    seat: d.seat ?? null,
+    coach: d.coach ?? null,
+    travellerName: d.travellerName ?? null,
+    validFrom: d.validFrom ?? null,
+    validUntil: d.validUntil ?? null,
+    note: d.note ?? null
   }
 }
 

@@ -40,6 +40,9 @@ import { bigint, boolean, check, foreignKey, index, integer, numeric, pgTable, t
  *    records whether it is the 09:14 somebody INTENDS to take or the bus they
  *    actually got on.
  *  - `events_media` — the shared gallery, documents and tickets.
+ *  - `events_ticket_detail` — what a ticket SAYS (#35): the booking reference,
+ *    the coach and the seat, as rows beside the file rather than inside it, so
+ *    a barrier can be read without waiting for a PDF. Every column nullable.
  *  - `events_series_member` — the standing group of a recurring series: each
  *    new occurrence auto-invites every member.
  *  - `events_account` + `events_expense` + `events_expense_share` — the trip
@@ -483,7 +486,87 @@ export const media = pgTable('events_media', {
   index('events_media_taken_at_idx').on(table.takenAt),
   index('events_media_assigned_rsvp_idx').on(table.assignedRsvpId),
   index('events_media_timeline_item_idx').on(table.timelineItemId),
-  index('events_media_expense_idx').on(table.expenseId)
+  index('events_media_expense_idx').on(table.expenseId),
+  /**
+   * The target `events_ticket_detail`'s composite foreign key REFERENCES (#35),
+   * and nothing else reads it. `id` is already the primary key, so this index
+   * adds no uniqueness the table did not have — it exists because Postgres
+   * needs a unique constraint on exactly `(event_id, id)` before it will accept
+   * a foreign key naming those two columns, which is what stops a ticket detail
+   * on event A pointing at a media row on event B. Same shape as
+   * `events_place_event_id_unique` above and for the same reason.
+   */
+  uniqueIndex('events_media_event_id_unique').on(table.eventId, table.id)
+])
+
+/**
+ * WHAT IS ACTUALLY ON THE TICKET (#35) — the booking reference, the coach and
+ * the seat, as ROWS rather than as a PDF.
+ *
+ * At a barrier you need "coach 12, seat 41A" before the PDF finishes rendering,
+ * or, on a train with no signal, when it never does. `events_media` can say
+ * that a file exists and who it belongs to; it cannot say what is inside it, so
+ * the facts a person reads out loud live here where they can be rendered as
+ * text beside the download.
+ *
+ * A SEPARATE TABLE, not eight nullable columns on `events_media`, which is a
+ * photo table that would then also hold tickets: every one of these columns is
+ * meaningless for a photo, a video and a shared document, and a row here says
+ * "somebody has typed in what this ticket says" in a way a column full of nulls
+ * on 400 gallery photos never could.
+ *
+ * EVERY COLUMN NULLABLE, and that is the rule this table exists under rather
+ * than an accident of not knowing what is required. A ticket with nothing
+ * filled in is still a ticket: the PDF is the thing that gets you through the
+ * barrier and the detail is a convenience on top of it, so nothing here may
+ * ever become a form somebody has to complete before uploading a file. An
+ * entirely empty row is legal and means exactly what no row means — nobody has
+ * typed anything yet — and the two are distinguishable on the wire (`null` vs
+ * an object of nulls) only because deleting somebody's last field should not
+ * silently delete the record that they were here.
+ *
+ * ONE DETAIL PER MEDIA ROW (`media_id` unique), and the pair
+ * `(event_id, media_id)` is the foreign key rather than `media_id` alone: a
+ * plain reference would let a detail row on one trip point at a ticket on
+ * another, which the composite key makes Postgres refuse instead of the code
+ * remembering to. `on delete cascade` in both directions — deleting the ticket
+ * deletes what was written about it, because the detail is ABOUT the file and
+ * has no meaning without it. (Contrast `events_media.expense_id`, which is
+ * `set null`: a receipt pin is a second thing said about a photo that outlives
+ * it.)
+ *
+ * `valid_from`/`valid_until` are `timestamptz` like every other instant in this
+ * schema, and like every other instant they are RENDERED against
+ * `events_event.timezone` (#31) rather than stored in it. A ticket valid
+ * "until 23:59" means 23:59 where the barrier is, which is precisely the case
+ * the event zone exists for; `shared/utils/ticket-detail.ts` is the one place
+ * that turns these two columns into the line a person reads.
+ */
+export const ticketDetail = pgTable('events_ticket_detail', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
+  mediaId: text('media_id').notNull(),
+  /** The airline/rail booking reference — the six characters at the counter. */
+  bookingRef: text('booking_ref'),
+  /** Who is carrying you: "SBB", "TAP Air Portugal", "the night bus". */
+  carrier: text('carrier'),
+  seat: text('seat'),
+  coach: text('coach'),
+  /** Whose name is printed on it, which is not always the RSVP it is assigned to. */
+  travellerName: text('traveller_name'),
+  validFrom: timestamp('valid_from', { withTimezone: true }),
+  validUntil: timestamp('valid_until', { withTimezone: true }),
+  note: text('note'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
+}, table => [
+  uniqueIndex('events_ticket_detail_media_unique').on(table.mediaId),
+  index('events_ticket_detail_event_idx').on(table.eventId),
+  foreignKey({
+    columns: [table.eventId, table.mediaId],
+    foreignColumns: [media.eventId, media.id],
+    name: 'events_ticket_detail_event_media_fk'
+  }).onDelete('cascade')
 ])
 
 export const icalToken = pgTable('events_ical_token', {
