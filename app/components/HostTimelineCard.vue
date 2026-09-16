@@ -21,8 +21,8 @@ interface TimelineItem {
 interface Place { id: string, name: string }
 
 const props = withDefaults(
-  defineProps<{ slug: string, timeline: TimelineItem[], places?: Place[], trip?: boolean }>(),
-  { places: () => [] }
+  defineProps<{ slug: string, timeline: TimelineItem[], places?: Place[], trip?: boolean, timezone?: string | null }>(),
+  { places: () => [], timezone: null }
 )
 const emit = defineEmits<{ updated: [] }>()
 
@@ -57,12 +57,26 @@ const itemLocation = ref('')
 const itemPlaceId = ref(PLACE_NONE)
 const adding = ref(false)
 
-/** `datetime-local` wants `YYYY-MM-DDTHH:mm` in LOCAL time, not an ISO string. */
+/**
+ * `datetime-local` wants `YYYY-MM-DDTHH:mm`, and since #31 that wall clock is
+ * THE EVENT'S, not the host's browser's.
+ *
+ * Both directions move together or neither is right. A planner in Zürich
+ * editing a Lisbon trip reads "Times are in Europe/Lisbon" above this form: if
+ * the field is filled from their own clock they see 10:14 for the 09:14 train,
+ * and if it is read back against their own clock every save of an untouched
+ * form moves the item an hour. `toZonedInputValue` and `isoFromZonedInput`
+ * (`shared/utils/timezone.ts`) are the pair, and with no zone they are exactly
+ * what this file did before.
+ *
+ * What is sent is still an ISO INSTANT. Nothing about storage changes here.
+ */
 function toLocalInput(value: string | Date | null): string {
-  if (!value) return ''
-  const d = new Date(value)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return toZonedInputValue(value, props.timezone)
+}
+
+function fromLocalInput(value: string): string | null {
+  return value ? isoFromZonedInput(value, props.timezone) : null
 }
 
 async function addItem() {
@@ -74,7 +88,7 @@ async function addItem() {
       body: {
         title: itemTitle.value,
         type: itemType.value,
-        startsAt: itemWhen.value ? new Date(itemWhen.value).toISOString() : null,
+        startsAt: fromLocalInput(itemWhen.value),
         location: itemLocation.value || null,
         placeId: itemPlaceId.value || null
       }
@@ -120,7 +134,7 @@ async function saveEdit(id: string) {
       body: {
         title: draft.title,
         type: draft.type,
-        startsAt: draft.when ? new Date(draft.when).toISOString() : null,
+        startsAt: fromLocalInput(draft.when),
         location: draft.location || null,
         description: draft.description || null,
         placeId: draft.placeId || null
@@ -164,10 +178,11 @@ function placeName(id: string): string | undefined {
 }
 
 function when(iso: string | Date | null): string | null {
-  return iso
-    ? new Date(iso).toLocaleString('en-CH', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
-    : null
+  return formatInZone(iso, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }, props.timezone)
 }
+
+/** Named once above the list, for the same reason it is on the guest card. */
+const zoneLine = computed(() => zoneNote(props.timezone))
 </script>
 
 <template>
@@ -179,6 +194,12 @@ function when(iso: string | Date | null): string | null {
         </p>
         <p class="text-sm text-muted">
           {{ trip ? 'Travel, accommodation, activities — grouped by day on the guest page.' : 'Doors, food, the main thing.' }}
+        </p>
+        <p
+          v-if="zoneLine"
+          class="text-xs text-muted mt-0.5"
+        >
+          🕓 {{ zoneLine }} — type them as they are there.
         </p>
       </div>
     </template>

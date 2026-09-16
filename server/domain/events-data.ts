@@ -6,6 +6,7 @@ import { guestUser } from '../database/schema/auth'
 import { assertPlaceOnEvent, assertPlanner, loadEventBySlug } from './permissions'
 import { generateUniqueSlug } from './slugify'
 import { instanceBaseCurrency } from './instance-settings'
+import { TIMEZONE_REFUSAL, canonicalTimezone, isBlankTimezone } from '../../shared/utils/timezone'
 
 /**
  * The events domain logic — the read/write operations over the `events_*`
@@ -27,6 +28,29 @@ type DateInput = string | Date | null | undefined
 export function toDate(v: DateInput): Date | null {
   if (!v) return null
   return v instanceof Date ? v : new Date(v)
+}
+
+/**
+ * THE REFUSAL SIDE OF #31's display zone. The rule itself is
+ * `shared/utils/timezone.ts` — one implementation, applied by the host form,
+ * this domain and the tests — and it answers null for anything that is not a
+ * named region zone. This is where a null becomes a 422.
+ *
+ * Blank, whitespace and an explicit null all mean "NO ZONE", which is a value
+ * and not a mistake: it is what every event had before this column and what a
+ * host clearing the field is asking for. So they resolve to null without a
+ * refusal, and only a non-empty string that is not a zone is refused.
+ *
+ * 422 rather than 400 on purpose: the zod schemas on the routes bound the
+ * length and nothing else, so a request that reaches here was well-formed and
+ * was understood — what failed is the domain rule, and the message names what a
+ * zone looks like rather than what this one is not.
+ */
+function resolveDisplayTimezone(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined || isBlankTimezone(raw)) return null
+  const zone = canonicalTimezone(raw)
+  if (!zone) throw createError({ statusCode: 422, message: TIMEZONE_REFUSAL })
+  return zone
 }
 
 /** Fire-and-forget proactive dispatch, supplied by the calling app. */
@@ -215,6 +239,12 @@ export interface CreateEventInput {
   posterUrl?: string | null
   startsAt?: DateInput
   endsAt?: DateInput
+  /**
+   * The wall clock this event's times are READ against (#31) — an IANA region
+   * name, or null/absent for the viewer's own. Display only: `startsAt` and
+   * `endsAt` above are instants and are stored unchanged whatever this says.
+   */
+  timezone?: string | null
   location?: string | null
   venueStation?: string | null
   ticketUrl?: string | null
@@ -234,6 +264,10 @@ export async function createEvent(userId: string, input: CreateEventInput): Prom
   // moves no money, and moving this trip's is a different screen with a
   // confirmation and a recompute behind it.
   const currency = await instanceBaseCurrency()
+  // Refused BEFORE the transaction opens: a zone that is not one is the
+  // caller's mistake, and there is no reason to have written a slug and a
+  // planner row by the time we say so.
+  const timezone = resolveDisplayTimezone(input.timezone)
   const db = useDb()
 
   await db.transaction(async (tx) => {
@@ -247,6 +281,7 @@ export async function createEvent(userId: string, input: CreateEventInput): Prom
       posterUrl: input.posterUrl ?? null,
       startsAt: toDate(input.startsAt),
       endsAt: toDate(input.endsAt),
+      timezone,
       location: input.location ?? null,
       venueStation: input.venueStation ?? null,
       ticketUrl: input.ticketUrl ?? null,
@@ -269,6 +304,13 @@ export interface UpdateEventInput {
   posterUrl?: string | null
   startsAt?: DateInput
   endsAt?: DateInput
+  /**
+   * The display zone (#31). Absent leaves it alone; null or '' clears it, which
+   * puts the event back on the viewer's own clock. Setting it moves no stored
+   * instant — `startsAt` and `endsAt` are untouched by a zone change, which is
+   * the whole point of it being a label.
+   */
+  timezone?: string | null
   location?: string | null
   venueStation?: string | null
   ticketUrl?: string | null
@@ -288,6 +330,10 @@ export async function updateEvent(userId: string, slug: string, input: UpdateEve
   if (input.posterUrl !== undefined) updates.posterUrl = input.posterUrl
   if (input.startsAt !== undefined) updates.startsAt = toDate(input.startsAt)
   if (input.endsAt !== undefined) updates.endsAt = toDate(input.endsAt)
+  // Note what is NOT here: nothing touches `startsAt`/`endsAt` because the zone
+  // changed. A display zone that rewrote stored instants would move the event
+  // every time somebody corrected its label.
+  if (input.timezone !== undefined) updates.timezone = resolveDisplayTimezone(input.timezone)
   if (input.location !== undefined) updates.location = input.location
   if (input.venueStation !== undefined) updates.venueStation = input.venueStation
   if (input.ticketUrl !== undefined) updates.ticketUrl = input.ticketUrl

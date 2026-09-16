@@ -1,0 +1,40 @@
+-- The event's display zone (#31).
+--
+-- ONE NULLABLE COLUMN, and the whole migration. `events_event.timezone` holds
+-- an IANA region name — `Europe/Lisbon` — and NULL means "render in the
+-- viewer's zone", which is exactly what every screen did before this column
+-- existed. So there is nothing to backfill: an event that already exists has no
+-- zone, that is the truth about it, and filling one in from the instance's own
+-- clock would state something about somebody's trip that nobody said.
+--
+-- NOTHING STORED CHANGES TYPE OR VALUE. `starts_at`, `ends_at`,
+-- `events_timeline_item.starts_at` and `events_itinerary_leg.departs_at` are
+-- `timestamp with time zone` before this migration and after it, holding the
+-- same instants. This column is a LABEL that says which wall clock to render
+-- those instants against; it is not a conversion and this migration performs
+-- none.
+--
+-- What that means against a database with rows in it — the only kind a deploy
+-- ever meets, and the kind the `upgrade` job in .github/workflows/ci.yml builds
+-- through the previous release before running this:
+--
+--   * `ADD COLUMN "timezone" text` is NULLABLE with no default, so it is a
+--     catalogue change: no table rewrite, no row visited, nothing for an
+--     existing row to violate. The contrast is `ADD COLUMN … NOT NULL` with no
+--     default, which aborts the moment one row exists and would strand
+--     production on the previous release (the Kitchen `migrate` task runs on
+--     the way in, and a failed task stops the deploy).
+--   * no DEFAULT is left behind, so this is not the add-with-default →
+--     backfill → DROP DEFAULT shape #25 and #26 needed. There is no constant
+--     that is true of the existing rows; NULL is.
+--   * a row written by the previous release therefore comes out of this
+--     migration with `timezone IS NULL` and renders precisely as it did before,
+--     which is the first acceptance criterion of #31 and is asserted by
+--     `scripts/ci-upgrade-check.mjs` against what its snapshot recorded rather
+--     than against a constant.
+--
+-- THE 42830 CONSTRAINT-BEFORE-INDEX TRAP DOCUMENTED IN 0007's HEADER DOES NOT
+-- APPLY. That one bites a foreign key whose target unique index drizzle-kit
+-- emits afterwards; this migration adds no foreign key, no unique index and no
+-- constraint of any kind — one ALTER TABLE, one column.
+ALTER TABLE "events_event" ADD COLUMN "timezone" text;

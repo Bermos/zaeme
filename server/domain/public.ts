@@ -19,6 +19,8 @@ export interface PublicEventCard {
   status: string
   posterUrl: string | null
   startsAt: Date | null
+  /** The gig's own clock (#31); null is the reader's own. */
+  timezone: string | null
   location: string | null
   performerNote: string | null
   goingCount: number
@@ -51,6 +53,9 @@ export async function listPublicEvents(): Promise<PublicEventCard[]> {
     status: ev.status,
     posterUrl: ev.posterUrl,
     startsAt: ev.startsAt,
+    // The gig's own clock (#31): a concert listed here can be abroad, and the
+    // announcement time is the one thing the listing exists to get right.
+    timezone: ev.timezone,
     location: ev.location,
     performerNote: ev.performerNote,
     goingCount: rsvps.filter(r => r.eventId === ev.id && r.status !== 'no').length
@@ -68,6 +73,8 @@ export interface PublicEventPage {
     posterUrl: string | null
     startsAt: Date | null
     endsAt: Date | null
+    /** The wall clock these times are read against (#31); null is the reader's own. */
+    timezone: string | null
     location: string | null
     venueStation: string | null
     ticketUrl: string | null
@@ -106,6 +113,7 @@ export async function getPublicEventPage(slug: string): Promise<PublicEventPage>
       posterUrl: ev.posterUrl,
       startsAt: ev.startsAt,
       endsAt: ev.endsAt,
+      timezone: ev.timezone,
       location: ev.location,
       venueStation: ev.venueStation,
       ticketUrl: ev.ticketUrl,

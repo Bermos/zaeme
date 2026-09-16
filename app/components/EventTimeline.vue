@@ -42,7 +42,13 @@ const props = withDefaults(defineProps<{
   timeline: TimelineItem[]
   legs?: Leg[]
   places?: Place[]
-}>(), { legs: () => [], places: () => [] })
+  /**
+   * The event's display zone (#31) — the wall clock every time below is read
+   * against. Null, which is the default, is "the reader's own", and this card
+   * then renders exactly as it did before the prop existed.
+   */
+  timezone?: string | null
+}>(), { legs: () => [], places: () => [], timezone: null })
 
 const TYPE_ICONS: Record<string, string> = {
   transport: '🚆',
@@ -59,12 +65,24 @@ const MODE_ICONS: Record<string, string> = {
 const placeNames = computed(() => new Map(props.places.map(p => [p.id, p.name])))
 
 function at(iso: string | null): string | null {
-  return iso ? new Date(iso).toLocaleTimeString('en-CH', { hour: '2-digit', minute: '2-digit' }) : null
+  return formatInZone(iso, { hour: '2-digit', minute: '2-digit' }, props.timezone)
 }
 
+/**
+ * THE DAY HEADINGS HAVE TO MOVE WITH THE CLOCK TOO, and this is the line that
+ * is easy to leave behind: a 00:30 ferry out of Lisbon is Tuesday there and
+ * Tuesday-at-01:30 in Zürich, but a 23:30 one is Tuesday there and WEDNESDAY
+ * here. Group on the viewer's calendar while showing the event's times and the
+ * itinerary puts a time under the wrong date — which is worse than the bug
+ * this feature fixes, because the time on screen is right and the heading
+ * above it is not.
+ */
 function dayKey(iso: string | null | undefined): string {
-  return iso ? new Date(iso).toDateString() : 'unscheduled'
+  return zoneDayKey(iso, props.timezone) ?? 'unscheduled'
 }
+
+/** Named once above the list rather than stamped on every row. */
+const zoneLine = computed(() => zoneNote(props.timezone))
 
 /** Where an item or a leg sits on the calendar — the only thing days need. */
 function entryTime(entry: { kind: 'item' | 'leg', item?: TimelineItem, leg?: Leg }): string | null {
@@ -88,7 +106,7 @@ const groups = computed(() => {
   return [...byDay.entries()].map(([key, items]) => ({
     label: key === 'unscheduled'
       ? 'Sometime'
-      : new Date(entryTime(items[0]!)!).toLocaleDateString('en-CH', { weekday: 'long', day: 'numeric', month: 'long' }),
+      : formatInZone(entryTime(items[0]!), { weekday: 'long', day: 'numeric', month: 'long' }, props.timezone),
     items
   }))
 })
@@ -114,6 +132,12 @@ function legDetail(leg: Leg): string | null {
     <template #header>
       <p class="font-semibold">
         {{ groups.length > 1 ? '🧳 The itinerary' : 'The plan' }}
+      </p>
+      <p
+        v-if="zoneLine"
+        class="text-xs text-muted mt-0.5"
+      >
+        🕓 {{ zoneLine }}
       </p>
     </template>
     <div class="flex flex-col gap-4">

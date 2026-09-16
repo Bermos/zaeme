@@ -188,6 +188,11 @@ export async function listAllEvents(filter: AdminEventFilter = {}) {
       status: e.status,
       startsAt: e.startsAt,
       endsAt: e.endsAt,
+      // The event's display zone (#31). The owner's cross-event list is the one
+      // screen that shows events from several places at once, and the inline
+      // itinerary editor below it writes times back — so it needs the same
+      // clock `/host` uses, or the two editors of one field disagree.
+      timezone: e.timezone,
       location: e.location,
       isPublic: e.isPublic,
       parentId: e.parentId,

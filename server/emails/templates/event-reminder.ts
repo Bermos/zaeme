@@ -11,12 +11,14 @@ export interface EventReminderEmailProps {
   eventSlug: string
   startsAt: Date | string
   endsAt?: Date | string | null
+  /** The event's display zone (#31); null renders in the server's own clock, as before. */
+  timezone?: string | null
   location?: string | null
   inviteToken?: string | null
 }
 
 export function EventReminderEmail(props: EventReminderEmailProps) {
-  const when = formatEventWhen(props.startsAt, props.endsAt ?? null)
+  const when = formatEventWhen(props.startsAt, props.endsAt ?? null, props.timezone ?? null)
   // Guests land on their zäme invite page; the tokenless fallback stays the
   // owner app's events dive-in (only planners receive those).
   const url = props.inviteToken

@@ -31,6 +31,8 @@ export interface OccurrenceView {
   posterUrl: string | null
   startsAt: Date | null
   endsAt: Date | null
+  /** The showing's own display zone (#31), inherited from the series. */
+  timezone: string | null
   location: string | null
   yesCount: number
 }
@@ -117,6 +119,7 @@ export async function listOccurrences(seriesId: string): Promise<OccurrenceView[
     posterUrl: ev.posterUrl,
     startsAt: ev.startsAt,
     endsAt: ev.endsAt,
+    timezone: ev.timezone,
     location: ev.location,
     yesCount: rsvps.filter(r => r.eventId === ev.id && (r.status === 'yes' || r.status === 'cheering')).length
   }))
@@ -173,6 +176,12 @@ export async function scheduleOccurrence(
       startsAt,
       endsAt: toDate(input.endsAt),
       location: input.location ?? series.location,
+      // THE SERIES' DISPLAY ZONE (#31), inherited the same way the description,
+      // the location and the currency above are. A showing that did not inherit
+      // it would be the one screen contradicting the others: the container's
+      // page would list the showtime in the series' clock and the showing's own
+      // invite link would render the same instant in the reader's.
+      timezone: series.timezone,
       venueStation: series.venueStation,
       isPublic: false,
       parentId: series.id,
@@ -214,8 +223,14 @@ export interface SeriesContext {
   title: string
   cadence: string | null
   posterUrl: string | null
-  /** Published sibling showings, for the cinema's "programme" strip. */
-  upcoming: Array<{ title: string, startsAt: Date | null }>
+  /**
+   * Published sibling showings, for the cinema's "programme" strip. Each
+   * carries its OWN zone (#31) rather than the one being read: two showings of
+   * a series can be in different places, and a strip that rendered them all
+   * against one clock would be the multi-zone claim this issue deliberately
+   * did not make.
+   */
+  upcoming: Array<{ title: string, startsAt: Date | null, timezone: string | null }>
   pastCount: number
 }
 
@@ -233,7 +248,13 @@ export async function loadSeriesContext(parentId: string, occurrenceId: string):
   if (!series) return null
 
   const siblings = await db
-    .select({ id: tables.event.id, title: tables.event.title, startsAt: tables.event.startsAt, status: tables.event.status })
+    .select({
+      id: tables.event.id,
+      title: tables.event.title,
+      startsAt: tables.event.startsAt,
+      timezone: tables.event.timezone,
+      status: tables.event.status
+    })
     .from(tables.event)
     .where(eq(tables.event.parentId, parentId))
     .orderBy(asc(tables.event.startsAt))
@@ -246,7 +267,7 @@ export async function loadSeriesContext(parentId: string, occurrenceId: string):
     upcoming: siblings
       .filter(s => s.id !== occurrenceId && s.status === 'published' && s.startsAt && s.startsAt.getTime() > now)
       .slice(0, 4)
-      .map(s => ({ title: s.title, startsAt: s.startsAt })),
+      .map(s => ({ title: s.title, startsAt: s.startsAt, timezone: s.timezone })),
     pastCount: siblings.filter(s => s.startsAt && s.startsAt.getTime() <= now).length
   }
 }
@@ -267,6 +288,8 @@ export interface ShowingView {
   status: string
   startsAt: Date | null
   endsAt: Date | null
+  /** The display zone (#31), inherited from the series when it has one. */
+  timezone: string | null
   location: string | null
   isPublic: boolean
   parentId: string | null
@@ -299,6 +322,7 @@ async function showingsFor(seriesId: string): Promise<ShowingView[]> {
     status: ev.status,
     startsAt: ev.startsAt,
     endsAt: ev.endsAt,
+    timezone: ev.timezone,
     location: ev.location,
     isPublic: ev.isPublic,
     parentId: ev.parentId,
@@ -344,6 +368,7 @@ export async function scheduleSeriesShowing(
     status: row!.status,
     startsAt: row!.startsAt,
     endsAt: row!.endsAt,
+    timezone: row!.timezone,
     location: row!.location,
     isPublic: row!.isPublic,
     parentId: row!.parentId,

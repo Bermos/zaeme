@@ -30,6 +30,35 @@ const location = ref('')
 // trip
 const startsAt = ref('')
 const endsAt = ref('')
+
+/**
+ * WHICH CLOCK THIS EVENT'S TIMES ARE READ AGAINST (#31).
+ *
+ * Defaulted from the browser, because for a gathering that is the answer and
+ * nobody should have to think about it: the host is where the party is. It is
+ * still stored, not assumed — an event created here and read in another country
+ * then says which clock it meant rather than moving with the reader.
+ *
+ * `''` is "the reader's own", which is what an event had before this field and
+ * what somebody clearing it is asking for. The default is only applied in the
+ * BROWSER (`browserTimezone` answers null on the server), so SSR renders the
+ * empty option and the client fills it in — a container's `TZ` is the hosting
+ * provider's clock and has nothing to do with anybody's party.
+ *
+ * A trip is where the picker earns its place. It is offered for every kind
+ * because "a gathering abroad" is a real thing, and hiding the control behind
+ * the type would mean a host who needs it cannot reach it until after the
+ * event exists.
+ */
+const timezone = ref('')
+const NO_ZONE = ''
+const zoneItems = computed(() => [
+  { label: 'The reader\'s own time zone', value: NO_ZONE },
+  ...timezoneChoices().map(z => ({ label: z, value: z }))
+])
+onMounted(() => {
+  timezone.value = browserTimezone() ?? NO_ZONE
+})
 // series
 const cadence = ref('')
 // concert
@@ -63,17 +92,20 @@ async function create() {
       type: kind.value,
       description: description.value || null,
       posterUrl: posterUrl.value || null,
-      location: location.value || null
+      location: location.value || null,
+      timezone: timezone.value || null
     }
     if (kind.value === 'trip') {
-      if (startsAt.value) body.startsAt = new Date(startsAt.value).toISOString()
-      if (endsAt.value) body.endsAt = new Date(endsAt.value).toISOString()
+      // Read against the zone chosen above, not the browser's: a host in
+      // Zürich typing a Lisbon trip's "from 09:00" means 09:00 THERE.
+      if (startsAt.value) body.startsAt = isoFromZonedInput(startsAt.value, timezone.value)
+      if (endsAt.value) body.endsAt = isoFromZonedInput(endsAt.value, timezone.value)
     }
     if (kind.value === 'series') body.cadence = cadence.value || null
     if (kind.value === 'concert') {
       body.ticketUrl = ticketUrl.value || null
       body.performerNote = performerNote.value || null
-      if (startsAt.value) body.startsAt = new Date(startsAt.value).toISOString()
+      if (startsAt.value) body.startsAt = isoFromZonedInput(startsAt.value, timezone.value)
     }
     if (kind.value === 'party') {
       body.coreInvites = coreInvites.value
@@ -81,7 +113,7 @@ async function create() {
         .map(f => ({ name: f.name.trim(), email: f.email.trim() || null }))
       body.dateOptions = dateOptions.value
         .filter(Boolean)
-        .map(d => ({ startsAt: new Date(d).toISOString() }))
+        .map(d => ({ startsAt: isoFromZonedInput(d, timezone.value) }))
     }
 
     const { slug } = await $fetch('/api/host/events', { method: 'POST', body })
@@ -188,6 +220,18 @@ const active = computed(() => KINDS.find(k => k.value === kind.value)!)
             />
           </UFormField>
         </div>
+
+        <UFormField
+          label="Time zone"
+          hint="Defaults to yours — change it for something happening abroad"
+        >
+          <USelectMenu
+            v-model="timezone"
+            :items="zoneItems"
+            value-key="value"
+            class="w-full"
+          />
+        </UFormField>
 
         <!-- Series: the cadence -->
         <UFormField

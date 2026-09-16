@@ -2167,6 +2167,27 @@ components:
           enum: [draft, polling, published, completed, cancelled]
         startsAt: { type: [string, 'null'], format: date-time }
         endsAt: { type: [string, 'null'], format: date-time }
+        timezone:
+          type: [string, 'null']
+          example: Europe/Lisbon
+          description: >-
+            The IANA region zone this event's times should be RENDERED in, or
+            null for the reader's own — which is what every event had before
+            this field and is the right answer for a gathering happening where
+            the people coming are standing.
+
+            It is a display label and never a conversion: startsAt, endsAt and
+            every timeline item are instants in UTC with or without it, and a
+            client that ignores this field receives exactly what it received
+            before the field existed. A client that honours it renders those
+            instants against this zone, so a 09:14 departure from Lisbon reads
+            09:14 to somebody in Zürich instead of 10:14.
+
+            Read-only here. It is set on the host's own screens; this surface
+            reports it so a client can label a time correctly, and cannot
+            relabel somebody's trip. Always a named region zone, never a fixed
+            offset — "+01:00" reads correctly in March and an hour wrong in
+            April, so zäme refuses one.
         location: { type: [string, 'null'] }
         isPublic: { type: boolean }
         parentId:

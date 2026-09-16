@@ -284,11 +284,56 @@ concurrency:
 # accepted through a real planner-invite so the 403 is about the ROLE and not
 # about having no standing — is refused both verbs. 627 -> 641.
 #
+# AN EVENT ABROAD (#31) adds 26, and the shape of them is the issue's own
+# boundary. `events_event.timezone` is a DISPLAY label, so the thing that must
+# be executed is that it moves nothing stored: a departure is written at a known
+# instant BEFORE the zone is set and read back AFTER it — on the machine
+# surface, on the host aggregate and off the forwarded invite link — against the
+# value it was written with rather than against a constant, and again after the
+# zone is cleared. A refactor that rebased stored times onto the new zone
+# reddens there and nowhere else in this repository. The rest is the VALIDATION'S
+# PERMIT SET, which is the half a refusal check usually misses: `+01:00`,
+# `Etc/GMT+5` and `UTC` are all accepted by `Intl.DateTimeFormat` and all refused
+# here, as 422 rather than 400 so the domain is provably what refused them, with
+# the zone re-read afterwards to show four refusals in a row wrote nothing.
+# Clearing it is a VALUE and answers 200; a PATCH about something else leaves it
+# alone; the machine API reports the field and refuses to set it, which is the
+# read-only decision executed rather than described. TWO OF THEM COVER A
+# DECISION TAKEN ON THE OWNER'S BEHALF — a series showing inherits its
+# container's zone, the way it already inherited that container's description,
+# location and currency — with the zoneless half asserted beside it so it is
+# inheritance and not a default somebody reached for. Two of the 31 are in #32's
+# section, where a geocoded place now offers the zones of the country it landed
+# in — a verdict about the rule, like `geocode_shape` beside it, because no
+# check there may depend on OpenStreetMap answering.
+#
+# AND THREE READ THE RENDERED PAGE, which the other twenty-six cannot: JSON
+# carries an instant, so every one of them stays green with the formatting left
+# on the reader's clock — mutation-tested, and it reddened six vitest tests and
+# not one check here. The invite page is SSR'd, which is the whole reason this
+# feature exists, so it is fetched as HTML and read: it names the zone, it shows
+# the ferry at 09:14, and it does NOT show the 08:14 the same instant reads as
+# on this runner's own clock.
+#
+# THE REVIEW ADDED 7 MORE, and every one of them is a hole it found. THREE are
+# the DATE POLL on the invite link: the fixture above is a trip with a timeline
+# item, so `DatePoll.vue` was executed by nothing and shipped rendering its
+# candidates in the READER's zone with no label — the host page said 20:00 and
+# the link that goes in the group chat said 19:00, for one party. There is now
+# a zoned party with a candidate at 17:30Z, and the SSR'd page must name the
+# clock, show `>Thu, 1 Jul, 18:30<` and NOT show this runner's own 17:30. FOUR
+# are the geocoded offer, which showed `.slice(0, 4)` of an ALPHABETICAL list:
+# Portugal has exactly three and fits, which is why the stub, both fixtures and
+# every check here were blind to it, while the United States' first four are
+# Adak, Anchorage, Boise and Chicago and a pin in Brooklyn was offered none of
+# them. The stub now knows a place in a 29-zone country, and the count is
+# asserted as 29 rather than needled on a name that passes either way. 641 -> 679.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '641'
+  MIN_SMOKE_CHECKS: '679'
 
 jobs:
   ci:

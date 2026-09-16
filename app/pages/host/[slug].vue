@@ -27,7 +27,31 @@ const me = computed(() => ({
 
 /* ---- details ---- */
 const editing = ref(false)
-const form = reactive({ title: '', description: '', posterUrl: '', location: '', cadence: '', ticketUrl: '', performerNote: '' })
+const form = reactive({ title: '', description: '', posterUrl: '', location: '', cadence: '', ticketUrl: '', performerNote: '', timezone: '' })
+
+/**
+ * THE ZONE THIS EVENT'S TIMES ARE READ IN (#31).
+ *
+ * `''` is "the reader's own", which is the default and is right for a party:
+ * everyone coming is standing where it happens. It is a real choice and not an
+ * empty field, so it is the first entry in the list rather than a blank one.
+ *
+ * The list is `Intl.supportedValuesOf('timeZone')` — ICU's own, so there is no
+ * table here to go stale — plus whatever this event already carries, because a
+ * zone set through a different spelling (`Europe/Kyiv`, which this runtime
+ * canonicalises away in its own list) must still show as the selected one
+ * rather than silently reading as "the reader's own".
+ */
+const NO_ZONE = ''
+const zoneItems = computed(() => {
+  const zones = timezoneChoices()
+  const current = data.value?.event.timezone
+  if (current && !zones.includes(current)) zones.push(current)
+  return [
+    { label: 'The reader\'s own time zone', value: NO_ZONE },
+    ...zones.map(z => ({ label: z, value: z }))
+  ]
+})
 watch(data, (d) => {
   if (d && !editing.value) {
     form.title = d.event.title
@@ -37,6 +61,7 @@ watch(data, (d) => {
     form.cadence = d.event.cadence ?? ''
     form.ticketUrl = d.event.ticketUrl ?? ''
     form.performerNote = d.event.performerNote ?? ''
+    form.timezone = d.event.timezone ?? NO_ZONE
   }
 }, { immediate: true })
 
@@ -51,6 +76,8 @@ async function saveDetails() {
         description: form.description || null,
         posterUrl: form.posterUrl || null,
         location: form.location || null,
+        // '' clears it — the domain reads blank as "no zone", not as a refusal.
+        timezone: form.timezone || null,
         cadence: isSeries.value ? (form.cadence || null) : undefined,
         ticketUrl: isConcert.value ? (form.ticketUrl || null) : undefined,
         performerNote: isConcert.value ? (form.performerNote || null) : undefined
@@ -89,7 +116,10 @@ async function addOption() {
   try {
     await $fetch(`/api/host/events/${slug}/date-options`, {
       method: 'POST',
-      body: { startsAt: new Date(newOptionDate.value).toISOString() }
+      // Against the EVENT's clock, because that is the clock the candidates are
+      // listed in two lines below — and because the winner becomes this event's
+      // own `startsAt` when the poll is locked (#31).
+      body: { startsAt: isoFromZonedInput(newOptionDate.value, data.value?.event.timezone ?? null) }
     })
     newOptionDate.value = ''
     await refresh()
@@ -246,8 +276,18 @@ const splitParticipants = computed(() => {
   return [...seen.values()]
 })
 
+/**
+ * Every time on this page against THE EVENT'S clock (#31) — including the date
+ * poll's candidates, which are what the trip's own `startsAt` is chosen from.
+ * A host looking at a Lisbon trip from Zürich should read one set of times
+ * here and on the guest page, or the two screens disagree about the same trip.
+ */
 function when(iso: string | Date | null): string {
-  return iso ? new Date(iso).toLocaleString('en-CH', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'
+  return formatInZone(
+    iso,
+    { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' },
+    data.value?.event.timezone ?? null
+  ) ?? '—'
 }
 
 const CATEGORY_ICONS: Record<string, string> = { food: '🍲', drink: '🍹', other: '📦' }
@@ -398,6 +438,17 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
             />
           </UFormField>
           <UFormField
+            label="Time zone"
+            hint="For an event abroad — everyone then reads the same clock"
+          >
+            <USelectMenu
+              v-model="form.timezone"
+              :items="zoneItems"
+              value-key="value"
+              class="w-full"
+            />
+          </UFormField>
+          <UFormField
             v-if="isSeries"
             label="Cadence"
             hint="e.g. every second Friday"
@@ -453,6 +504,12 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
             >
               🔁 {{ data.event.cadence }}
             </p>
+            <p
+              v-if="data.event.timezone"
+              class="mt-1"
+            >
+              🕓 {{ data.event.timezone }}
+            </p>
           </div>
         </div>
       </UCard>
@@ -464,6 +521,7 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
         :cadence="data.event.cadence"
         :members="data.members"
         :occurrences="data.occurrences"
+        :timezone="data.event.timezone"
         @updated="refresh"
       />
 
@@ -667,6 +725,7 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
         :timeline="data.timeline"
         :places="data.geography.places"
         :trip="isTrip"
+        :timezone="data.event.timezone"
         @updated="refresh"
       />
 
@@ -676,6 +735,7 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
         v-if="isTrip || data.geography.places.length || data.geography.legs.length"
         :slug="slug"
         :geography="data.geography"
+        :timezone="data.event.timezone"
         @updated="refresh"
       />
 

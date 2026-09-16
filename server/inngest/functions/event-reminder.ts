@@ -47,6 +47,7 @@ export const eventReminder = inngest.createFunction(
           eventSlug: ev.slug,
           startsAt: ev.startsAt!,
           endsAt: ev.endsAt,
+          timezone: ev.timezone,
           location: ev.location,
           inviteToken: r.invite?.token ?? null
         })

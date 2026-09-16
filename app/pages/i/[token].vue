@@ -128,19 +128,34 @@ const splitParticipants = computed(() => {
   return seen.size ? [...seen.values()] : fromRsvps.filter(p => p.email)
 })
 
+/**
+ * THE TRIP'S OWN CLOCK (#31), when it has one — this is the page the departure
+ * time is actually read on, in a hotel lobby, by somebody who is not at home.
+ */
+const zone = computed(() => page.value?.event.timezone ?? null)
+
+/**
+ * A single moment, STAMPED WITH ITS OWN ZONE ABBREVIATION rather than the
+ * trip's. `WEST` is a fact about an instant and not about a week: a trip across
+ * the last Sunday in October is half `WEST` and half `WET`, so the abbreviation
+ * is computed here, per time, and the card headings name the zone instead.
+ */
 function when(iso: string | Date | null | undefined): string | null {
-  if (!iso) return null
-  return new Date(iso).toLocaleString('en-CH', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
+  return formatInZone(
+    iso,
+    { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZoneName: zone.value ? 'short' : undefined },
+    zone.value
+  )
 }
 
 function dateSpan(start: string | Date | null | undefined, end: string | Date | null | undefined): string | null {
   if (!start) return null
-  const s = new Date(start)
   if (!end) return when(start)
-  const e = new Date(end)
-  if (s.toDateString() === e.toDateString()) return when(start)
-  const fmt = (d: Date) => d.toLocaleDateString('en-CH', { day: 'numeric', month: 'long' })
-  return `${fmt(s)} → ${fmt(e)}`
+  // Same day IN THE EVENT'S ZONE: a span that starts and ends on one Lisbon day
+  // must not split into two headings because the reader is in Auckland.
+  if (zoneDayKey(start, zone.value) === zoneDayKey(end, zone.value)) return when(start)
+  const fmt = (d: string | Date) => formatInZone(d, { day: 'numeric', month: 'long' }, zone.value)
+  return `${fmt(start)} → ${fmt(end)}`
 }
 
 const errorMessage = computed(() => {
@@ -170,6 +185,7 @@ const errorMessage = computed(() => {
         :event-title="page.event.title"
         :poster-url="page.event.posterUrl"
         :starts-at="page.event.startsAt"
+        :timezone="page.event.timezone"
       />
 
       <!-- The post: poster, title, when/where -->
@@ -280,6 +296,7 @@ const errorMessage = computed(() => {
         v-if="polling && page.poll.length"
         :token="token"
         :poll="page.poll"
+        :timezone="page.event.timezone"
         @updated="refresh"
       />
 
@@ -302,6 +319,7 @@ const errorMessage = computed(() => {
         :timeline="page.timeline"
         :legs="page.legs"
         :places="page.places"
+        :timezone="page.event.timezone"
       />
 
       <!-- "We ended up walking" (#30). The invite link is the credential: this
@@ -311,6 +329,7 @@ const errorMessage = computed(() => {
         v-if="(published || completed) && page.places.length"
         :token="token"
         :places="page.places"
+        :timezone="page.event.timezone"
         @updated="refresh"
       />
 

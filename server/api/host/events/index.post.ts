@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { addPlanner, createEvent, createParty } from '../../../domain/index'
 import { requireGuestUser } from '../../../utils/auth'
 import { resolveInstanceOwnerId } from '../../../utils/instance'
+import { MAX_TIMEZONE_LENGTH } from '../../../../shared/utils/timezone'
 
 /**
  * Create a gathering. The creator becomes the owner planner; this instance's
@@ -22,6 +23,11 @@ const bodySchema = z.object({
   location: z.string().max(300).optional().nullable(),
   startsAt: z.string().datetime({ offset: true }).optional().nullable(),
   endsAt: z.string().datetime({ offset: true }).optional().nullable(),
+  // The display zone (#31). Bounded here and NOT validated here: whether a
+  // string is a zone is `shared/utils/timezone.ts`'s rule, applied by the
+  // domain, so the answer is the same on this route, on the PATCH beside it and
+  // in the form that posts to both.
+  timezone: z.string().max(MAX_TIMEZONE_LENGTH).optional().nullable(),
   cadence: z.string().max(200).optional().nullable(),
   ticketUrl: z.string().url().max(1000).optional().nullable(),
   performerNote: z.string().max(1000).optional().nullable(),
@@ -49,6 +55,7 @@ export default defineEventHandler(async (e) => {
       description: body.description,
       posterUrl: body.posterUrl,
       location: body.location,
+      timezone: body.timezone,
       coreInvites: body.coreInvites,
       dateOptions: body.dateOptions
     })

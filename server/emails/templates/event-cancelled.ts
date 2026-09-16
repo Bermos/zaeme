@@ -10,13 +10,15 @@ export interface EventCancelledEmailProps {
   eventTitle: string
   startsAt?: Date | string | null
   endsAt?: Date | string | null
+  /** The event's display zone (#31); null renders in the server's own clock, as before. */
+  timezone?: string | null
   location?: string | null
   /** Optional free-form reason provided by the planner. */
   reason?: string | null
 }
 
 export function EventCancelledEmail(props: EventCancelledEmailProps) {
-  const when = formatEventWhen(props.startsAt ?? null, props.endsAt ?? null)
+  const when = formatEventWhen(props.startsAt ?? null, props.endsAt ?? null, props.timezone ?? null)
   const children: React.ReactNode[] = [
     h(Heading, { key: 'h', as: 'h1' }, `${props.eventTitle} — cancelled`)
   ]

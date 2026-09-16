@@ -22,7 +22,21 @@ type Row = Record<string, unknown>
  */
 const asRow = (value: object): Row => value as Row
 
-/** `components.schemas.EventSummary`. */
+/**
+ * `components.schemas.EventSummary`.
+ *
+ * `timezone` (#31) is ADDITIVE AND READ-ONLY on this surface, and both halves
+ * of that are decisions. It is an IANA region name or null, and it says which
+ * wall clock `startsAt`/`endsAt` should be RENDERED against — those two are
+ * still instants in UTC and a client that ignores this field gets exactly what
+ * it got before the field existed. Nothing here is a conversion.
+ *
+ * Read-only because the issue asks only for the responses to carry it and
+ * because setting it is the host's screen: `CreateEventInput` and
+ * `UpdateEventInput` do not take it, so an MCP tool can SAY what zone a trip is
+ * shown in and cannot silently relabel one. Widening that later is additive in
+ * the direction that stays safe.
+ */
 export function eventSummary(row: object) {
   const r = asRow(row)
   return {
@@ -33,6 +47,7 @@ export function eventSummary(row: object) {
     status: r.status,
     startsAt: r.startsAt ?? null,
     endsAt: r.endsAt ?? null,
+    timezone: r.timezone ?? null,
     location: r.location ?? null,
     isPublic: r.isPublic ?? false,
     parentId: r.parentId ?? null,

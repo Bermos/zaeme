@@ -11,15 +11,27 @@ interface Occurrence {
   title: string
   status: string
   startsAt: string | Date | null
+  /** Its OWN display zone (#31) — inherited from the series when it was scheduled. */
+  timezone?: string | null
   yesCount: number
 }
 
-const props = defineProps<{
-  slug: string
-  cadence: string | null
-  members: Member[]
-  occurrences: Occurrence[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    slug: string
+    cadence: string | null
+    members: Member[]
+    occurrences: Occurrence[]
+    /**
+     * The SERIES' zone (#31). A showing inherits it at the moment it is
+     * scheduled (`scheduleOccurrence`), so this is the clock the date typed
+     * below will be read against; each existing showing is shown against the
+     * zone it actually carries, which is not necessarily this one any more.
+     */
+    timezone?: string | null
+  }>(),
+  { timezone: null }
+)
 const emit = defineEmits<{ updated: [] }>()
 
 const toast = useToast()
@@ -64,7 +76,7 @@ async function schedule() {
       method: 'POST',
       body: {
         title: showTitle.value,
-        startsAt: new Date(showDate.value).toISOString(),
+        startsAt: isoFromZonedInput(showDate.value, props.timezone),
         posterUrl: showPoster.value || null,
         description: showDescription.value || null
       }
@@ -82,9 +94,11 @@ async function schedule() {
   }
 }
 
-function when(iso: string | Date | null): string {
-  return iso ? new Date(iso).toLocaleString('en-CH', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'
+function when(iso: string | Date | null, zone?: string | null): string {
+  return formatInZone(iso, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }, zone ?? null) ?? '—'
 }
+
+const zoneLine = computed(() => zoneNote(props.timezone))
 </script>
 
 <template>
@@ -178,6 +192,12 @@ function when(iso: string | Date | null): string {
             :rows="2"
             placeholder="Why this one? (optional — the series pitch is used otherwise)"
           />
+          <p
+            v-if="zoneLine"
+            class="text-xs text-muted"
+          >
+            🕓 {{ zoneLine }} — the showing inherits it.
+          </p>
           <UButton
             type="submit"
             :loading="scheduling"
@@ -205,7 +225,7 @@ function when(iso: string | Date | null): string {
         >
           <p class="font-medium truncate">{{ o.title }}</p>
           <p class="text-muted shrink-0">
-            {{ when(o.startsAt) }} · 🙌 {{ o.yesCount }}
+            {{ when(o.startsAt, o.timezone) }} · 🙌 {{ o.yesCount }}
             <UBadge
               v-if="o.status === 'cancelled'"
               size="sm"

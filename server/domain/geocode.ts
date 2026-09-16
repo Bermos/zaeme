@@ -5,6 +5,7 @@ import { geocodeCache } from '../database/schema/geocode'
 import { publicOrigin } from '../utils/public-url'
 import { normaliseCoordinates, type OsmType } from './places'
 import { assertPlanner, loadEventBySlug } from './permissions'
+import { timezonesForCountry } from '../../shared/utils/timezone'
 
 /**
  * SEARCHING FOR A PLACE INSTEAD OF TYPING ITS NAME (#32).
@@ -99,6 +100,24 @@ export interface PlaceSuggestion {
   osmId: string | null
   /** What OpenStreetMap calls it — `bridge`, `hotel`, `city`. May be null. */
   category: string | null
+  /**
+   * The ISO-3166-1 alpha-2 country this landed in, lowercased as Nominatim
+   * sends it. Null when the geocoder did not say — an ocean, or an answer this
+   * instance cached before `addressdetails` was asked for.
+   *
+   * It is CACHED and `timeZones` below is not, and that split is deliberate:
+   * this is what the geocoder said, which keeps for thirty days like every
+   * other field here, while the zones of a country are ICU's answer and are
+   * better re-derived than frozen.
+   */
+  countryCode: string | null
+  /**
+   * The zones that country has (#31), derived from `countryCode` on the way
+   * out. One entry for CH, FR or JP; three for PT; twenty-nine for the US —
+   * which is why this is a LIST offered as a suggestion and never a zone set
+   * behind the host's back.
+   */
+  timeZones?: string[]
 }
 
 /**
@@ -442,6 +461,7 @@ export function mapNominatimResult(raw: unknown): PlaceSuggestion | null {
     osm_id?: unknown
     type?: unknown
     category?: unknown
+    address?: { country_code?: unknown }
   }
   if (!r || typeof r !== 'object') return null
 
@@ -480,7 +500,13 @@ export function mapNominatimResult(raw: unknown): PlaceSuggestion | null {
     // one of the three identifies nothing.
     osmType: osmId === null ? null : osmType,
     osmId,
-    category: typeof r.type === 'string' ? r.type : typeof r.category === 'string' ? r.category : null
+    category: typeof r.type === 'string' ? r.type : typeof r.category === 'string' ? r.category : null,
+    // Only present with `addressdetails=1`, which `search` now asks for and
+    // `reverse` gets by default. Two letters or nothing — a longer or shorter
+    // value is not a country code and would only reach `Intl` to be refused.
+    countryCode: typeof r.address?.country_code === 'string' && /^[A-Za-z]{2}$/.test(r.address.country_code)
+      ? r.address.country_code.toLowerCase()
+      : null
   }
 }
 
@@ -517,7 +543,10 @@ export function createNominatimProvider(fetchImpl?: GeocoderFetch): GeocoderProv
     name: 'nominatim',
     attribution: '© OpenStreetMap contributors',
     async search(query: string) {
-      const raw = await call('/search', { q: query, limit: RESULT_LIMIT, addressdetails: 0 })
+      // `addressdetails=1` for ONE field: `address.country_code`, which is how
+      // a geocoded place offers the trip's zone (#31). Reverse answers it
+      // without being asked.
+      const raw = await call('/search', { q: query, limit: RESULT_LIMIT, addressdetails: 1 })
       return Array.isArray(raw) ? raw.map(mapNominatimResult).filter((s): s is PlaceSuggestion => s !== null) : []
     },
     async reverse(lat: number, lng: number) {
@@ -626,6 +655,20 @@ function reportUnavailable(reason: GeocodeUnavailable, kind: GeocodeKind, provid
  * outage into our own answer. The sweep runs only after a SUCCESSFUL fetch, so
  * an outage never deletes the rows this rule leans on.
  */
+/**
+ * The zones a suggestion implies, attached on the way out rather than stored.
+ *
+ * Derived on every read, cache hit included, so the answer follows ICU rather
+ * than whatever ICU said thirty days ago — and so a row cached before this
+ * feature existed (no `countryCode`) simply offers nothing, which is the same
+ * thing a place in the middle of the sea offers. Nothing here can fail: an
+ * unknown country is an empty list, not an error, because a geocoder that
+ * cannot name a zone must still be able to name a place.
+ */
+function withTimezones(results: PlaceSuggestion[]): PlaceSuggestion[] {
+  return results.map(r => ({ ...r, timeZones: timezonesForCountry(r.countryCode) }))
+}
+
 async function answer(
   kind: GeocodeKind,
   query: string,
@@ -642,13 +685,13 @@ async function answer(
 
   const hit = await store.read(key).catch(() => null)
   if (hit && hit.expiresAt.getTime() > now().getTime()) {
-    return { status: 'ok', reason: null, results: hit.results, cached: true, ...base }
+    return { status: 'ok', reason: null, results: withTimezones(hit.results), cached: true, ...base }
   }
   /** An expired row worth falling back on: see the note above. */
   const stale = hit && hit.results.length > 0 ? hit.results : null
 
   const unavailable = (reason: GeocodeUnavailable): GeocodeAnswer => {
-    if (stale) return { status: 'ok', reason: null, results: stale, cached: true, ...base }
+    if (stale) return { status: 'ok', reason: null, results: withTimezones(stale), cached: true, ...base }
     reportUnavailable(reason, kind, p.name)
     return { status: 'unavailable', reason, results: [], cached: false, ...base }
   }
@@ -686,7 +729,7 @@ async function answer(
     expiresAt: new Date(now().getTime() + ttl)
   }).catch(() => {})
 
-  return { status: 'ok', reason: null, results, cached: false, ...base }
+  return { status: 'ok', reason: null, results: withTimezones(results), cached: false, ...base }
 }
 
 /**

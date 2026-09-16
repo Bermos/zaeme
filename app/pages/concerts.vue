@@ -10,10 +10,17 @@ useSeoMeta({
   description: 'Upcoming concerts — see who else is going and coordinate.'
 })
 
-function when(iso: string | Date | null): string {
-  return iso
-    ? new Date(iso).toLocaleString('en-CH', { weekday: 'short', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
-    : 'date TBD'
+/**
+ * Each gig against ITS OWN clock (#31), which on a listing matters more than on
+ * a page: a column of times from three countries rendered in one reader's zone
+ * is a column nobody can check against a ticket.
+ */
+function when(iso: string | Date | null, zone: string | null): string {
+  return formatInZone(
+    iso,
+    { weekday: 'short', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZoneName: zone ? 'short' : undefined },
+    zone
+  ) ?? 'date TBD'
 }
 </script>
 
@@ -47,7 +54,7 @@ function when(iso: string | Date | null): string {
             >
             <div class="min-w-0">
               <p class="font-semibold text-lg truncate">{{ ev.title }}</p>
-              <p class="text-sm text-muted">🗓️ {{ when(ev.startsAt) }}</p>
+              <p class="text-sm text-muted">🗓️ {{ when(ev.startsAt, ev.timezone) }}</p>
               <p
                 v-if="ev.location"
                 class="text-sm text-muted"

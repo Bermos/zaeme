@@ -54,6 +54,12 @@ export interface InvitePage {
     posterUrl: string | null
     startsAt: Date | null
     endsAt: Date | null
+    /**
+     * The wall clock these times are read against (#31), or null for the
+     * reader's own. The instants above are unchanged either way: this says
+     * whether the train reads 09:14 or 10:14, not when it leaves.
+     */
+    timezone: string | null
     location: string | null
     venueStation: string | null
     ticketUrl: string | null
@@ -139,6 +145,7 @@ export async function getInvitePage(token: string): Promise<InvitePage> {
       posterUrl: ev.posterUrl,
       startsAt: ev.startsAt,
       endsAt: ev.endsAt,
+      timezone: ev.timezone,
       location: ev.location,
       venueStation: ev.venueStation,
       ticketUrl: ev.ticketUrl,
