@@ -921,6 +921,7 @@ paths:
                 title: { type: string, minLength: 1, maxLength: 200 }
                 category:
                   type: string
+                  minLength: 1
                   maxLength: 60
                   description: >-
                     Where the cost lands, by the NAME of one of the event's
@@ -932,6 +933,7 @@ paths:
                     the cost lands in Uncategorised, which is the ordinary case.
                 accountId:
                   type: string
+                  minLength: 1
                   maxLength: 64
                   description: >-
                     The category account outright, from the budget's accounts
@@ -1089,6 +1091,7 @@ paths:
                 title: { type: string, minLength: 1, maxLength: 200 }
                 category:
                   type: string
+                  minLength: 1
                   maxLength: 60
                   nullable: true
                   description: >-
@@ -1098,6 +1101,7 @@ paths:
                     omitting it leaves it where it is.
                 accountId:
                   type: string
+                  minLength: 1
                   maxLength: 64
                   nullable: true
                   description: >-

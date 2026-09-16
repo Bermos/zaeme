@@ -18,6 +18,7 @@ import {
 import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
 import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '../../shared/utils/split-weight'
 import { wasConverted } from '../../shared/utils/conversion'
+import { isPlainEvenSplit, splitEvenlyCents } from '../../shared/utils/even-split'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
@@ -391,13 +392,13 @@ export interface SettlementView {
  * Split `totalCents` evenly across `count` participants, distributing the
  * remainder one cent at a time from the front so the shares always sum to the
  * total exactly.
+ *
+ * Re-exported from `shared/utils/even-split.ts`, where it moved with
+ * `isPlainEvenSplit` (#27): the expense form has to reach the same answer about
+ * a recorded split that this file does, and the two agreeing by coincidence is
+ * how money starts moving between friends. Callers here are unchanged.
  */
-export function splitEvenlyCents(totalCents: number, count: number): number[] {
-  if (count <= 0) return []
-  const base = Math.floor(totalCents / count)
-  const remainder = totalCents - base * count
-  return Array.from({ length: count }, (_, i) => base + (i < remainder ? 1 : 0))
-}
+export { splitEvenlyCents } from '../../shared/utils/even-split'
 
 /**
  * The widest amount either cents column can hold. They are `integer` (int4),
@@ -773,8 +774,7 @@ export function resplitFromRecord(input: {
   }
 
   if (splitMode === 'even') {
-    const evenly = splitEvenlyCents(previousAmountCents, shares.length)
-    if (shares.every((s, i) => s.amountCents === evenly[i])) {
+    if (isPlainEvenSplit(shares.map(s => s.amountCents), previousAmountCents)) {
       return resolveShares(amountCents, people, 'even')
     }
     throw createError({

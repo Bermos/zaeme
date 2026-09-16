@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resplitFromRecord, splitEvenlyCents, type SplitMode } from '../server/domain/expenses'
+import { isPlainEvenSplit } from '../shared/utils/even-split'
 
 /**
  * Re-splitting a CORRECTED expense (#27).
@@ -232,5 +233,49 @@ describe('whatever it returns, the shares sum to the new total exactly', () => {
 describe('an entry with nobody on it', () => {
   it('is refused rather than re-split into nothing', () => {
     expect(() => resplit('even', 10000, 12000, [])).toThrow(/nobody to split between/)
+  })
+})
+
+describe('isPlainEvenSplit: the rule the server and the form both ask', () => {
+  it('says yes to what splitEvenlyCents produces, at every size', () => {
+    for (let n = 1; n <= 9; n++) {
+      for (const total of [1, 7, 99, 100, 10000, 10001]) {
+        expect(isPlainEvenSplit(splitEvenlyCents(total, n), total), `${n} of ${total}`).toBe(true)
+      }
+    }
+  })
+
+  it('says no to a split with an amount pinned by hand', () => {
+    expect(isPlainEvenSplit([4000, 3000, 3000], 10000)).toBe(false)
+    expect(isPlainEvenSplit([5000, 2500, 2500], 10000)).toBe(false)
+  })
+
+  it('IS ORDER-SENSITIVE, which is the conservative reading', () => {
+    // The same three amounts, in the order an even split produces them and in
+    // the order a split with Ben pinned at 33.34 produces them. Comparing sorted
+    // values would call the second one plain and move a cent off Ben on the next
+    // edit, so the vector is compared in place.
+    expect(isPlainEvenSplit([3334, 3333, 3333], 10000)).toBe(true)
+    expect(isPlainEvenSplit([3333, 3334, 3333], 10000)).toBe(false)
+  })
+
+  it('says no to a split that does not add up to the total at all', () => {
+    expect(isPlainEvenSplit([3333, 3333, 3333], 10000)).toBe(false)
+  })
+
+  it('says no to nobody', () => {
+    expect(isPlainEvenSplit([], 10000)).toBe(false)
+  })
+
+  it('is the predicate resplitFromRecord actually branches on', () => {
+    // The two halves agreeing is the whole point of the rule being shared: the
+    // form asks this to decide whether to hand the amounts back, and the server
+    // asks it to decide whether to refuse. A fixture it calls plain re-splits.
+    expect(isPlainEvenSplit([2500, 2500, 2500, 2500], 10000)).toBe(true)
+    expect(cents(resplit('even', 10000, 12000, recorded([2500, 2500, 2500, 2500]))))
+      .toEqual([3000, 3000, 3000, 3000])
+    // ...and one it calls pinned is refused, rather than re-split behind anybody's back.
+    expect(isPlainEvenSplit([4000, 3000, 3000], 10000)).toBe(false)
+    expect(() => resplit('even', 10000, 12000, recorded([4000, 3000, 3000]))).toThrow(/fixed by hand/)
   })
 })

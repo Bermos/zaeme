@@ -1430,8 +1430,10 @@ echo "== an expense can be corrected, not only added and deleted (Bermos/zaeme#2
 #   Airport taxi  weight 3/2/1 of CHF 88.40 -> 44.20 / 29.47 / 14.73. Corrected
 #                 to 100.01: 50.00 / 33.34 / 16.67. The two leftover cents land
 #                 on the SMALLEST shares; an even split of that same total is
-#                 33.34 / 33.34 / 33.33, so the two answers differ in every
-#                 position and neither is a rounding of the other
+#                 33.34 / 33.34 / 33.33, so two of the three shares differ — the
+#                 MIDDLE one is 33.34 either way, which is exactly why this is
+#                 asserted with `equals` on the whole vector rather than with a
+#                 `contains` on any one figure
 #   Groceries     percentage 70/20/10 of CHF 100.00. Corrected to 44.44:
 #                 31.11 / 8.89 / 4.44
 #   Museum        exact 60.00 / 30.00 / 10.00. A new total is REFUSED — those
@@ -1465,8 +1467,9 @@ TAXI_ID=$(expense_id "$TAXI" "Airport taxi")
 equals "a weighted split starts lopsided"         "$(entry_shares "$TAXI" "Airport taxi")" "4420 2947 1473"
 TAXI2=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$TAXI_ID" -d '{"amountCents":10001}')
 # THE CHECK THIS BLOCK EXISTS FOR. An implementation that re-split evenly rather
-# than at the recorded weights answers 3334 3334 3333 here, which is neither a
-# rounding nor a permutation of the right answer.
+# than at the recorded weights answers 3334 3334 3333 here — the same in the
+# middle position and different in the other two, so the assertion has to be on
+# the whole vector.
 equals "correcting its total re-applies the WEIGHTS" "$(entry_shares "$TAXI2" "Airport taxi")" "5000 3334 1667"
 equals "...and hands them back for the next edit"    "$(entry_weights "$TAXI2" "Airport taxi")" "3 2 1"
 equals "...in an entry that still balances"          "$(ledger_imbalance "$TAXI2")" "0"
@@ -1632,6 +1635,49 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}
 
   # WHO CHANGED IT is the audit's answer and not a column on the expense, so
   # this is the only place the attribution can be read back at all.
+  # ---- THE BODY THE FORM ACTUALLY SENDS (#27 review) ----
+  # Everything above composes its own bodies. `BudgetCard.vue` composes a
+  # different one, and the gap between them is where the defect lived: it sent
+  # `splitMode` and `participants` on EVERY correction, so a title-only fix took
+  # the "replace the split" path and re-split a hand-pinned `even` expense
+  # evenly — 40.00/30.00/30.00 became 33.34/33.33/33.33, the toast said "Expense
+  # updated", and this ledger keeps no history to recover it from. Nothing in
+  # this file executed that shape, which is why it survived review twice.
+  RACUNCAT=$(account_id "$(body "${AUTH[@]}" "$API/events/$ESLUG/budget")" "Uncategorised")
+  FORMHEAD="\"accountId\":\"$RACUNCAT\",\"currency\":\"CHF\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\""
+  RAC2=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$RAC_ID" \
+    -d "{\"title\":\"Raclette, second night\",$FORMHEAD,\"amountCents\":10000}")
+  equals "the form's title-only correction leaves a hand-pinned split ALONE" "$(entry_shares "$RAC2" "Raclette, second night")" "4000 3000 3000"
+  equals "...in an entry that still balances"        "$(ledger_imbalance "$RAC2")" "0"
+  # ...and the body it sends once somebody HAS touched the split still replaces it.
+  RAC3=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$RAC_ID" \
+    -d "{\"title\":\"Raclette, second night\",$FORMHEAD,\"amountCents\":12000,\"splitMode\":\"exact\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\",\"amountCents\":6000},{\"name\":\"B\",\"email\":\"b@e.com\",\"amountCents\":3000},{\"name\":\"C\",\"email\":\"c@e.com\",\"amountCents\":3000}]}")
+  equals "...while the body it sends once it HAS been touched replaces it" "$(entry_shares "$RAC3" "Raclette, second night")" "6000 3000 3000"
+
+  # ---- THE EVIDENCE RULE, ON THE SURFACE A PERSON USES (#71) ----
+  # The form prefills the rate field — with today's quote on a write, with the
+  # frozen rate on an edit — and used to send it back verbatim. So every
+  # correction relabelled the row `manual` ("a figure checked against a
+  # statement") and every amount correction resent the OLD stated total beside
+  # the NEW receipt. It now sends neither unless the field was changed, which is
+  # what puts these two branches on the human path at all: until this, the
+  # centrepiece of #27's conversion rule was reachable only from /api/v1.
+  FERRY=$(body "${EOWNER[@]}" "${JSON[@]}" -X POST "$MEEXPE" \
+    -d '{"title":"Ferry","amountCents":10000,"currency":"EUR","fxRate":"0.9412","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
+  FY_ID=$(expense_id "$FERRY" "Ferry")
+  contains "a rate somebody typed there is a checked figure" "$FERRY" '"fxRate":"0.9412","fxRateSource":"manual","statedAmountCents":9412,"statedCurrency":"CHF"'
+  FY1=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$FY_ID" \
+    -d "{\"title\":\"Ferry, return\",\"accountId\":\"$RACUNCAT\",\"currency\":\"EUR\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"amountCents\":10000}")
+  contains "the form's title-only correction leaves a checked figure checked" "$FY1" '"fxRate":"0.9412","fxRateSource":"manual","statedAmountCents":9412,"statedCurrency":"CHF"'
+  FY2=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$FY_ID" \
+    -d "{\"title\":\"Ferry, return\",\"accountId\":\"$RACUNCAT\",\"currency\":\"EUR\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"amountCents\":20000}")
+  # 200.00 EUR at the rate this row was frozen at is exactly 188.24 CHF.
+  contains "...and its AMOUNT correction rides on the frozen rate" "$FY2" '"amountCents":20000,"currency":"EUR","amountBaseCents":18824,"baseCurrency":"CHF","fxRate":"0.9412"'
+  # THE LIE THIS REPLACES: resending the prefilled stated total would have
+  # recorded "EUR 200.00 cost me CHF 94.12" as something somebody checked.
+  contains "...with the row no longer claiming anybody checked it" "$FY2" '"fxRateSource":"fetched","statedAmountCents":null,"statedCurrency":null'
+  equals "...still balancing"                        "$(ledger_imbalance "$FY2")" "0"
+
   EAUD=$(audit_await "$BASE/api/admin/audit?actorKind=participant&surface=me&eventSlug=$ESLUG&limit=20" \
     "\"path\":\"/api/me/events/$ESLUG/expenses/$CH_ID\"")
   contains "the audit records the correction, by path" "$EAUD" "\"path\":\"/api/me/events/$ESLUG/expenses/$CH_ID\""

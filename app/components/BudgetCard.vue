@@ -355,6 +355,37 @@ const fxUnavailable = ref(false)
  */
 const fxMode = ref<'rate' | 'paid'>('rate')
 const paidAmount = ref('')
+
+/**
+ * WHAT THE FORM PUT IN THOSE TWO FIELDS, so the submit can tell a suggestion
+ * from a statement (#71).
+ *
+ * `fxRateSource: 'manual'` means a PERSON stated what this cost — and a
+ * recomputation carries a manual figure across a currency change untouched, on
+ * the strength of that claim. This form fetches today's mid-market rate INTO the
+ * rate field as a convenience and used to send it back verbatim, so every
+ * foreign expense recorded here was written down as verified whether anybody had
+ * verified anything or not. An edit made it worse: correcting the title of a
+ * fetched row resent the prefilled rate and flipped it to `manual`, and
+ * correcting the amount of a manual row resent the OLD stated total beside the
+ * NEW receipt — recording "EUR 200.00 cost me CHF 234.00" as something somebody
+ * checked.
+ *
+ * So the rule is: send either field only when it differs from what was put
+ * there, or when the currency itself changed. An untouched prefill is the
+ * server's own answer handed back to it, and omitting it lets the server say so
+ * honestly — `fetched` on a write, and on an edit the frozen rate carrying the
+ * new amount with the stated pair cleared.
+ */
+const fxRatePrefilled = ref('')
+const paidAmountPrefilled = ref('')
+const fxRateTouched = computed(() => fxRate.value.trim() !== fxRatePrefilled.value.trim())
+const paidAmountTouched = computed(() => paidAmount.value.trim() !== paidAmountPrefilled.value.trim())
+/** The receipt's currency as the expense being corrected was recorded with. */
+const recordedCurrency = ref('')
+/** On an edit, whether the receipt's own currency moved — which re-settles it. */
+const currencyChanged = computed(() =>
+  !!recordedCurrency.value && spentCurrency.value.trim().toUpperCase() !== recordedCurrency.value)
 const paidCents = computed(() => {
   const n = Number.parseFloat(paidAmount.value.replace(',', '.'))
   return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null
@@ -394,6 +425,7 @@ async function quoteRate() {
   fxUnavailable.value = false
   if (!foreign.value) {
     fxRate.value = ''
+    fxRatePrefilled.value = ''
     return
   }
   fxPending.value = true
@@ -406,6 +438,9 @@ async function quoteRate() {
     })
     if (q.rate) {
       fxRate.value = q.rate
+      // What the FORM put there, so the submit can tell a suggestion it fetched
+      // from a figure a person actually chose (#71).
+      fxRatePrefilled.value = q.rate
       fxAsOf.value = q.asOf
     } else {
       fxUnavailable.value = true
@@ -473,8 +508,41 @@ watch(splitMode, () => {
     keepSplitValues = false
     return
   }
+  // A mode picked from the control is somebody saying something about the
+  // split. A mode set by a prefill is not, and `setSplit` suppresses this.
+  splitTouched.value = true
   splitValues.value = {}
 })
+
+/**
+ * WHETHER THE PERSON HAS SAID ANYTHING ABOUT THE SPLIT since the form opened —
+ * which on an edit is the difference between two very different requests (#27).
+ *
+ * An edit that sends `splitMode` and `participants` REPLACES the split. An edit
+ * that sends neither lets the server re-derive it from what was recorded, and
+ * that is the only path on which `resplitFromRecord` runs at all — including its
+ * refusal to re-split an `even` expense whose amounts were pinned by hand.
+ *
+ * This form used to send both unconditionally, so correcting the TITLE of such
+ * an expense re-split it evenly and moved money between people: 40.00 / 30.00 /
+ * 30.00 became 33.34 / 33.33 / 33.33, the toast said "Expense updated", and this
+ * ledger keeps no history to recover it from. Sending the split only when
+ * somebody touched it is what makes "I did not change the split" mean the same
+ * thing here as it means in the API.
+ */
+const splitTouched = ref(false)
+
+/** One person's number, typed. A prefill is not a change and does not call this. */
+function setSplitValue(email: string, raw: string) {
+  splitValues.value[email] = raw
+  splitTouched.value = true
+}
+
+/** Who the cost is split between, changed from the control rather than prefilled. */
+function setSelected(emails: string[]) {
+  selected.value = emails
+  splitTouched.value = true
+}
 
 /** Set the mode and its per-person numbers as ONE change, for a prefill. */
 function setSplit(mode: typeof splitMode.value, values: Record<string, string>) {
@@ -484,6 +552,51 @@ function setSplit(mode: typeof splitMode.value, values: Record<string, string>) 
   }
   splitValues.value = values
 }
+
+/**
+ * The split the expense being corrected was RECORDED with, kept so the form can
+ * ask `isPlainEvenSplit` the same question the server asks (#27).
+ */
+const recorded = ref<{ splitMode: string, amountCents: number, shares: Share[] } | null>(null)
+
+/**
+ * Whether this correction needs the split typed in again, because the record
+ * cannot answer it.
+ *
+ * Two shapes, both from #26: an `exact` split's amounts were chosen against a
+ * total that no longer exists, and an `even` split with amounts pinned by hand
+ * records nothing about WHICH people were pinned. The server refuses both with a
+ * message saying to send the split; this is the same question asked one step
+ * earlier, so the rows can be handed back prefilled instead of somebody hitting
+ * save and having to decode a refusal.
+ *
+ * It only fires once the TOTAL has actually moved — an unchanged total needs no
+ * re-split at all, which is what lets the unrecoverable case still have its
+ * title, category, note or payer corrected.
+ */
+const splitAskedBack = ref(false)
+const needsTheSplitBack = computed(() => {
+  const was = recorded.value
+  if (!was || splitTouched.value) return false
+  if (!Number.isFinite(amountCents.value) || amountCents.value === was.amountCents) return false
+  if (was.splitMode === 'exact') return true
+  if (was.splitMode !== 'even') return false
+  return !isPlainEvenSplit(was.shares.map(s => s.amountCents), was.amountCents)
+})
+
+// Hand the recorded amounts back as `exact` the moment the total moves on a
+// split that cannot be re-derived. They are the only numbers anybody has, the
+// running total under the rows then says how far off the new total they are, and
+// the submit button stays disabled until they add up.
+watch(needsTheSplitBack, (needed) => {
+  const was = recorded.value
+  if (!needed || !was) return
+  const values: Record<string, string> = {}
+  for (const s of was.shares) values[s.email] = (s.amountCents / 100).toFixed(2)
+  setSplit('exact', values)
+  splitTouched.value = true
+  splitAskedBack.value = true
+})
 
 /** Everybody currently in the split, in the order the rows render. */
 const splitPeople = computed(() => roster.value.filter(p => selected.value.includes(p.email)))
@@ -601,6 +714,12 @@ function resetForm() {
   fxUnavailable.value = false
   fxMode.value = 'rate'
   paidAmount.value = ''
+  fxRatePrefilled.value = ''
+  paidAmountPrefilled.value = ''
+  recordedCurrency.value = ''
+  recorded.value = null
+  splitTouched.value = false
+  splitAskedBack.value = false
   adding.value = false
 }
 
@@ -632,13 +751,24 @@ function startEdit(x: Expense) {
   // The frozen rate, and the figure behind it where there is one. A row that
   // says `manual` was recorded from something a person stated, so the form
   // opens on the field they stated it in.
+  //
+  // Both are recorded as PREFILLS (#71): what the form put there is not a
+  // statement anybody made, so the submit sends either one only if it was
+  // changed. Leaving them alone and correcting the title keeps a `fetched` row
+  // fetched; leaving them alone and correcting the AMOUNT re-derives at this
+  // frozen rate rather than resending a stated total that was about the old
+  // receipt.
+  recordedCurrency.value = x.currency
   fxRate.value = x.fxRate
+  fxRatePrefilled.value = x.fxRate
   if (x.fxRateSource === 'manual' && x.statedAmountCents) {
     fxMode.value = 'paid'
     paidAmount.value = (x.statedAmountCents / 100).toFixed(2)
+    paidAmountPrefilled.value = paidAmount.value
   } else {
     fxMode.value = 'rate'
     paidAmount.value = ''
+    paidAmountPrefilled.value = ''
   }
 
   const mode = (['even', 'exact', 'percentage', 'weight'].includes(x.splitMode)
@@ -648,6 +778,12 @@ function startEdit(x: Expense) {
   if (mode === 'exact') for (const s of x.shares) values[s.email] = (s.amountCents / 100).toFixed(2)
   if (mode === 'percentage' || mode === 'weight') for (const s of x.shares) values[s.email] = s.weight ?? ''
   setSplit(mode, values)
+  // The split as recorded, so `needsTheSplitBack` can ask `isPlainEvenSplit` the
+  // same question the server asks — and so nothing below counts a prefill as
+  // somebody having said something about the split.
+  recorded.value = { splitMode: mode, amountCents: x.amountCents, shares: x.shares }
+  splitTouched.value = false
+  splitAskedBack.value = false
 
   adding.value = true
 }
@@ -676,6 +812,15 @@ async function saveExpense() {
           // Omitted entirely on a new expense unless somebody picked one: the
           // server's default is `Uncategorised`, and sending it explicitly would
           // make the picker look load-bearing when it is not.
+          //
+          // On an EDIT it is always sent, because there absent means "leave it
+          // where it is" and moving a cost BACK to Uncategorised has to say so.
+          // NOTE for whoever writes the first member-to-member transfer (#28):
+          // such an entry has `categoryAccountId: null` and no category line at
+          // all, and this would give it one on the first edit — putting a
+          // transfer into `totalCents`, which is the sum of category debits.
+          // Nothing writes one today; when something does, this needs to send
+          // `null` for it rather than `uncategorised`.
           ...(editing
             ? { accountId: categoryId.value || null }
             : showCategory.value && categoryId.value && categoryId.value !== uncategorised.value?.id
@@ -686,16 +831,32 @@ async function saveExpense() {
           // Only when there is something to convert, and exactly ONE of the two:
           // an empty rate field means "fetch one", not "use 0", and the server
           // refuses a rate and a stated total together because they can disagree.
+          //
+          // AND ONLY WHEN SOMEBODY ACTUALLY PUT IT THERE (#71). Both fields are
+          // prefilled — with today's quote on a write, with the frozen rate and
+          // the stated total on an edit — and sending a prefill back is how a
+          // mid-market rate nobody checked got recorded as `manual`, "a figure
+          // checked against a statement". Untouched, they are omitted, and the
+          // server derives honestly. A changed currency is a statement about
+          // this receipt either way, so the field goes with it.
           ...(foreign.value && fxMode.value === 'rate' && fxRate.value.trim()
+            && (!editing || fxRateTouched.value || currencyChanged.value)
             ? { fxRate: fxRate.value.trim() }
             : {}),
           ...(foreign.value && fxMode.value === 'paid' && paidCents.value
+            && (!editing || paidAmountTouched.value || currencyChanged.value)
             ? { targetAmountCents: paidCents.value }
             : {}),
           paidByName: payer.value.name,
           paidByEmail: payer.value.email,
-          splitMode: splitMode.value,
-          participants: splitParticipantsBody()
+          // THE SPLIT, ONLY WHEN SOMEBODY TOUCHED IT (#27). Sending it replaces
+          // the split; omitting it lets the server re-derive from what was
+          // recorded, which is the only path `resplitFromRecord` — and its
+          // refusal to re-split a hand-pinned `even` expense — is ever on. A
+          // write always sends it: there is nothing to re-derive from.
+          ...(!editing || splitTouched.value
+            ? { splitMode: splitMode.value, participants: splitParticipantsBody() }
+            : {})
         }
       }
     )
@@ -1162,9 +1323,11 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
             v-else
             :label="`What left your account, in ${budget.currency}`"
             size="sm"
-            :help="impliedRate
-              ? `That works out at ${impliedRate} — the rate plus whatever your bank took. It is what the group splits.`
-              : 'The total your bank actually took, fee and all. That is what the group owes you.'"
+            :help="editingId && !paidAmountTouched
+              ? 'What was recorded. Leave it and the amount is re-derived at this expense\'s own rate; change it and the new figure is recorded as yours.'
+              : impliedRate
+                ? `That works out at ${impliedRate} — the rate plus whatever your bank took. It is what the group splits.`
+                : 'The total your bank actually took, fee and all. That is what the group owes you.'"
           >
             <UInput
               v-model="paidAmount"
@@ -1256,10 +1419,11 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           size="sm"
         >
           <USelect
-            v-model="selected"
+            :model-value="selected"
             :items="participantItems"
             multiple
             class="w-full"
+            @update:model-value="setSelected($event as string[])"
           />
         </UFormField>
         <UFormField
@@ -1280,6 +1444,15 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           v-if="splitMode !== 'even' && splitEntries.length"
           class="flex flex-col gap-1"
         >
+          <!-- The one case the record cannot answer, handed back rather than
+               refused after the save (#26, #27). -->
+          <p
+            v-if="splitAskedBack"
+            class="text-sm text-muted"
+          >
+            This one was split with amounts set by hand, and which people were pinned was never recorded —
+            so the amounts are back here to be corrected against the new total.
+          </p>
           <div
             v-for="p in splitEntries"
             :key="p.email"
@@ -1295,7 +1468,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
                 :placeholder="splitMode === 'exact' ? '40.00' : splitMode === 'percentage' ? '33.33' : '1'"
                 size="sm"
                 class="w-28"
-                @update:model-value="splitValues[p.email] = String($event)"
+                @update:model-value="setSplitValue(p.email, String($event))"
               />
               <span class="text-muted w-4">{{ splitMode === 'percentage' ? '%' : splitMode === 'weight' ? '×' : '' }}</span>
             </div>
