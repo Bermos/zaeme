@@ -151,7 +151,21 @@ export function mediaItem(row: object) {
     fileName: r.fileName ?? null,
     caption: r.caption ?? null,
     takenAt: r.takenAt ?? null,
-    assignedRsvpId: r.assignedRsvpId ?? null,
+    // EVERY attendee a ticket is for (#36), and `[]` for everything that is not
+    // a ticket. This REPLACES `assignedRsvpId`, which could only ever name one
+    // person, and it is the one BREAKING change on this surface: an Enterprise
+    // client still reading the old scalar gets `undefined`, which is the shape
+    // a break should have — visibly absent rather than plausibly wrong.
+    //
+    // The `Array.isArray` is not decoration. `asRow` casts an unchecked `object`
+    // (Bermos/zaeme#78), so a feeder that never selected this field would hand a
+    // `[]` straight onto the wire and say "this ticket is nobody's" with
+    // `nuxt typecheck` green — which is exactly how `expenseId` (#29) and
+    // `ticket` (#35) each shipped wrong once. There is no value of the missing
+    // field that reads correctly here, so the guard cannot fix that; what it
+    // does is make the answer a LIST whatever arrives, so `.map` downstream
+    // cannot throw on a surface Enterprise generates its tools from.
+    assignedRsvpIds: Array.isArray(r.assignedRsvpIds) ? r.assignedRsvpIds : [],
     timelineItemId: r.timelineItemId ?? null,
     // The expense this item is the receipt for (#29). Additive, and an id
     // rather than a URL for the same reason as everything else here: the bytes

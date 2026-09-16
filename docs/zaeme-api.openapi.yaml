@@ -2339,16 +2339,34 @@ components:
 
     MediaItem:
       type: object
-      required: [id, type]
+      required: [id, type, assignedRsvpIds]
       properties:
         id: { type: string }
         type: { type: string, enum: [photo, video, document, ticket] }
         fileName: { type: [string, 'null'] }
         caption: { type: [string, 'null'] }
         takenAt: { type: [string, 'null'], format: date-time }
-        assignedRsvpId:
-          type: [string, 'null']
-          description: For a ticket, the attendee it belongs to.
+        assignedRsvpIds:
+          type: array
+          items: { type: string }
+          description: >-
+            For a ticket, EVERY attendee it is for (Bermos/zaeme#36) — a pair
+            fare has two, a family entry has four, a ticket nobody has been
+            given has none. Empty for a photo, a video and a shared document:
+            nothing else is assigned to anybody. Oldest assignee first.
+
+            BREAKING. It REPLACES `assignedRsvpId`, a single nullable id that
+            could not say that one QR code covers six people; a ticket bought
+            for a pair had to be given to one of them and the other saw no
+            ticket at all. A client still reading the old scalar now reads
+            `undefined` — absent rather than plausibly wrong, which is the shape
+            a break should have. Always present, never null: a ticket nobody has
+            been given is `[]`.
+
+            READ-ONLY HERE. Assignment is a planner's, on zäme's own host
+            surface, where adding and removing one attendee are separate verbs;
+            adding a verb to this API is the owner's decision and not this
+            issue's (Bermos/zaeme#8).
         timelineItemId: { type: [string, 'null'] }
         expenseId:
           type: [string, 'null']
@@ -2399,8 +2417,8 @@ components:
         travellerName:
           type: [string, 'null']
           description: >-
-            The name printed on the ticket, which is not always the attendee
-            `assignedRsvpId` names.
+            The name printed on the ticket, which is not always one of the
+            attendees `assignedRsvpIds` names.
         validFrom: { type: [string, 'null'], format: date-time }
         validUntil: { type: [string, 'null'], format: date-time }
         note: { type: [string, 'null'] }

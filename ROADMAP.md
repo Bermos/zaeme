@@ -133,7 +133,7 @@ no clustering job.
 - [x] Upload confirmation API
 - [x] Photo / video gallery per event
 - [x] Document upload (PDFs, booking confirmations)
-- [x] Ticket upload + assignment to a specific attendee
+- [x] Ticket upload + assignment to attendees — one ticket may cover several (#36)
 - [x] Guest upload via the invite link
 - [x] `takenAt` recorded on upload for chronological display
 - [x] Caption set at upload time

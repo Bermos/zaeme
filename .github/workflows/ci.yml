@@ -363,11 +363,42 @@ concurrency:
 # pure function both cards call — the same remedy #31's review reached for when
 # a zone shortlist was wrong inside a card the wire could not see. 679 -> 731.
 #
+# ONE TICKET CANNOT COVER TWO PEOPLE (#36) adds 56, and NOTHING IS REMOVED —
+# the #35 block above still runs all 52 of its own, assignment included, on the
+# route that replaced the one it used to call. `events_media.assigned_rsvp_id`
+# is gone and `events_ticket_assignment` is a join table, so what these execute
+# is a SET rather than a value: three people on one ticket, one taken off, the
+# other two still there.
+#
+# FOURTEEN NEED NO BUCKET, for the reason #35's nine do: every credential gate
+# runs before the media row is looked up. They cover BOTH new verbs — a gate on
+# one of a pair is the half of a boundary that gets forgotten — plus a 404 on
+# the `POST …/media/{id}/assign` route this issue REMOVED, which is the only
+# thing that says a third way to change these rows did not survive beside them.
+#
+# THE OTHER 42 WRITE ON ONE SURFACE AND READ BACK ON ANOTHER, every time, and
+# that is what they are for rather than thoroughness. Three media reads share no
+# code — the host card's, `/api/v1`'s and the invite link's — and
+# `server/utils/v1-shapes.ts` casts its row unchecked (Bermos/zaeme#78), so a
+# read that never selected `assignedRsvpIds` answers `[]` with `nuxt typecheck`
+# green. `expenseId` (#29) and `ticket` (#35) each shipped exactly that for a
+# release. `ticket_assignees` therefore answers `no-field` and `none`
+# DIFFERENTLY, and a fourth attendee who is on the trip and NOT on the ticket is
+# the fixture that stops "everybody sees everything" passing the guest half.
+#
+# TWO CASCADES ARE EXECUTED and they say different things: the attendee leaving
+# takes their own assignment and leaves the ticket, the ticket being deleted
+# takes every assignment with it. Both live in Postgres and in no source file.
+#
+# The block LEAVES ITS TICKET ASSIGNED where #35's deletes its own, because
+# `scripts/ci-upgrade-check.mjs` compares what the previous release said about a
+# ticket against what this one says after the migration. 731 -> 787.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '731'
+  MIN_SMOKE_CHECKS: '787'
 
 jobs:
   ci:

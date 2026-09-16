@@ -1148,13 +1148,124 @@ describe('what a ticket says is written by a planner, on the host surface only',
     // somebody's seat, and the role set that may re-assign it is the role set
     // that may say what is on it. Pinned per function, because a regex over
     // the whole file passes on any one of the three matching.
+    //
+    // `assertMayAssign` is the shared gate #36 split out when assignment became
+    // two verbs (add an attendee, remove one). It is read the same way, and the
+    // two verbs are then read for CALLING it — otherwise a verb that answered
+    // the question itself, with a wider role set, would satisfy a regex over
+    // the file while nothing asserted the role set it used.
     const src = readFileSync(join(ROOT, 'server', 'domain', 'media.ts'), 'utf8')
-    for (const fn of ['assignTicket', 'deleteMedia', 'setTicketDetail']) {
-      const start = src.indexOf(`export async function ${fn}(`)
-      expect(start, fn).toBeGreaterThan(-1)
-      const body = src.slice(start, src.indexOf('\n}\n', start))
-      expect(body, fn).toMatch(/assertPlanner\([^)]*roles: \['owner', 'co_planner'\]/s)
+    const bodyOf = (decl: string) => {
+      const start = src.indexOf(decl)
+      expect(start, decl).toBeGreaterThan(-1)
+      return src.slice(start, src.indexOf('\n}\n', start))
     }
+    for (const fn of ['assertMayAssign', 'deleteMedia', 'setTicketDetail']) {
+      const decl = fn === 'assertMayAssign'
+        ? `async function ${fn}(`
+        : `export async function ${fn}(`
+      expect(bodyOf(decl), fn).toMatch(/assertPlanner\([^)]*roles: \['owner', 'co_planner'\]/s)
+    }
+    for (const fn of ['addTicketAssignee', 'removeTicketAssignee']) {
+      expect(bodyOf(`export async function ${fn}(`), fn).toMatch(/await assertMayAssign\(userId, slug, mediaId\)/)
+    }
+  })
+
+  it('every media read answers who the ticket is for (#36, and #78 is why)', () => {
+    // THE TRAP THAT HAS BITTEN TWICE IN THIS EXACT FUNCTION. `asRow` in
+    // `server/utils/v1-shapes.ts` casts an unchecked `object`
+    // (Bermos/zaeme#78), so a shape reading a field its feeder never selected
+    // answers null — or here, `[]` — on the wire with `nuxt typecheck` green.
+    // `expenseId` (#29) and `ticket` (#35) each shipped that way for a release.
+    //
+    // THIS IS A WALK, NOT A LIST OF FILENAMES. It reads what `mediaItem`
+    // actually projects and what its one feeder actually selects, and compares
+    // the two — so a field added to the shape and forgotten in the feeder is
+    // red here rather than null in Enterprise. A list of expected field names
+    // would be a closure wearing a test's clothes: it would agree with itself
+    // whatever either file said.
+    const shapes = readFileSync(join(ROOT, 'server', 'utils', 'v1-shapes.ts'), 'utf8')
+    const shape = shapes.slice(shapes.indexOf('export function mediaItem('), shapes.indexOf('function ticketDetail('))
+    expect(shape).not.toBe('')
+    // Every `<name>: r.<something>` the shape reads off its row.
+    const projected = [...shape.matchAll(/^\s{4}(\w+):/gm)].map(m => m[1]!)
+    expect(projected).toContain('assignedRsvpIds')
+    expect(projected.length).toBeGreaterThan(5)
+
+    // Its ONE feeder, found by reading the route rather than by naming the
+    // domain function here: `/api/v1` media is the only caller of `mediaItem`.
+    const route = readFileSync(join(ROOT, 'server', 'api', 'v1', 'events', '[slug]', 'media.get.ts'), 'utf8')
+    const feeder = /await (\w+)\(caller\.planner\.id, slug\)/.exec(route)?.[1]
+    expect(feeder, 'the /api/v1 media route no longer calls one domain function').toBeDefined()
+
+    const data = readFileSync(join(ROOT, 'server', 'domain', 'events-data.ts'), 'utf8')
+    const fn = data.slice(data.indexOf(`export async function ${feeder}(`))
+    const produced = fn.slice(0, fn.indexOf('\n}\n'))
+    for (const field of projected) {
+      // `id` and the detail's own fields are rebuilt below the select, so the
+      // whole function body is searched rather than the projection alone —
+      // what matters is that the NAME appears in the function that answers it.
+      expect(produced, `${feeder} never produces \`${field}\`, which mediaItem reads`).toMatch(
+        new RegExp(`\\b${field}\\b`)
+      )
+    }
+  })
+
+  it('has no reader of the column #36 dropped', () => {
+    // THE ACCEPTANCE CRITERION, EXECUTED: "`assignedRsvpId` is gone from the
+    // schema and from every reader — grep proves it." A missed reader is not a
+    // compile error, because of the cast above; it is a feature that silently
+    // answers nothing. So this walks the tree instead of trusting that a grep
+    // was run once, by hand, on the day.
+    //
+    // IT LOOKS FOR READERS, NOT FOR MENTIONS, and that distinction is the
+    // difference between a test and a nuisance: this repository's comments
+    // explain what a change replaced, so several files legitimately carry the
+    // old name in prose — the same trap `updateTimelineItem` set in the OpenAPI
+    // spec, where "does not mention" failed on a reserved operationId in a
+    // comment. So the three CODE forms are pinned instead. A backticked
+    // `assignedRsvpId` in a sentence matches none of them; a property read, a
+    // declared member, an object key and the column named in SQL match.
+    //
+    // `assignedRsvpIds` is the replacement, so every pattern is anchored such
+    // that a trailing `s` breaks it.
+    //
+    // THREE THINGS ARE EXEMPT AND NOTHING ELSE IS.
+    //
+    // The migration chain: `0000_baseline.sql` creates the column and `0013`
+    // drops it, and a committed migration is history — rewriting one to remove
+    // a name would change what a database that has already applied it believes.
+    //
+    // This file, which is where the rule is written down and cannot be an
+    // instance of itself.
+    //
+    // And `scripts/ci-upgrade-check.mjs`, whose whole job is to speak TWO
+    // releases at once: it reads what the PREVIOUS release answered, which is
+    // the single `assignedRsvpId`, and compares it to what this one answers. It
+    // is the reader that has to survive the removal, and it is named here so
+    // that the day it stops needing the old spelling somebody deletes the line
+    // rather than wondering why the exemption is there.
+    const exempt = ['test/api-boundary.test.ts', 'scripts/ci-upgrade-check.mjs']
+    const readers = [
+      /\.assignedRsvpId\b/, // a property read
+      /\bassignedRsvpId\s*[:?]/, // an object key, a type member, a YAML property
+      /['"(]assigned_rsvp_id['")]/ // the column, named in code or in raw SQL
+    ]
+    const searched = ['server', 'app', 'shared', 'test', 'scripts', 'docs']
+      .flatMap(top => walk(join(ROOT, top)))
+      .filter(f => /\.(ts|vue|mjs|js|yaml|yml|sql|md|sh)$/.test(f))
+      .filter(f => !rel(f).startsWith('server/database/migrations/'))
+      .filter(f => !exempt.includes(rel(f)))
+    // COUNT WHAT THE WALK FOUND, because an empty offender list is also what a
+    // walk over nothing returns — a mistyped directory, a filter that stopped
+    // matching, and the assertion below passes while reading no files at all.
+    expect(searched.length).toBeGreaterThan(100)
+
+    const offenders = searched.filter((f) => {
+      const text = readFileSync(f, 'utf8')
+      return readers.some(re => re.test(text))
+    }).map(rel)
+    expect(offenders).toEqual([])
   })
 
   it('keeps tickets and documents off the guest upload list', () => {
@@ -1225,6 +1336,54 @@ describe('what a ticket says is written by a planner, on the host surface only',
     expect(index).toBeGreaterThan(-1)
     expect(fk).toBeGreaterThan(-1)
     expect(index).toBeLessThan(fk)
+  })
+
+  it('never lets a composite foreign key precede the index it needs, in ANY migration', () => {
+    // THE SAME TRAP, GENERALISED, because it has now fired three times — 0007,
+    // 0012 and 0013 — and each time the assertion left behind named the one
+    // pair of strings that had just been fixed. A list of filenames agrees with
+    // itself whatever the next migration does, so this WALKS the chain and
+    // derives the rule from the SQL: every composite foreign key must have its
+    // target's unique index already created, either earlier in its own file or
+    // in a migration that ran before it.
+    //
+    // It is the only thing in `pnpm test` that reads this. Nothing here runs
+    // SQL, so without it the first sign of `42830 there is no unique constraint
+    // matching given keys` is the Kitchen `migrate` task failing, with
+    // production left on the previous release.
+    const dir = join(ROOT, 'server', 'database', 'migrations')
+    const files = readdirSync(dir).filter(f => f.endsWith('.sql')).sort()
+    expect(files.length).toBeGreaterThan(10)
+
+    const FK = /ADD CONSTRAINT "([^"]+)" FOREIGN KEY \("([^"]+)","([^"]+)"\) REFERENCES "public"\."([^"]+)"\("([^"]+)","([^"]+)"\)/g
+    const offenders: string[] = []
+    let composites = 0
+    // What every migration BEFORE the one being read has already created.
+    const earlier: Array<{ table: string, cols: string }> = []
+
+    for (const file of files) {
+      const sql = readFileSync(join(dir, file), 'utf8')
+      const indexesHere = [...sql.matchAll(
+        /CREATE UNIQUE INDEX "[^"]+" ON "([^"]+)" USING btree \("([^"]+)","([^"]+)"\)/g
+      )].map(m => ({ table: m[1]!, cols: `${m[2]},${m[3]}`, at: m.index! }))
+
+      for (const m of sql.matchAll(FK)) {
+        composites++
+        const want = { table: m[4]!, cols: `${m[5]},${m[6]}` }
+        const before = indexesHere.some(i => i.table === want.table && i.cols === want.cols && i.at < m.index!)
+        const already = earlier.some(i => i.table === want.table && i.cols === want.cols)
+        if (!before && !already) {
+          offenders.push(`${file}: ${m[1]} references ${want.table}(${want.cols}) with no unique index created first`)
+        }
+      }
+      earlier.push(...indexesHere.map(({ table, cols }) => ({ table, cols })))
+    }
+
+    // COUNT WHAT THE WALK FOUND. An empty offender list is also what a walk
+    // over a regex that stopped matching returns, and that is the shape this
+    // whole test exists to refuse.
+    expect(composites).toBeGreaterThan(3)
+    expect(offenders).toEqual([])
   })
 })
 

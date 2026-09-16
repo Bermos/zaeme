@@ -204,7 +204,17 @@ export const rsvp = pgTable('events_rsvp', {
   index('events_rsvp_user_idx').on(table.userId),
   index('events_rsvp_guest_email_idx').on(table.guestEmail),
   uniqueIndex('events_rsvp_event_user_unique').on(table.eventId, table.userId),
-  uniqueIndex('events_rsvp_event_email_unique').on(table.eventId, table.guestEmail)
+  uniqueIndex('events_rsvp_event_email_unique').on(table.eventId, table.guestEmail),
+  /**
+   * The target `events_ticket_assignment`'s composite foreign key REFERENCES
+   * (#36), and nothing else reads it. `id` is already the primary key, so this
+   * index adds no uniqueness the table did not have — it exists because
+   * Postgres needs a unique constraint on exactly `(event_id, id)` before it
+   * will accept a foreign key naming those two columns, which is what stops a
+   * ticket on trip A being assigned to somebody's RSVP on trip B. Same shape
+   * as `events_media_event_id_unique` below and for the same reason.
+   */
+  uniqueIndex('events_rsvp_event_id_unique').on(table.eventId, table.id)
 ])
 
 export const timelineItem = pgTable('events_timeline_item', {
@@ -454,7 +464,17 @@ export const media = pgTable('events_media', {
   takenAt: timestamp('taken_at', { withTimezone: true }),
   uploadedByUserId: text('uploaded_by_user_id'),
   uploadedByRsvpId: text('uploaded_by_rsvp_id').references(() => rsvp.id, { onDelete: 'set null' }),
-  assignedRsvpId: text('assigned_rsvp_id').references(() => rsvp.id, { onDelete: 'set null' }),
+  /**
+   * WHO A TICKET IS FOR IS NOT A COLUMN HERE ANY MORE (#36).
+   *
+   * `assigned_rsvp_id` was a single nullable foreign key, so a ticket belonged
+   * to exactly one person or to nobody — and a pair fare, a family entry and a
+   * group booking for six behind one QR code all had to be given to one of
+   * them and explained in the chat. `events_ticket_assignment` below is the
+   * many-to-many that replaces it; the column is gone rather than kept beside
+   * it, because two places that answer "whose ticket is this" is two answers
+   * waiting to disagree.
+   */
   timelineItemId: text('timeline_item_id').references(() => timelineItem.id, { onDelete: 'set null' }),
   /**
    * THE RECEIPT PIN (#29): the expense this photo or paper is evidence for.
@@ -484,16 +504,16 @@ export const media = pgTable('events_media', {
   index('events_media_type_idx').on(table.type),
   index('events_media_status_idx').on(table.status),
   index('events_media_taken_at_idx').on(table.takenAt),
-  index('events_media_assigned_rsvp_idx').on(table.assignedRsvpId),
   index('events_media_timeline_item_idx').on(table.timelineItemId),
   index('events_media_expense_idx').on(table.expenseId),
   /**
-   * The target `events_ticket_detail`'s composite foreign key REFERENCES (#35),
-   * and nothing else reads it. `id` is already the primary key, so this index
-   * adds no uniqueness the table did not have — it exists because Postgres
-   * needs a unique constraint on exactly `(event_id, id)` before it will accept
-   * a foreign key naming those two columns, which is what stops a ticket detail
-   * on event A pointing at a media row on event B. Same shape as
+   * What the composite foreign keys of `events_ticket_detail` (#35) and
+   * `events_ticket_assignment` (#36) REFERENCE, and nothing else reads it. `id`
+   * is already the primary key, so this index adds no uniqueness the table did
+   * not have — it exists because Postgres needs a unique constraint on exactly
+   * `(event_id, id)` before it will accept a foreign key naming those two
+   * columns, which is what stops a ticket detail or an assignment on event A
+   * pointing at a media row on event B. Same shape as
    * `events_place_event_id_unique` above and for the same reason.
    */
   uniqueIndex('events_media_event_id_unique').on(table.eventId, table.id)
@@ -566,6 +586,64 @@ export const ticketDetail = pgTable('events_ticket_detail', {
     columns: [table.eventId, table.mediaId],
     foreignColumns: [media.eventId, media.id],
     name: 'events_ticket_detail_event_media_fk'
+  }).onDelete('cascade')
+])
+
+/**
+ * WHO A TICKET IS FOR (#36) — as ROWS, because one ticket can cover two people.
+ *
+ * `events_media.assigned_rsvp_id` used to answer this and could only ever name
+ * one person. A pair fare, a family entry, a group booking for six behind a
+ * single QR code: every one of those had to be assigned to somebody and then
+ * explained in the chat, and the attendee standing next to them saw no ticket
+ * at all. A ticket assigned to three people is three rows here.
+ *
+ * ONE ROW PER (TICKET, PERSON) — `(media_id, rsvp_id)` is unique, so "add Ben"
+ * twice is the same state as "add Ben" once and the domain's add is a plain
+ * `on conflict do nothing`. That is what makes the two verbs this table has
+ * (add an assignee, remove an assignee) idempotent without a read-then-write.
+ *
+ * `event_id` IS DENORMALISED ON PURPOSE. It is derivable from `media_id`, and
+ * it is here because it is what the two composite foreign keys below are
+ * written over: without it, a plain `rsvp_id` reference would happily let a
+ * ticket on one trip be assigned to an RSVP on another, which is a rule the
+ * code would have to remember rather than one Postgres refuses. `loadEventBySlug`
+ * plus `assertPlanner` already checks it on the way in; this is what keeps it
+ * true of a row written any other way.
+ *
+ * BOTH FOREIGN KEYS CASCADE, and the two cascades mean different sentences.
+ * Deleting the ticket deletes who it was for, because an assignment is ABOUT a
+ * file and has no meaning without it — the same rule as `events_ticket_detail`.
+ * Deleting the RSVP deletes the assignment and leaves the ticket, which is the
+ * behaviour `assigned_rsvp_id`'s `on delete set null` had: somebody dropping out
+ * of the trip un-assigns their ticket, it does not destroy it. The ticket is
+ * then unassigned and a planner can give it to whoever takes their place.
+ *
+ * NO `updated_at`: there is nothing to update. An assignment is created or it
+ * is deleted; it has no editable field, and a column that never moves is a
+ * column that will be read as if it did.
+ */
+export const ticketAssignment = pgTable('events_ticket_assignment', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
+  mediaId: text('media_id').notNull(),
+  rsvpId: text('rsvp_id').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+}, table => [
+  uniqueIndex('events_ticket_assignment_media_rsvp_unique').on(table.mediaId, table.rsvpId),
+  index('events_ticket_assignment_media_idx').on(table.mediaId),
+  // The guest read's index: "every ticket assigned to any of my RSVPs".
+  index('events_ticket_assignment_rsvp_idx').on(table.rsvpId),
+  index('events_ticket_assignment_event_idx').on(table.eventId),
+  foreignKey({
+    columns: [table.eventId, table.mediaId],
+    foreignColumns: [media.eventId, media.id],
+    name: 'events_ticket_assignment_event_media_fk'
+  }).onDelete('cascade'),
+  foreignKey({
+    columns: [table.eventId, table.rsvpId],
+    foreignColumns: [rsvp.eventId, rsvp.id],
+    name: 'events_ticket_assignment_event_rsvp_fk'
   }).onDelete('cascade')
 ])
 

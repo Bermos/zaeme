@@ -277,7 +277,7 @@ everything planned inside zäme.
 | Bring list | `contributions.ts` | `…/contributions`, claim/release | `…/contributions` | `BringList.vue` |
 | Budget | `expenses.ts`, `accounts.ts`, `settlements.ts` | `…/budget` (read only since #48) | `…/expenses`, `…/settlements` | `BudgetCard.vue` |
 | Timeline | `events-data.ts` | read via the invite page | `…/timeline` (POST/PATCH/DELETE) | `EventTimeline.vue`, `HostTimelineCard.vue` |
-| Media | `media.ts` | `…/media/presign`, `…/media/confirm` | same + assign a ticket, delete | `MediaGallery.vue`, `HostMediaCard.vue` |
+| Media | `media.ts` | `…/media/presign`, `…/media/confirm` | same + who a ticket is for, delete | `MediaGallery.vue`, `HostMediaCard.vue` |
 | Chat | `chat.ts` | `…/messages` | `…/messages` | `EventChat.vue` |
 | Series | `series.ts` | — | `…/occurrences`, `…/members` | `HostSeriesCard.vue`, `SeriesMarquee.vue` |
 | Co-organizers | `planner-team.ts` | `/api/host/join/{token}` | `…/team` | `HostTeamCard.vue` |

@@ -13,7 +13,9 @@ import { assertPlanner, loadEventBySlug } from './permissions'
  * Photos/videos are the social gallery — anyone on the event may contribute
  * and everyone sees them. Documents (reservations, itineraries) are shared
  * papers — visible to everyone on the event. Tickets are per-person: a ticket
- * assigned to an RSVP is visible only to that attendee (and planners).
+ * is visible to the attendees it is assigned to (and to planners), and since
+ * #36 that is a LIST rather than one person — a pair fare, a family entry and
+ * one QR code for six are all one ticket several people are behind.
  */
 
 export type MediaType = 'photo' | 'video' | 'document' | 'ticket'
@@ -153,7 +155,17 @@ export interface MediaItemView {
   fileName: string
   caption: string | null
   takenAt: Date | null
-  assignedRsvpId: string | null
+  /**
+   * For a ticket, EVERY attendee it is for (#36) — a pair fare has two, a
+   * family entry has four, an unassigned ticket has none. Always empty for a
+   * photo, a video and a document: nothing else is assigned to anybody.
+   *
+   * A LIST AND NEVER A SCALAR. `assignedRsvpId` was one nullable id, which is
+   * why one ticket could not cover two people; a reader that wants "is this
+   * mine" asks whether it CONTAINS one of the viewer's RSVP ids, which is the
+   * rule `listMediaForViewer` applies below.
+   */
+  assignedRsvpIds: string[]
   /** The expense this item is the receipt for, or `null` (#29). */
   expenseId: string | null
   /**
@@ -180,9 +192,24 @@ function toDetailView(d: typeof tables.ticketDetail.$inferSelect): TicketDetailV
   }
 }
 
+/**
+ * BOTH TRAILING ARGUMENTS ARE REQUIRED, AND NEITHER HAS A DEFAULT.
+ *
+ * `assignedRsvpIds` used to be a column on the row, so it arrived here whether
+ * or not the caller had thought about it. It is a second table now, and an
+ * optional parameter defaulting to `[]` would make "this item has no assignees"
+ * and "this caller forgot to load them" the same value — on a surface where the
+ * wrong one of those is a ticket that silently stops being anybody's. #35 lost
+ * a whole release to exactly that shape with an optional `timezone` prop, so
+ * both are positional and required and `nuxt typecheck` is what notices.
+ *
+ * `null` for `detail` is how a caller SAYS "there is no detail row", which is a
+ * different statement from forgetting to look.
+ */
 function toView(
   r: typeof tables.media.$inferSelect,
-  detail?: typeof tables.ticketDetail.$inferSelect | null
+  detail: typeof tables.ticketDetail.$inferSelect | null | undefined,
+  assignedRsvpIds: string[]
 ): MediaItemView {
   return {
     id: r.id,
@@ -192,7 +219,7 @@ function toView(
     fileName: r.fileName,
     caption: r.caption,
     takenAt: r.takenAt,
-    assignedRsvpId: r.assignedRsvpId,
+    assignedRsvpIds,
     expenseId: r.expenseId,
     ticket: detail ? toDetailView(detail) : null,
     createdAt: r.createdAt
@@ -213,6 +240,47 @@ async function loadTicketDetails(mediaIds: string[]): Promise<Map<string, typeof
     .from(tables.ticketDetail)
     .where(inArray(tables.ticketDetail.mediaId, mediaIds))
   for (const d of rows) out.set(d.mediaId, d)
+  return out
+}
+
+/**
+ * WHO EACH OF THESE TICKETS IS FOR (#36), keyed by media id — ONE query for the
+ * lot, for the same reason `loadTicketDetails` above is a batch.
+ *
+ * EXPORTED, and that is the point of it rather than an accident. There are
+ * three reads that project a media row for somebody — `listMediaForPlanner`
+ * below, `listMedia` in `server/domain/events-data.ts` (which answers `/api/v1`
+ * with a different projection and a different order) and `guestListMedia` in
+ * `server/domain/guest.ts` through `listMediaForViewer` — and they share no
+ * code at all. A field added to one and not to the others is invisible to
+ * `pnpm test`: the contract test polices paths and methods, and
+ * `server/utils/v1-shapes.ts` reads its row through an unchecked cast
+ * (Bermos/zaeme#78), so a shape that reads what its feeder never selected
+ * answers `null` on the wire with `nuxt typecheck` green. #29's `expenseId` and
+ * #35's `ticket` each shipped that way. One shared loader is one fewer place
+ * for the fourth one to happen.
+ *
+ * A key is absent for a ticket nobody has been given, so every caller resolves
+ * `?? []` — which is the honest empty rather than a gap.
+ */
+export async function loadTicketAssignments(mediaIds: string[]): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>()
+  if (mediaIds.length === 0) return out
+  const rows = await useDb()
+    .select({ mediaId: tables.ticketAssignment.mediaId, rsvpId: tables.ticketAssignment.rsvpId })
+    .from(tables.ticketAssignment)
+    .where(inArray(tables.ticketAssignment.mediaId, mediaIds))
+    // Oldest assignee first, `rsvpId` breaking the tie: two rows written by one
+    // statement share `created_at` to the microsecond (Postgres `now()` is
+    // transaction time) and cuid2 ids do not sort by age, so stopping at
+    // `created_at` would give a stable-but-arbitrary order that two readers can
+    // disagree about. #37 renders this list with a name against each entry.
+    .orderBy(asc(tables.ticketAssignment.createdAt), asc(tables.ticketAssignment.rsvpId))
+  for (const r of rows) {
+    const list = out.get(r.mediaId)
+    if (list) list.push(r.rsvpId)
+    else out.set(r.mediaId, [r.rsvpId])
+  }
   return out
 }
 
@@ -243,16 +311,28 @@ export async function listMediaForViewer(eventId: string, viewerEmail: string | 
     myRsvpIds = new Set(myRsvps.map(r => r.id))
   }
 
-  const mine = rows.filter(r => r.type === 'ticket' && r.assignedRsvpId && myRsvpIds.has(r.assignedRsvpId))
+  // THE MATCHING RULE (#36), and it is an intersection rather than an equality:
+  // a ticket is this viewer's if they are ANY of its assignees. A pair fare
+  // bought for two people is on both their screens, and neither of them has to
+  // be "the" assignee for it to be theirs. (#37 then shows the whole trip's
+  // tickets with the assignee named; this is the list that says which are
+  // YOURS, and it has to be right before that can build on it.)
+  const assignments = await loadTicketAssignments(rows.filter(r => r.type === 'ticket').map(r => r.id))
+  const mine = rows.filter(r => r.type === 'ticket'
+    && (assignments.get(r.id) ?? []).some(id => myRsvpIds.has(id)))
   // Only the tickets this viewer may actually see are looked up: a detail row
   // says where somebody is sitting, so it travels with the ticket it belongs to
   // and never ahead of it.
   const details = await loadTicketDetails(mine.map(r => r.id))
 
   return {
-    gallery: rows.filter(r => r.type === 'photo' || r.type === 'video').map(r => toView(r)),
-    documents: rows.filter(r => r.type === 'document').map(r => toView(r)),
-    tickets: mine.map(r => toView(r, details.get(r.id)))
+    gallery: rows.filter(r => r.type === 'photo' || r.type === 'video').map(r => toView(r, null, [])),
+    documents: rows.filter(r => r.type === 'document').map(r => toView(r, null, [])),
+    // The co-assignees travel with the ticket. Everybody named here is already
+    // holding the same file — that is what sharing a pair fare means — so the
+    // list widens nothing, and it is what lets a screen say "yours and Ben's"
+    // rather than making somebody guess why the seat count is two.
+    tickets: mine.map(r => toView(r, details.get(r.id), assignments.get(r.id) ?? []))
   }
 }
 
@@ -265,34 +345,129 @@ export async function listMediaForPlanner(userId: string, slug: string) {
     .from(tables.media)
     .where(and(eq(tables.media.eventId, ev.id), eq(tables.media.status, 'ready')))
     .orderBy(asc(tables.media.type), desc(tables.media.createdAt))
-  const details = await loadTicketDetails(rows.filter(r => r.type === 'ticket').map(r => r.id))
-  return rows.map(r => toView(r, details.get(r.id)))
+  const ticketIds = rows.filter(r => r.type === 'ticket').map(r => r.id)
+  const [details, assignments] = await Promise.all([
+    loadTicketDetails(ticketIds),
+    loadTicketAssignments(ticketIds)
+  ])
+  return rows.map(r => toView(r, details.get(r.id), assignments.get(r.id) ?? []))
 }
 
-/** Assign (or unassign) a ticket to an attendee's RSVP (owner/co-planner only). */
-export async function assignTicket(userId: string, slug: string, mediaId: string, rsvpId: string | null) {
+/* --------------------------- who a ticket is for (#36) --------------------- */
+
+/**
+ * The planner's gate on assignment, the event, and the ticket it names — shared
+ * by the add and the remove below so the two cannot drift apart about which
+ * role may do it or what a bad id answers.
+ *
+ * `logistics` is deliberately not one of the roles: a ticket is somebody's
+ * seat, and the role set that may say who it is for is the role set that may
+ * say what is written on it (`setTicketDetail`, #74's lesson applied).
+ */
+async function assertMayAssign(userId: string, slug: string, mediaId: string) {
   const ev = await loadEventBySlug(slug)
   await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
 
-  if (rsvpId) {
-    const [target] = await useDb()
-      .select({ id: tables.rsvp.id })
-      .from(tables.rsvp)
-      .where(and(eq(tables.rsvp.id, rsvpId), eq(tables.rsvp.eventId, ev.id)))
-      .limit(1)
-    if (!target) throw createError({ statusCode: 404, message: 'RSVP not found' })
+  const [item] = await useDb()
+    .select()
+    .from(tables.media)
+    .where(and(eq(tables.media.id, mediaId), eq(tables.media.eventId, ev.id)))
+    .limit(1)
+  // The same 404 for "no such id" and "a media id from another trip": which of
+  // the two it is, is not something this caller is entitled to learn.
+  if (!item) throw createError({ statusCode: 404, message: 'Ticket not found' })
+  if (item.type !== 'ticket') {
+    throw createError({
+      statusCode: 422,
+      message: 'Only a ticket is assigned to somebody — a photo and a shared document belong to the whole trip'
+    })
   }
+  return { ev, item }
+}
 
-  const [updated] = await useDb()
-    .update(tables.media)
-    .set({ assignedRsvpId: rsvpId })
-    .where(and(eq(tables.media.id, mediaId), eq(tables.media.eventId, ev.id), eq(tables.media.type, 'ticket')))
-    .returning()
-  if (!updated) throw createError({ statusCode: 404, message: 'Ticket not found' })
-  // The detail comes back with it (#35). Answering `ticket: null` here would be
-  // this function claiming a ticket has nothing written on it because it was
-  // just re-assigned, which is a different sentence from the one it means.
-  return toView(updated, (await loadTicketDetails([updated.id])).get(updated.id))
+/**
+ * The answer both verbs give: the ticket as it now stands, with everybody it is
+ * for and whatever is written on it.
+ *
+ * The detail comes back with it (#35). Answering `ticket: null` here would be
+ * this function claiming a ticket has nothing written on it because its
+ * assignees just changed, which is a different sentence from the one it means.
+ */
+async function ticketAfterAssignment(item: typeof tables.media.$inferSelect): Promise<MediaItemView> {
+  const [details, assignments] = await Promise.all([
+    loadTicketDetails([item.id]),
+    loadTicketAssignments([item.id])
+  ])
+  return toView(item, details.get(item.id), assignments.get(item.id) ?? [])
+}
+
+/**
+ * ADD one attendee to a ticket (owner/co-planner only). A ticket assigned to
+ * three people has been through here three times.
+ *
+ * IDEMPOTENT, and that is the unique index doing it rather than a read followed
+ * by a write: `on conflict do nothing` on `(media_id, rsvp_id)` means two
+ * planners clicking the same name at the same moment leave one row, with no
+ * transaction and nothing to serialise on. "Ben is on this ticket" is the state
+ * the caller asked for and it holds either way, so the second call is a 200 and
+ * not a 409 — a refusal here would be the instance disagreeing with somebody
+ * about something they and it both want.
+ */
+export async function addTicketAssignee(
+  userId: string,
+  slug: string,
+  mediaId: string,
+  rsvpId: string
+): Promise<MediaItemView> {
+  const { ev, item } = await assertMayAssign(userId, slug, mediaId)
+
+  const [target] = await useDb()
+    .select({ id: tables.rsvp.id })
+    .from(tables.rsvp)
+    .where(and(eq(tables.rsvp.id, rsvpId), eq(tables.rsvp.eventId, ev.id)))
+    .limit(1)
+  // An RSVP on ANOTHER trip is the same 404 as one that does not exist, and the
+  // composite foreign key on `events_ticket_assignment` refuses it underneath
+  // this whatever the check above does.
+  if (!target) throw createError({ statusCode: 404, message: 'RSVP not found' })
+
+  await useDb()
+    .insert(tables.ticketAssignment)
+    .values({ id: createId(), eventId: ev.id, mediaId: item.id, rsvpId })
+    .onConflictDoNothing({ target: [tables.ticketAssignment.mediaId, tables.ticketAssignment.rsvpId] })
+
+  return ticketAfterAssignment(item)
+}
+
+/**
+ * REMOVE one attendee from a ticket (owner/co-planner only). The others stay —
+ * which is the whole difference between this and the single column it replaces,
+ * where "unassign" could only ever mean "nobody has this ticket now".
+ *
+ * Idempotent in the same way and for the same reason as the add: removing
+ * somebody who is not on the ticket answers 200 with the ticket as it stands,
+ * because "Ben is not on this" is the state the caller asked for. It deletes on
+ * `(event_id, media_id, rsvp_id)` rather than on the pair alone, so a media id
+ * from another trip cannot reach this row even if the gate above ever stopped
+ * looking.
+ */
+export async function removeTicketAssignee(
+  userId: string,
+  slug: string,
+  mediaId: string,
+  rsvpId: string
+): Promise<MediaItemView> {
+  const { ev, item } = await assertMayAssign(userId, slug, mediaId)
+
+  await useDb()
+    .delete(tables.ticketAssignment)
+    .where(and(
+      eq(tables.ticketAssignment.eventId, ev.id),
+      eq(tables.ticketAssignment.mediaId, item.id),
+      eq(tables.ticketAssignment.rsvpId, rsvpId)
+    ))
+
+  return ticketAfterAssignment(item)
 }
 
 /* ------------------------- what the ticket says (#35) ---------------------- */
@@ -394,7 +569,11 @@ export async function setTicketDetail(
     .values({ id: createId(), eventId: ev.id, mediaId: item.id, ...values })
     .onConflictDoUpdate({ target: tables.ticketDetail.mediaId, set: values })
     .returning()
-  return toView(item, saved)
+  // Who it is for comes back with it (#36), for the mirror of the reason the
+  // detail comes back off an assignment: this answer is what the host card
+  // re-renders from, and a ticket that reported nobody because somebody typed a
+  // seat number into it would read as an assignment that had been undone.
+  return toView(item, saved, (await loadTicketAssignments([item.id])).get(item.id) ?? [])
 }
 
 /**
@@ -519,7 +698,10 @@ export async function pinReceipt(eventId: string, expenseId: string, mediaId: st
     // above and this write. A refusal, not a 500 — every other way this
     // function declines is a status somebody can act on.
     if (!pinned) throw createError({ statusCode: 404, message: 'Photo not found' })
-    return toView(pinned)
+    // No assignees, and it is not a lookup that came back empty: `RECEIPT_TYPES`
+    // is `photo` and `document`, the refusal above is what enforces it, and
+    // neither of those is ever assigned to anybody (#36).
+    return toView(pinned, null, [])
   })
 }
 
@@ -566,7 +748,9 @@ export async function listReceiptsByExpense(eventId: string, expenseIds: string[
     ))
   for (const r of rows) {
     // `expenseId` is non-null by the `inArray` above; the guard is for the type.
-    if (r.expenseId) out.set(r.expenseId, toView(r))
+    // Assignees empty for the reason `pinReceipt` gives: only a photo or a
+    // shared document can be a receipt, and neither is anybody's in particular.
+    if (r.expenseId) out.set(r.expenseId, toView(r, null, []))
   }
   return out
 }

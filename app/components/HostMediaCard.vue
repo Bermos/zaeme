@@ -14,7 +14,12 @@ interface MediaItem {
   mimeType: string
   fileName: string
   caption: string | null
-  assignedRsvpId: string | null
+  /**
+   * EVERY attendee this ticket is for (#36) — a pair fare has two names on it
+   * here. Empty for a photo, a video and a shared document, and empty for a
+   * ticket nobody has been given yet.
+   */
+  assignedRsvpIds: string[]
   ticket?: TicketDetailFields | null
   url: string
 }
@@ -46,20 +51,54 @@ const gallery = computed(() => (data.value?.media ?? []).filter(m => m.type === 
 const documents = computed(() => (data.value?.media ?? []).filter(m => m.type === 'document'))
 const tickets = computed(() => (data.value?.media ?? []).filter(m => m.type === 'ticket'))
 
-const rsvpItems = computed(() => [
-  { label: 'Unassigned', value: null as string | null },
-  ...props.rsvps.map(r => ({ label: r.guestName || r.guestEmail || r.id, value: r.id as string | null }))
-])
+/**
+ * A MULTI-SELECT, because one ticket can cover two people (#36).
+ *
+ * The old control was a single `USelect` whose first entry was "Unassigned" —
+ * which made "nobody" a THIRD kind of value beside the attendees and made
+ * giving a pair fare to both halves of a couple impossible: picking the second
+ * name took it away from the first. A `USelectMenu` in `multiple` mode has no
+ * such entry, because an empty selection already says it: nothing is chosen,
+ * nobody has the ticket.
+ */
+const rsvpItems = computed(() =>
+  props.rsvps.map(r => ({ label: r.guestName || r.guestEmail || r.id, value: r.id }))
+)
 
-async function assign(mediaId: string, rsvpId: string | null) {
+function nameFor(rsvpId: string): string {
+  const r = props.rsvps.find(x => x.id === rsvpId)
+  // An id rather than a blank: an assignee whose RSVP has gone from this list
+  // is a state worth seeing on the screen that can fix it.
+  return r ? (r.guestName || r.guestEmail || r.id) : rsvpId
+}
+
+/**
+ * THE SELECTION IS TURNED INTO ADDS AND REMOVES, one call each, and never into
+ * a "set these people" call.
+ *
+ * The server has two verbs and no third one on purpose: a set would need the
+ * whole list to be authoritative, so two planners opening this card at the same
+ * time would silently undo each other's additions — the second save carries a
+ * list assembled before the first one happened. Add and remove compose; a set
+ * does not.
+ *
+ * Both verbs are idempotent, so a request that is already true is a 200 and
+ * costs a round trip, which is why only the DIFFERENCE is sent.
+ */
+async function setAssignees(t: MediaItem, next: string[]) {
+  const was = t.assignedRsvpIds
+  const added = next.filter(id => !was.includes(id))
+  const removed = was.filter(id => !next.includes(id))
   try {
-    await $fetch(`/api/host/events/${props.slug}/media/${mediaId}/assign`, {
-      method: 'POST',
-      body: { rsvpId }
-    })
+    const base = `/api/host/events/${props.slug}/media/${t.id}/assignees`
+    for (const rsvpId of added) await $fetch(base, { method: 'POST', body: { rsvpId } })
+    for (const rsvpId of removed) await $fetch(`${base}/${rsvpId}`, { method: 'DELETE' })
     await refresh()
   } catch (e) {
     toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not assign that', color: 'error' })
+    // The control is bound to the server's answer, so a failed call must not
+    // leave the screen showing the selection that did not take.
+    await refresh()
   }
 }
 
@@ -248,12 +287,15 @@ const zoneLine = computed(() => zoneNote(props.timezone))
               {{ t.caption || t.fileName }}
             </a>
             <div class="flex items-center gap-1 shrink-0">
-              <USelect
-                :model-value="t.assignedRsvpId"
+              <USelectMenu
+                :model-value="t.assignedRsvpIds"
                 :items="rsvpItems"
+                value-key="value"
+                multiple
                 class="w-44"
                 size="sm"
-                @update:model-value="(v: string | null) => assign(t.id, v)"
+                placeholder="Nobody yet"
+                @update:model-value="(v: string[]) => setAssignees(t, v)"
               />
               <UButton
                 size="xs"
@@ -265,6 +307,17 @@ const zoneLine = computed(() => zoneNote(props.timezone))
               </UButton>
             </div>
           </div>
+
+          <!-- WHO IT IS FOR, spelled out (#36). The select above holds the same
+               names, but it is 11rem wide and a family entry has four of them:
+               a pair fare that reads "Ana, Ben" here is the one place a planner
+               can see at a glance that the second name really did stick. -->
+          <p
+            v-if="t.assignedRsvpIds.length"
+            class="text-muted"
+          >
+            For {{ t.assignedRsvpIds.map(nameFor).join(', ') }}
+          </p>
 
           <!-- What it says, as the attendee will read it. Absent when nobody
                has written anything, which is the ordinary case. -->

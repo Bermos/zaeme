@@ -422,6 +422,13 @@ const GUEST_UPLOAD_TYPES: MediaType[] = ['photo', 'video']
  * What this invite's holder may see: the gallery, the shared documents, and —
  * matched through the viewer's email — their own tickets. Storage keys only;
  * the app signs download URLs.
+ *
+ * "THEIR OWN" IS AN INTERSECTION, NOT AN EQUALITY (#36). A ticket is this
+ * viewer's if they are ANY of its assignees, so a pair fare bought for two
+ * people is on both their screens and neither of them has to be "the" one it
+ * belongs to. `listMediaForViewer` in `server/domain/media.ts` is where that
+ * rule is written; this function's job is the credential, and the email is
+ * still the whole of the identity behind it.
  */
 export async function guestListMedia(token: string, viewerEmail: string | null) {
   const { event: ev } = await resolveInviteToken(token)
