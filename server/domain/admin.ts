@@ -402,7 +402,23 @@ export async function mediaLibrary(filter: MediaFilter = {}) {
       sizeBytes: m.sizeBytes,
       takenAt: m.takenAt,
       createdAt: m.createdAt,
-      assignedRsvpId: m.assignedRsvpId,
+      /**
+       * HOW MANY PEOPLE THIS TICKET IS FOR (#36) — a count, not the ids.
+       *
+       * The library is a cross-event housekeeping list and the one thing it
+       * says about assignment is the `unassigned` badge on `/admin/media`:
+       * a ticket nobody will be able to see. `assigned_rsvp_id` used to answer
+       * that by being null; a many-to-many answers it by being empty, and 0 is
+       * the same sentence with none of the ids — which keeps this read from
+       * handing the instance owner a list of RSVP ids across every event they
+       * have no use for.
+       *
+       * A CORRELATED SUB-SELECT rather than a join, for the reason the note at
+       * the top of this file gives: a join to a 0..N table multiplies the rows
+       * of a paginated list, so `limit`/`offset` would stop counting items and
+       * start counting assignments.
+       */
+      assigneeCount: sql<number>`(select count(*)::int from events_ticket_assignment ta where ta.media_id = ${m.id})`,
       eventSlug: e.slug,
       eventTitle: e.title
     })

@@ -356,6 +356,57 @@ ticket_field() {
     })' "$2" "$3"
 }
 
+# `ticket_assignees <body> <mediaId>` — who one ticket is for (#36), as a
+# SORTED comma-joined list of RSVP ids, and four DIFFERENT answers for the four
+# different things that can be true:
+#
+#   no-such-item   the viewer cannot see that media row at all
+#   no-field       the row is there and carries no `assignedRsvpIds` AT ALL
+#   none           the field is there and empty — nobody has this ticket
+#   a,b,c          the ids, sorted, so the assertion does not depend on the
+#                  order a list happened to come back in
+#
+# `no-field` AND `none` ARE KEPT APART BECAUSE THEY ARE DIFFERENT FAILURES, and
+# WHICH of them a broken read produces depends on the surface — which is worth
+# knowing before leaning on either.
+#
+# On the host and invite surfaces the domain view goes out as it is, so a read
+# that stopped carrying the field drops the key and this answers `no-field`. On
+# `/api/v1` it cannot: `server/utils/v1-shapes.ts` normalises a missing field to
+# `[]` (the contract says the field is always present), so the same bug arrives
+# there as `none` — a ticket that reads as nobody's. That is the #78 shape, and
+# `listMedia` has shipped it twice already (#29's `expenseId`, #35's `ticket`).
+#
+# SO EVERY ASSERTION BELOW NAMES THE IDS IT EXPECTS rather than settling for
+# "not empty". Measured: removing `assignedRsvpIds` from the `/api/v1` feeder
+# reddens 8 of these — every one of them an equality against a non-empty list —
+# and not one of them is the `no-field` line, because on that surface there is
+# no such answer to give.
+ticket_assignees() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let items
+      try { items = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const raw = Array.isArray(items) ? items : (items.media ?? items.tickets ?? [])
+      // A write answers with ONE item under `media`; a list answers an array.
+      const list = Array.isArray(raw) ? raw : [raw]
+      const m = list.find(x => x && x.id === process.argv[1])
+      if (!m) return process.stdout.write("no-such-item")
+      if (!Object.hasOwn(m, "assignedRsvpIds")) return process.stdout.write("no-field")
+      const ids = m.assignedRsvpIds
+      if (!Array.isArray(ids)) return process.stdout.write("not-a-list")
+      process.stdout.write(ids.length === 0 ? "none" : [...ids].sort().join(","))
+    })' "$2"
+}
+
+# `sorted_ids <id>...` — the same sort `ticket_assignees` applies, so an
+# expectation is built from the ids a test minted rather than typed out in
+# whatever order they were created in.
+sorted_ids() {
+  printf '%s\n' "$@" | LC_ALL=C sort | paste -sd, -
+}
+
 # `rsvp_id <body> <email>` — the id of the RSVP with that address, from a
 # `{rsvps:…}` body. Matched on the ADDRESS rather than on "the first one": by
 # the time a ticket is assigned the trip has more than one attendee, and
@@ -3114,9 +3165,9 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}
     body "${JSON[@]}" -X POST "$BASE/api/invites/$TDTOK/rsvp" \
       -d "{\"status\":\"yes\",\"guestName\":\"CI Guest\",\"guestEmail\":\"$TDEMAIL\"}" > /dev/null
     TDRID=$(rsvp_id "$(body "${AUTH[@]}" "$API/events/$TDSLUG/rsvps")" "$TDEMAIL")
-    check "a planner assigns the ticket to them"    200 "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/$TDMID/assign" -d "{\"rsvpId\":\"$TDRID\"}"
+    check "a planner assigns the ticket to them"    200 "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/$TDMID/assignees" -d "{\"rsvpId\":\"$TDRID\"}"
     equals "...without losing what is written on it" \
-      "$(ticket_field "$(body "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/$TDMID/assign" -d "{\"rsvpId\":\"$TDRID\"}")" "$TDMID" seat)" "41A"
+      "$(ticket_field "$(body "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/$TDMID/assignees" -d "{\"rsvpId\":\"$TDRID\"}")" "$TDMID" seat)" "41A"
     TDGUEST=$(body "$BASE/api/invites/$TDTOK/media?email=$TDEMAIL")
     equals "the attendee's own ticket carries the seat" "$(ticket_field "$TDGUEST" "$TDMID" seat)" "41A"
     equals "...and the coach beside it"             "$(ticket_field "$TDGUEST" "$TDMID" coach)" "12"
@@ -3200,6 +3251,252 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}
   fi
 else
   echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
+fi
+
+echo
+echo "== one ticket cannot cover two people (Bermos/zaeme#36) =="
+# `events_media.assigned_rsvp_id` was ONE nullable foreign key, so a ticket
+# belonged to exactly one person or to nobody. A pair fare, a family entry, a
+# group booking for six behind one QR code: each had to be given to one of them
+# and explained in the chat, while everybody else on it saw no ticket at all.
+# `events_ticket_assignment` is the many-to-many that replaces it, and the
+# column is GONE.
+#
+# WHAT ONLY A DATABASE CAN SHOW, which is why this block is here and not in
+# `pnpm test`: the join, the unique index that makes "add Ben" idempotent, the
+# TWO composite foreign keys that stop a ticket on one trip being given to an
+# RSVP on another, and the cascade that un-assigns a ticket when its attendee
+# leaves. `pnpm test` reads the schema file and executes no SQL at all.
+#
+# AND THE #78 TRAP, WHICH IS WHY IT WRITES ON ONE SURFACE AND READS ON ANOTHER.
+# There are THREE media reads that share no code — the host card's, `/api/v1`'s
+# (a different projection, a different order) and the invite link's — and
+# `v1-shapes.ts` casts its row unchecked, so a read that never selected
+# `assignedRsvpIds` answers `[]` with the typecheck green. That is exactly how
+# `expenseId` (#29) and `ticket` (#35) each shipped wrong for a release. So
+# every assignment below is MADE on the host surface and READ back on at least
+# one other, and `ticket_assignees` answers `no-field` rather than `none` when
+# a surface has stopped carrying the field at all.
+#
+# IT LEAVES ITS TICKET ASSIGNED, deliberately, where the #35 block deletes its
+# own. `scripts/ci-upgrade-check.mjs` compares what the previous release said
+# about a ticket against what this release says after the migration, and a
+# suite that tidied every assignment away would leave that comparison with
+# nothing but empty lists to agree about.
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  TAP=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+
+  # Its own trip, published so an invite token resolves on it: this script
+  # re-runs against the previous run's rows.
+  TASLUG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke pair fare $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TASLUG/status" -d '{"status":"published"}' > /dev/null
+  TATOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TASLUG/invites" -d '{"label":"Pair fare smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  TAHOST="$BASE/api/host/events/$TASLUG"
+  echo "  trip: $TASLUG"
+
+  # --- WHO MAY SAY WHO A TICKET IS FOR. Needs no object storage: every
+  #     credential gate runs before the media row is looked up. The add and the
+  #     remove are separate routes now, so both are asked — a gate on one of a
+  #     pair of verbs is the half of a boundary that gets forgotten.
+  check "an anonymous assignment is refused"       401 "${JSON[@]}" -X POST "$TAHOST/media/nope/assignees" -d '{"rsvpId":"nope"}'
+  check "...and an anonymous removal too"          401 "${JSON[@]}" -X DELETE "$TAHOST/media/nope/assignees/nope"
+  check "a service token is not a planner here"    401 "${AUTH[@]}" "${JSON[@]}" -X POST "$TAHOST/media/nope/assignees" -d '{"rsvpId":"nope"}'
+  check "the invite link never gained the route"   404 "${JSON[@]}" -X POST "$BASE/api/invites/$TATOK/media/nope/assignees" -d '{"rsvpId":"nope"}'
+  check "...nor did the machine API"               404 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TASLUG/media/nope/assignees" -d '{"rsvpId":"nope"}'
+  check "...nor the account surface"               404 "${TAP[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$TASLUG/media/nope/assignees" -d '{"rsvpId":"nope"}'
+  # THE ROUTE THAT USED TO DO THIS IS GONE, and 404 is what says so. A `set`
+  # verb surviving beside `add`/`remove` would be a third way to change the
+  # same rows — and the one that cannot express a pair fare.
+  check "the old set-the-one-attendee route is gone" 404 "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/nope/assign" -d '{"rsvpId":"nope"}'
+  # A PLANNER naming a ticket that does not exist gets a 404 rather than a 403:
+  # the line that says the refusals above are about the CREDENTIAL and not
+  # about the made-up media id they all carry.
+  check "a planner with no such ticket gets a 404" 404 "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/nope/assignees" -d '{"rsvpId":"nope"}'
+  check "...and the same on the removal"           404 "${TAP[@]}" "${JSON[@]}" -X DELETE "$TAHOST/media/nope/assignees/nope"
+  # AND THE BODY IS STILL REQUIRED TO NAME SOMEBODY. `{"rsvpId":null}` used to
+  # be how the old route meant "unassign"; there is no such request now, and a
+  # 400 rather than a 200-that-did-nothing is what says the meaning went away
+  # with the route.
+  check "assigning to nobody is not a request"     400 "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/nope/assignees" -d '{"rsvpId":null}'
+
+  # ASK WHAT THE GUARD PERMITS, NOT WHAT IT FORBIDS (#74). `logistics` is a real
+  # planner row and is the one role `assertPlanner(roles: [owner, co_planner])`
+  # exists to keep out, so the 403 it earns is a different question from the
+  # credential refusals above. Needs the second account.
+  if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+    TAG=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
+    check "an account with no standing on the trip" 403 "${TAG[@]}" "${JSON[@]}" -X POST "$TAHOST/media/nope/assignees" -d '{"rsvpId":"nope"}'
+    TALOG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TASLUG/planner-invites" -d '{"role":"logistics"}' \
+      | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    contains "a second account really is a logistics planner" \
+      "$(body "${TAG[@]}" "${JSON[@]}" -X POST "$BASE/api/host/join/$TALOG/accept")" '"role":"logistics"'
+    check "...and a logistics planner may not assign" 403 "${TAG[@]}" "${JSON[@]}" -X POST "$TAHOST/media/nope/assignees" -d '{"rsvpId":"nope"}'
+    check "...nor un-assign"                          403 "${TAG[@]}" "${JSON[@]}" -X DELETE "$TAHOST/media/nope/assignees/nope"
+  else
+    echo "  skip  set ZAEME_TEST_GUEST_COOKIE to run the logistics-planner half"
+  fi
+
+  # --- THE ROWS THEMSELVES. These need a bucket, because there is no ticket
+  #     without an upload, and skip as ONE line without one — exactly like the
+  #     #35 block above. CI always has `adobe/s3mock` and fails on any `skip`.
+  if [ -n "${S3_BUCKET:-}${R2_BUCKET:-}" ]; then
+    TAPDF='%PDF-1.4 one QR code, three people through the barrier.'
+    TASIZE=${#TAPDF}
+    TAPRE=$(body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/presign" \
+      -d "{\"type\":\"ticket\",\"fileName\":\"family.pdf\",\"mimeType\":\"application/pdf\",\"sizeBytes\":$TASIZE}")
+    TAMID=$(json_field "$TAPRE" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: application/pdf' --data-binary "$TAPDF" "$(json_field "$TAPRE" upload.url)"
+    check "a planner uploads a family ticket"      200 "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/confirm" -d "{\"mediaId\":\"$TAMID\"}"
+
+    # FOUR people on the trip and only three on the ticket. The fourth is the
+    # fixture the wrong answer needs: a rule that marked every ticket as
+    # everybody's would pass every line below without them.
+    for who in ana ben cy dee; do
+      body "${JSON[@]}" -X POST "$BASE/api/invites/$TATOK/rsvp" \
+        -d "{\"status\":\"yes\",\"guestName\":\"${who}\",\"guestEmail\":\"$who-$SUFFIX@example.com\"}" > /dev/null
+    done
+    TARSVPS=$(body "${AUTH[@]}" "$API/events/$TASLUG/rsvps")
+    TAANA=$(rsvp_id "$TARSVPS" "ana-$SUFFIX@example.com")
+    TABEN=$(rsvp_id "$TARSVPS" "ben-$SUFFIX@example.com")
+    TACY=$(rsvp_id "$TARSVPS" "cy-$SUFFIX@example.com")
+    TADEE=$(rsvp_id "$TARSVPS" "dee-$SUFFIX@example.com")
+    equals "four people RSVP'd, and they are four"  \
+      "$(printf '%s\n' "$TAANA" "$TABEN" "$TACY" "$TADEE" | grep -c '^no-such-rsvp$')" "0"
+
+    # A FRESH TICKET IS NOBODY'S, and `none` rather than `no-field` is the line
+    # that says the field is being carried at all — see the helper's header.
+    TAV1=$(body "${AUTH[@]}" "$API/events/$TASLUG/media")
+    equals "a fresh ticket is for nobody"          "$(ticket_assignees "$TAV1" "$TAMID")" "none"
+    equals "...on the host surface too"            "$(ticket_assignees "$(body "${TAP[@]}" "$TAHOST/media")" "$TAMID")" "none"
+    contains "...as an empty list, not a gap"      "$TAV1" '"assignedRsvpIds":[]'
+    # AND THE COLUMN IT REPLACED IS GONE FROM THE WIRE. A scalar left beside the
+    # list is two answers to one question, and the one the old clients read.
+    excludes "...and no single assignee beside it" "$TAV1" 'assignedRsvpId"'
+
+    # ACCEPTANCE 1: A TICKET ASSIGNED TO THREE PEOPLE IS MARKED AS THEIRS FOR
+    # ALL THREE. Written on the HOST surface, one call per person, and read back
+    # on the MACHINE one — which is the pair of surfaces the #78 trap lives
+    # between.
+    TAADD=$(body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAMID/assignees" -d "{\"rsvpId\":\"$TAANA\"}")
+    equals "the first attendee is on the ticket"   "$(ticket_assignees "$TAADD" "$TAMID")" "$TAANA"
+    body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAMID/assignees" -d "{\"rsvpId\":\"$TABEN\"}" > /dev/null
+    TAADD3=$(body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAMID/assignees" -d "{\"rsvpId\":\"$TACY\"}")
+    TATHREE=$(sorted_ids "$TAANA" "$TABEN" "$TACY")
+    equals "...and so are the second and the third" "$(ticket_assignees "$TAADD3" "$TAMID")" "$TATHREE"
+    equals "...STORED, not just echoed back"       "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAMID")" "$TATHREE"
+    equals "...and the host card agrees"           "$(ticket_assignees "$(body "${TAP[@]}" "$TAHOST/media")" "$TAMID")" "$TATHREE"
+
+    # THE SAME TICKET IS ON ALL THREE SCREENS. The guest read is the surface the
+    # issue is actually about: one file, three people, each of whom sees it as
+    # theirs. Read through the invite link, which is a third credential and a
+    # third projection.
+    TAGANA=$(body "$BASE/api/invites/$TATOK/media?email=ana-$SUFFIX@example.com")
+    TAGBEN=$(body "$BASE/api/invites/$TATOK/media?email=ben-$SUFFIX@example.com")
+    TAGCY=$(body "$BASE/api/invites/$TATOK/media?email=cy-$SUFFIX@example.com")
+    equals "the first attendee sees it as theirs"  "$(ticket_assignees "$TAGANA" "$TAMID")" "$TATHREE"
+    equals "...and so does the second"             "$(ticket_assignees "$TAGBEN" "$TAMID")" "$TATHREE"
+    equals "...and so does the third"              "$(ticket_assignees "$TAGCY" "$TAMID")" "$TATHREE"
+    contains "...each of them getting the file"    "$TAGANA" 'family.pdf'
+    contains "...alongside a SIGNED download URL"  "$TAGANA" 'X-Amz-Signature='
+    # AND NO FURTHER. The fourth attendee is on the same trip, holding the same
+    # forwarded link, and is not on this ticket.
+    TAGDEE=$(body "$BASE/api/invites/$TATOK/media?email=dee-$SUFFIX@example.com")
+    equals "the fourth attendee sees no ticket"    "$(ticket_assignees "$TAGDEE" "$TAMID")" "no-such-item"
+    excludes "...and not its filename either"      "$TAGDEE" 'family.pdf'
+    equals "a stranger on the link sees no ticket" \
+      "$(ticket_assignees "$(body "$BASE/api/invites/$TATOK/media?email=nobody@example.com")" "$TAMID")" "no-such-item"
+
+    # ADDING SOMEBODY ALREADY ON IT IS THE SAME STATE, not a 409 and not a
+    # fourth row. This is the `(media_id, rsvp_id)` unique index doing the work,
+    # and the count is what proves it — a duplicate row would read as four ids.
+    check "adding the same person again is a 200"  200 "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAMID/assignees" -d "{\"rsvpId\":\"$TABEN\"}"
+    equals "...and leaves three people, not four"  "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAMID")" "$TATHREE"
+
+    # ACCEPTANCE 2: REMOVING ONE ASSIGNEE LEAVES THE OTHERS. The whole of what
+    # the old column could not do: its only "remove" meant nobody has it now.
+    TAREM=$(body "${TAP[@]}" "${JSON[@]}" -X DELETE "$TAHOST/media/$TAMID/assignees/$TABEN")
+    TATWO=$(sorted_ids "$TAANA" "$TACY")
+    equals "removing one leaves the other two"     "$(ticket_assignees "$TAREM" "$TAMID")" "$TATWO"
+    equals "...on the machine surface as well"     "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAMID")" "$TATWO"
+    equals "...and the one removed loses the ticket" \
+      "$(ticket_assignees "$(body "$BASE/api/invites/$TATOK/media?email=ben-$SUFFIX@example.com")" "$TAMID")" "no-such-item"
+    equals "...while the first still has it, now for two" \
+      "$(ticket_assignees "$(body "$BASE/api/invites/$TATOK/media?email=ana-$SUFFIX@example.com")" "$TAMID")" "$TATWO"
+    # Idempotent in the same direction: removing somebody who is not on it is
+    # the state the caller asked for, so it is a 200 and changes nothing.
+    check "removing a non-assignee is a 200"       200 "${TAP[@]}" "${JSON[@]}" -X DELETE "$TAHOST/media/$TAMID/assignees/$TABEN"
+    equals "...and still leaves the other two"     "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAMID")" "$TATWO"
+
+    # WHAT IS WRITTEN ON IT SURVIVES A CHANGE OF ASSIGNEE, and vice versa. The
+    # two tables are independent and the answers carry each other, so neither
+    # write may read as the other having been undone (#35).
+    body "${TAP[@]}" "${JSON[@]}" -X PUT "$TAHOST/media/$TAMID/detail" -d '{"seat":"41A","coach":"12"}' > /dev/null
+    TAWITH=$(body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAMID/assignees" -d "{\"rsvpId\":\"$TABEN\"}")
+    equals "an assignment keeps what is on the ticket" "$(ticket_field "$TAWITH" "$TAMID" seat)" "41A"
+    TADET=$(body "${TAP[@]}" "${JSON[@]}" -X PUT "$TAHOST/media/$TAMID/detail" -d '{"seat":"9F"}')
+    equals "...and writing the seat keeps the people" "$(ticket_assignees "$TADET" "$TAMID")" "$TATHREE"
+    equals "...the attendee reading the new seat"  \
+      "$(ticket_field "$(body "$BASE/api/invites/$TATOK/media?email=cy-$SUFFIX@example.com")" "$TAMID" seat)" "9F"
+
+    # A PHOTO IS NOBODY'S IN PARTICULAR, and 422 rather than 400: a 400 would
+    # mean zod refused the body and the domain rule was never consulted.
+    TAPPRE=$(body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/presign" \
+      -d '{"type":"photo","fileName":"platform.png","mimeType":"image/png","sizeBytes":8}')
+    TAPID=$(json_field "$TAPPRE" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: image/png' --data-binary 'eightbit' "$(json_field "$TAPPRE" upload.url)"
+    body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/confirm" -d "{\"mediaId\":\"$TAPID\"}" > /dev/null
+    check "a photo is assigned to nobody"          422 "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAPID/assignees" -d "{\"rsvpId\":\"$TAANA\"}"
+    contains "...and says why, in words"           "$(body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAPID/assignees" -d "{\"rsvpId\":\"$TAANA\"}")" 'Only a ticket'
+    equals "...and the photo still reports nobody" "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAPID")" "none"
+
+    # AN RSVP FROM ANOTHER TRIP IS A 404, and it is a REAL one rather than a
+    # made-up id: the two are the same answer today and stop being the same the
+    # moment somebody drops the `eventId` half of the lookup, at which point a
+    # made-up id still 404s and a stranger's ticket can be handed to somebody on
+    # a different holiday. The composite foreign key refuses it underneath.
+    TASLUG2=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+      -d "{\"title\":\"Smoke pair fare other $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+    body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TASLUG2/status" -d '{"status":"published"}' > /dev/null
+    TATOK2=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TASLUG2/invites" -d '{"label":"Other trip"}' \
+      | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    body "${JSON[@]}" -X POST "$BASE/api/invites/$TATOK2/rsvp" \
+      -d "{\"status\":\"yes\",\"guestName\":\"Elsewhere\",\"guestEmail\":\"elsewhere-$SUFFIX@example.com\"}" > /dev/null
+    TAELSE=$(rsvp_id "$(body "${AUTH[@]}" "$API/events/$TASLUG2/rsvps")" "elsewhere-$SUFFIX@example.com")
+    equals "the other trip really has an attendee" "$([ "$TAELSE" = "no-such-rsvp" ] && echo missing || echo found)" "found"
+    check "an RSVP from ANOTHER trip is a 404"     404 "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAMID/assignees" -d "{\"rsvpId\":\"$TAELSE\"}"
+    equals "...and the ticket is unchanged"        "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAMID")" "$TATHREE"
+
+    # THE ATTENDEE LEAVING TAKES THEIR ASSIGNMENT AND NOT THE TICKET. This is
+    # the `on delete cascade` on `(event_id, rsvp_id)` — the behaviour the old
+    # column's `on delete set null` had, now per-person. Postgres does it or
+    # nothing does; a missing cascade would make the DELETE a 500 instead.
+    check "a planner removes the third attendee"   200 "${AUTH[@]}" -X DELETE "$API/events/$TASLUG/rsvps/$TACY"
+    equals "...and the ticket is down to two"      "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAMID")" "$(sorted_ids "$TAANA" "$TABEN")"
+    equals "...the file itself still there"        "$(media_field "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAMID" fileName)" "family.pdf"
+
+    # DELETING THE TICKET TAKES ITS ASSIGNMENTS WITH IT — the other cascade,
+    # `(event_id, media_id)`. Asserted on the SECOND ticket, so the first one
+    # survives this run assigned, which is what the upgrade check needs.
+    TAQPRE=$(body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/presign" \
+      -d "{\"type\":\"ticket\",\"fileName\":\"spare.pdf\",\"mimeType\":\"application/pdf\",\"sizeBytes\":$TASIZE}")
+    TAQID=$(json_field "$TAQPRE" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: application/pdf' --data-binary "$TAPDF" "$(json_field "$TAQPRE" upload.url)"
+    body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/confirm" -d "{\"mediaId\":\"$TAQID\"}" > /dev/null
+    body "${TAP[@]}" "${JSON[@]}" -X POST "$TAHOST/media/$TAQID/assignees" -d "{\"rsvpId\":\"$TAANA\"}" > /dev/null
+    equals "a second ticket is assigned too"       "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAQID")" "$TAANA"
+    check "a planner deletes the second ticket"    200 "${TAP[@]}" -X DELETE "$TAHOST/media/$TAQID"
+    TAGONE=$(body "${AUTH[@]}" "$API/events/$TASLUG/media")
+    equals "...and it is gone from the list"       "$(ticket_assignees "$TAGONE" "$TAQID")" "no-such-item"
+    equals "...while the family ticket remains"    "$(ticket_assignees "$TAGONE" "$TAMID")" "$(sorted_ids "$TAANA" "$TABEN")"
+    # LEFT ASSIGNED ON PURPOSE. See this block's header: the next release's
+    # `upgrade` job reads this row.
+  else
+    echo "  skip  set S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT to run the assignment rows"
+  fi
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to run these"
 fi
 
 echo

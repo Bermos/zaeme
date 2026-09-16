@@ -106,6 +106,7 @@ guest's answers are stored.
 | `events_expense` / `events_expense_share` | the trip budget, in integer cents |
 | `events_timeline_item` | the itinerary |
 | `events_media` | photos, videos, documents and tickets |
+| `events_ticket_assignment` | who each ticket is for — one row per (ticket, person), so one covers a pair |
 | `events_series_member` | the standing group of a recurring series |
 | `events_message` | the per-event group chat |
 | `events_ical_token` | the per-person calendar-feed credential |
@@ -277,7 +278,7 @@ everything planned inside zäme.
 | Bring list | `contributions.ts` | `…/contributions`, claim/release | `…/contributions` | `BringList.vue` |
 | Budget | `expenses.ts`, `accounts.ts`, `settlements.ts` | `…/budget` (read only since #48) | `…/expenses`, `…/settlements` | `BudgetCard.vue` |
 | Timeline | `events-data.ts` | read via the invite page | `…/timeline` (POST/PATCH/DELETE) | `EventTimeline.vue`, `HostTimelineCard.vue` |
-| Media | `media.ts` | `…/media/presign`, `…/media/confirm` | same + assign a ticket, delete | `MediaGallery.vue`, `HostMediaCard.vue` |
+| Media | `media.ts` | `…/media/presign`, `…/media/confirm` | same + who a ticket is for, delete | `MediaGallery.vue`, `HostMediaCard.vue` |
 | Chat | `chat.ts` | `…/messages` | `…/messages` | `EventChat.vue` |
 | Series | `series.ts` | — | `…/occurrences`, `…/members` | `HostSeriesCard.vue`, `SeriesMarquee.vue` |
 | Co-organizers | `planner-team.ts` | `/api/host/join/{token}` | `…/team` | `HostTeamCard.vue` |

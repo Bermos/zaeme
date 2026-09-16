@@ -92,6 +92,13 @@
       "when": 1789576132997,
       "tag": "0012_worried_silver_centurion",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789583739209,
+      "tag": "0013_short_steel_serpent",
+      "breakpoints": true
     }
   ]
 }

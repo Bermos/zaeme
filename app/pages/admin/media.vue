@@ -155,13 +155,26 @@ const visual = (t: string) => t === 'photo' || t === 'video'
               class="font-medium"
             >{{ item.fileName }}</span>
             <span class="text-muted"> · {{ item.eventTitle }}</span>
+            <!-- A ticket nobody has been given is one nobody can see, which is
+                 what this badge is for. It reads `assigneeCount === 0` rather
+                 than the null `assignedRsvpId` used to be (#36) — and the
+                 second badge is the state that column could not express at
+                 all: one ticket covering a pair, a family, a booking for six. -->
             <UBadge
-              v-if="item.type === 'ticket' && !item.assignedRsvpId"
+              v-if="item.type === 'ticket' && item.assigneeCount === 0"
               size="sm"
               color="warning"
               variant="subtle"
             >
               unassigned
+            </UBadge>
+            <UBadge
+              v-else-if="item.type === 'ticket' && item.assigneeCount > 1"
+              size="sm"
+              color="neutral"
+              variant="subtle"
+            >
+              {{ item.assigneeCount }} people
             </UBadge>
           </span>
           <span class="text-muted whitespace-nowrap">{{ formatBytes(item.sizeBytes) }}</span>

@@ -4,6 +4,7 @@ import { createError } from 'h3'
 import { tables, useDb } from './db'
 import { guestUser } from '../database/schema/auth'
 import { assertPlaceOnEvent, assertPlanner, loadEventBySlug } from './permissions'
+import { loadTicketAssignments } from './media'
 import { generateUniqueSlug } from './slugify'
 import { instanceBaseCurrency } from './instance-settings'
 import { TIMEZONE_REFUSAL, canonicalTimezone, isBlankTimezone } from '../../shared/utils/timezone'
@@ -228,6 +229,14 @@ export async function listTimeline(userId: string, slug: string) {
  * indistinguishable — which is the one distinction this table exists to keep
  * (an emptied detail is a state, not an absence). `detailId` is the sentinel
  * and it is a primary key, so it is null exactly when there is no row.
+ *
+ * WHO EACH TICKET IS FOR (#36) IS NOT A THIRD JOIN, and that is not a taste
+ * decision: a ticket has 0..N assignees, so joining them here would return one
+ * row per assignee and quietly triple a pair fare in the gallery. It is the
+ * batch loader `server/domain/media.ts` exports — the SAME function
+ * `listMediaForPlanner` and the guest read call, which is the point of it
+ * being exported rather than of this file growing its own copy. Two extra
+ * queries for a whole gallery, not one per item.
  */
 export async function listMedia(userId: string, slug: string) {
   const ev = await loadEventBySlug(slug)
@@ -239,7 +248,6 @@ export async function listMedia(userId: string, slug: string) {
       fileName: tables.media.fileName,
       caption: tables.media.caption,
       takenAt: tables.media.takenAt,
-      assignedRsvpId: tables.media.assignedRsvpId,
       timelineItemId: tables.media.timelineItemId,
       // The expense this item is the receipt for (#29). An id, not a URL: the
       // bytes stay in zäme and are served to guests there.
@@ -261,10 +269,13 @@ export async function listMedia(userId: string, slug: string) {
     .where(and(eq(tables.media.eventId, ev.id), eq(tables.media.status, 'ready')))
     .orderBy(desc(tables.media.createdAt))
 
+  const assignments = await loadTicketAssignments(rows.filter(r => r.type === 'ticket').map(r => r.id))
+
   return rows.map(({
     detailId, bookingRef, carrier, seat, coach, travellerName, validFrom, validUntil, note, ...media
   }) => ({
     ...media,
+    assignedRsvpIds: assignments.get(media.id) ?? [],
     ticket: detailId === null
       ? null
       : { bookingRef, carrier, seat, coach, travellerName, validFrom, validUntil, note }

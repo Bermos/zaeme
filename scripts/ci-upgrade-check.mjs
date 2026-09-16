@@ -120,13 +120,15 @@ const HEADERS = {
  *       vacuous on the canary, which has no media at all (it is written through
  *       `/api/v1`, which has no upload route), and counted anyway because the
  *       vacuum is the correct state and the assertion must not go missing
+ *   1   every ticket is still for the same people (#36) — vacuous on this
+ *       canary for the same reason, and counted for the same reason
  *   2   everybody who had a balance still has one; the balances still close
  *   4   the write block: readable, recorded, filed under Food, total moved
  *  ---
- *  24
+ *  25
  *
  * `snapshot` refuses to write a file unless the canary came back with both of
- * those expenses AND a category on each, so every one of the 23 is reachable —
+ * those expenses AND a category on each, so every one of the 25 is reachable —
  * the producer's guarantee and this consumer's floor are the same statement,
  * which is the bug this number had when it was 24 against a canary worth 20.
  * (The prose said 19 in two places while the arithmetic above said 22, from the
@@ -138,7 +140,31 @@ const HEADERS = {
  * this deliberately does not depend on how many of those there are: that file
  * is free to change what it leaves behind.
  */
-const MIN_ASSERTIONS = 24
+const MIN_ASSERTIONS = 25
+
+/**
+ * …and what the TICKET canary adds when there is one (#36), which is the case
+ * whenever a session cookie and a bucket are present — always, in CI.
+ *
+ * It is a second guaranteed EVENT, so it contributes a full pass of the
+ * per-event assertions before its own three:
+ *
+ *   7   the per-event set, on a trip with no expenses: the budget loads, the
+ *       trip settles in what it settled in, no display zone was invented,
+ *       nothing was written on its ticket, every ticket is still for the same
+ *       people (NOT vacuous here — this is the assertion the canary exists
+ *       for), everybody with a balance still has one, the balances close
+ *   3   the named block: the ticket survived, it is still for the same person,
+ *       and the field is a LIST rather than the scalar it replaced
+ *  ---
+ *  10
+ *
+ * Added to the floor only when the snapshot carries one, so a person running
+ * this by hand with no cookie is not failed for a canary they could not mint —
+ * and `ticketCanary` aborts rather than returning null whenever the ingredients
+ * ARE there, so "no ticket canary" can never be how a CI run goes quiet.
+ */
+const TICKET_CANARY_ASSERTIONS = 10
 
 let pass = 0
 let fail = 0
@@ -262,6 +288,29 @@ function canaryExpenses(stamp) {
  * exactly as it was", which is what keeps this live against a future base that
  * already has the column.
  */
+/**
+ * WHO A MEDIA ROW IS FOR, IN WHICHEVER SHAPE THE RELEASE SPEAKS (#36).
+ *
+ * Both are read and both normalise to a SORTED LIST of RSVP ids, so the two
+ * releases either side of the migration can be compared at all:
+ *
+ *   `assignedRsvpIds`  the release has the join table — the list, as given.
+ *   `assignedRsvpId`   the release has the single column — `[]` or `[theOne]`.
+ *   neither            `'no-field'`, a fact about that release and not a value
+ *                      in its database; `verify` reads it as "there is nothing
+ *                      to carry across" rather than as "nobody has it".
+ *
+ * `null` is a member of neither list, so "assigned to nobody" and "assigned to
+ * one person" are `[]` and `[id]` and never the same string.
+ */
+function assignees(m) {
+  if (Object.hasOwn(m, 'assignedRsvpIds')) {
+    return Array.isArray(m.assignedRsvpIds) ? [...m.assignedRsvpIds].sort() : 'not-a-list'
+  }
+  if (Object.hasOwn(m, 'assignedRsvpId')) return m.assignedRsvpId ? [m.assignedRsvpId] : []
+  return 'no-field'
+}
+
 async function mediaClaim(slug) {
   const res = await api('GET', `/events/${slug}/media`)
   if (res.status !== 200 || !Array.isArray(res.json)) return []
@@ -270,8 +319,132 @@ async function mediaClaim(slug) {
     .map(m => ({
       id: m.id,
       type: m.type ?? null,
-      ticket: Object.hasOwn(m, 'ticket') ? (m.ticket ?? null) : 'no-field'
+      ticket: Object.hasOwn(m, 'ticket') ? (m.ticket ?? null) : 'no-field',
+      assignees: assignees(m)
     }))
+}
+
+/**
+ * THE TICKET CANARY (#36): a trip with a ticket ASSIGNED to somebody, minted
+ * through the previous release before its column is dropped.
+ *
+ * It exists for the reason the expense canary does — "whatever the smoke suite
+ * happened to leave" is a fixture nobody owns — and here that was not a
+ * hypothetical. The #35 block in `scripts/api-smoke.sh` DELETES the one ticket
+ * it assigns, so at the moment #36 was written the previous release left no
+ * assigned ticket behind at all, and the migration's backfill would have been
+ * verified against an empty set while reporting a pass. (#36's own block leaves
+ * its ticket in place, which fixes that from the next release onwards. This
+ * canary is what makes the assertion live on the release that introduces it,
+ * and keeps the job independent of that file's habits afterwards.)
+ *
+ * IT SPEAKS THE PREVIOUS RELEASE'S HOST SURFACE, which is new for this script
+ * and unavoidable: `/api/v1` has no upload route, so a ticket cannot be brought
+ * into existence with the service token at all. The cookie is the one
+ * `scripts/ci-smoke-setup.mjs sign-in` exported into the environment a few
+ * steps earlier in the `upgrade` job; the bytes go to the same `adobe/s3mock`
+ * every other upload in CI goes to.
+ *
+ * WITHOUT EITHER OF THOSE IT RETURNS null AND `verify` ASSERTS NOTHING — a
+ * person running this by hand has neither. What it must never do is come up
+ * short WITH them: if the cookie and the bucket are both present and any step
+ * refuses, this aborts, because that is precisely the case where the job would
+ * otherwise report success having proved less than it claims.
+ */
+async function ticketCanary(stamp) {
+  const cookie = process.env.ZAEME_TEST_SESSION_COOKIE
+  const bucket = process.env.S3_BUCKET || process.env.R2_BUCKET
+  if (!cookie || !bucket) {
+    console.log('  note  no session cookie or bucket — the ticket canary is skipped, and verify will assert nothing about assignment')
+    return null
+  }
+
+  const host = async (method, path, body) => {
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { 'cookie': cookie, 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    })
+    const text = await res.text()
+    let json
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
+    return { status: res.status, json, text }
+  }
+  const must = (what, res, want) => {
+    if (res.status !== want) {
+      abort(
+        `the previous release refused the ticket canary's "${what}" (${res.status}, wanted ${want}): ${res.text.slice(0, 300)}\n`
+        + 'This script speaks the OLD release\'s host surface here. If that surface has changed shape, this is the file to move.'
+      )
+    }
+    return res.json
+  }
+
+  const created = await api('POST', '/events', { title: `Upgrade ticket canary ${stamp}`, type: 'trip' })
+  if (created.status !== 201 || !created.json?.slug) {
+    abort(`the previous release refused the ticket canary trip (${created.status}): ${created.text.slice(0, 300)}`)
+  }
+  const slug = created.json.slug
+  // Published, or the invite token below does not resolve (`resolveInviteToken`
+  // refuses a draft), and the RSVP is what there is to assign a ticket TO.
+  must('publish', await api('POST', `/events/${slug}/status`, { status: 'published' }), 200)
+  const invite = must('an invite', await api('POST', `/events/${slug}/invites`, { label: 'Ticket canary' }), 201)
+  const email = `ticket-canary-${stamp}@example.com`
+  must('an RSVP', await host('POST', `/api/invites/${invite.token}/rsvp`, {
+    status: 'yes', guestName: 'Canary', guestEmail: email
+  }), 200)
+  // `{rsvps, summary}`, not a bare array — the one endpoint in this script that
+  // wraps its list.
+  const rsvps = must('the RSVP list', await api('GET', `/events/${slug}/rsvps`), 200)
+  const rsvpId = (rsvps?.rsvps ?? []).find(r => (r.guestEmail ?? '').toLowerCase() === email)?.id
+  if (!rsvpId) abort('the ticket canary RSVP did not come back on the previous release')
+
+  const pdf = '%PDF-1.4 the canary\'s ticket.'
+  const pre = must('a presign', await host('POST', `/api/host/events/${slug}/media/presign`, {
+    type: 'ticket', fileName: 'canary.pdf', mimeType: 'application/pdf', sizeBytes: pdf.length
+  }), 200)
+  const put = await fetch(pre.upload.url, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/pdf' },
+    body: pdf
+  })
+  if (!put.ok) abort(`the ticket canary's bytes did not reach object storage (${put.status})`)
+  must('a confirm', await host('POST', `/api/host/events/${slug}/media/confirm`, { mediaId: pre.mediaId }), 200)
+  // EITHER SIDE OF #36, and this is the one place in this file that has to be:
+  // the previous release is whatever `main` was an hour ago, so it may still
+  // have the single `assign` verb that SET one attendee, or it may already have
+  // the `assignees` collection that replaced it. The old route is tried first
+  // because it is the one that exercises the column the backfill reads; a 404
+  // from it means that release has already moved, and the media row is known to
+  // exist by this point, so the 404 is about the route and not about the id.
+  //
+  // WHEN #36 IS OLD ENOUGH that no base can have `assign`, delete the first
+  // call. Until then, dropping the fallback would abort this job on every
+  // branch cut after #36 lands — an assertion that encodes WHICH RELEASE
+  // HAPPENS TO BE THE BASE, which is the trap `verificationClaim` above records
+  // having fallen into once already.
+  let assigned = await host('POST', `/api/host/events/${slug}/media/${pre.mediaId}/assign`, { rsvpId })
+  if (assigned.status === 404) {
+    assigned = await host('POST', `/api/host/events/${slug}/media/${pre.mediaId}/assignees`, { rsvpId })
+  }
+  must('the assignment', assigned, 200)
+
+  // Read back through `/api/v1`, so what is recorded is what that release SAYS,
+  // in the shape `verify` will compare against — not what was just posted.
+  const seen = (await mediaClaim(slug)).find(m => m.id === pre.mediaId)
+  if (!seen) abort('the ticket canary is not in the previous release\'s media list')
+  if (!Array.isArray(seen.assignees) || seen.assignees.length !== 1) {
+    abort(
+      `the ticket canary came back assigned to ${JSON.stringify(seen.assignees)} rather than to exactly one person — `
+      + 'there would be nothing for the migration to carry across, so this job would prove nothing about the backfill.'
+    )
+  }
+  console.log(`  note  ticket canary: ${slug} — ${pre.mediaId} assigned to ${seen.assignees[0]}`)
+  return { slug, mediaId: pre.mediaId, rsvpId, assignees: seen.assignees }
 }
 
 async function snapshot(file) {
@@ -284,6 +457,10 @@ async function snapshot(file) {
     )
   }
   const canarySlug = created.json.slug
+
+  // BEFORE the event list is read below, so the ticket canary's own trip is in
+  // it and its media is snapshotted like everybody else's.
+  const ticket = await ticketCanary(stamp)
 
   for (const expense of canaryExpenses(stamp)) {
     const wrote = await api('POST', `/events/${canarySlug}/expenses`, expense)
@@ -370,10 +547,22 @@ async function snapshot(file) {
     )
   }
 
+  // …and the same guarantee for the ticket canary (#36). It was already read
+  // back inside `ticketCanary`, so what is checked here is that the event loop
+  // above found its trip — an event the budget read skipped would take its
+  // media with it and leave `verify` nothing to compare.
+  if (ticket && !events.some(e => e.slug === ticket.slug)) {
+    abort(
+      `the ticket canary's trip ${ticket.slug} is not in the snapshot — GET /api/v1/events or its budget read `
+      + 'did not answer for it, so the assignment backfill would be verified against nothing.'
+    )
+  }
+
   const money = events.reduce((n, e) => n + e.expenses.length, 0)
-  writeFileSync(file, JSON.stringify({ canarySlug, events }, null, 2))
+  writeFileSync(file, JSON.stringify({ canarySlug, ticket, events }, null, 2))
   console.log(
-    `[upgrade-check] snapshot: ${events.length} event(s) holding ${money} expense(s), canary ${canarySlug} -> ${file}`
+    `[upgrade-check] snapshot: ${events.length} event(s) holding ${money} expense(s), canary ${canarySlug}`
+    + `${ticket ? `, ticket canary ${ticket.slug}` : ', no ticket canary'} -> ${file}`
   )
 }
 
@@ -605,6 +794,35 @@ async function verify(file) {
         .join('; ')
     )
 
+    /*
+     * …AND EVERY TICKET IS STILL FOR THE SAME PEOPLE (#36). This is the one
+     * assertion in this file about a migration that DELETES something: #36
+     * drops `events_media.assigned_rsvp_id` and replaces it with rows in
+     * `events_ticket_assignment`, and the backfill is what carries the existing
+     * assignments across. Without it, everybody's ticket silently becomes
+     * nobody's — and the person who finds out is holding a phone at a barrier.
+     *
+     * Compared against the SNAPSHOT and normalised through `assignees` on both
+     * sides, so the single column the previous release answered with and the
+     * list this one answers with are the same sorted array of ids. A release
+     * from before either shape reads `'no-field'`, which is the one case where
+     * there is nothing to carry across and no honest comparison to make.
+     */
+    const lostAssignees = (before.media ?? []).filter((was) => {
+      if (was.assignees === 'no-field') return false
+      const now = mediaNow.get(was.id)
+      if (!now) return true
+      return JSON.stringify(assignees(now)) !== JSON.stringify(was.assignees)
+    })
+    assert(
+      `${before.slug}: every ticket is still for the same people`,
+      lostAssignees.length === 0,
+      lostAssignees
+        .map(w => `${w.id} (${w.type}) was for ${JSON.stringify(w.assignees)}, now `
+          + `${mediaNow.has(w.id) ? JSON.stringify(assignees(mediaNow.get(w.id))) : 'GONE'}`)
+        .join('; ')
+    )
+
     const nowBalances = new Map((after.balances ?? []).map(b => [b.email, b.netCents]))
     const lost = before.balances.map(b => b.email).filter(email => !nowBalances.has(email))
     assert(
@@ -616,6 +834,41 @@ async function verify(file) {
       `${before.slug}: the balances still close`,
       sum([...nowBalances.values()]) === 0,
       `they sum to ${sum([...nowBalances.values()])}`
+    )
+  }
+
+  /*
+   * THE TICKET CANARY, NAMED (#36). The loop above already compared it along
+   * with everything else, and this says the same thing about the one row the
+   * job GUARANTEES rather than about whatever the list happened to contain: a
+   * filter over an empty array reports no discrepancies just as loudly as a
+   * filter over a matching one.
+   *
+   * The third assertion is about the SHAPE and not the value. The first two
+   * would both pass if the new release still answered a single
+   * `assignedRsvpId` — `assignees` normalises the old shape on purpose, so that
+   * the comparison can straddle the migration — and this is what says the field
+   * actually moved to the list the issue asks for.
+   */
+  if (snap.ticket) {
+    const list = await api('GET', `/events/${snap.ticket.slug}/media`)
+    const row = (Array.isArray(list.json) ? list.json : []).find(m => m?.id === snap.ticket.mediaId)
+    assert(
+      'the ticket canary survived the migration',
+      Boolean(row),
+      `GET /events/${snap.ticket.slug}/media answered ${list.status} and does not carry ${snap.ticket.mediaId}`
+    )
+    assert(
+      'the ticket canary is still for the person it was assigned to',
+      Boolean(row) && JSON.stringify(assignees(row)) === JSON.stringify(snap.ticket.assignees),
+      `was for ${JSON.stringify(snap.ticket.assignees)}, now ${row ? JSON.stringify(assignees(row)) : 'GONE'}`
+    )
+    assert(
+      '…and answers it as a LIST, which is what #36 moved it to',
+      Boolean(row) && Array.isArray(row.assignedRsvpIds),
+      row
+        ? `assignedRsvpIds is ${JSON.stringify(row.assignedRsvpIds)} and assignedRsvpId is ${JSON.stringify(row.assignedRsvpId)}`
+        : 'the row is gone'
     )
   }
 
@@ -666,9 +919,10 @@ async function verify(file) {
     console.error(`::error::[upgrade-check] ${fail} assertion(s) failed against rows the previous release wrote`)
     process.exit(1)
   }
-  if (pass < MIN_ASSERTIONS) {
+  const floor = MIN_ASSERTIONS + (snap.ticket ? TICKET_CANARY_ASSERTIONS : 0)
+  if (pass < floor) {
     console.error(
-      `::error::[upgrade-check] ${pass} assertions ran, fewer than the ${MIN_ASSERTIONS} the canary alone accounts `
+      `::error::[upgrade-check] ${pass} assertions ran, fewer than the ${floor} the canaries alone account `
       + 'for — a check above was removed or the budget response has changed shape, so this run did not look at what '
       + 'it says it looked at. Recount the arithmetic at MIN_ASSERTIONS in this file rather than lowering it.'
     )
