@@ -1095,6 +1095,7 @@ describe('what a ticket says is written by a planner, on the host surface only',
 
     // EVERY CALL SITE BINDS IT. This is the assertion the deleted line breaks.
     const bindings: string[] = []
+    let callSites = 0
     const visit = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name)
@@ -1106,6 +1107,7 @@ describe('what a ticket says is written by a planner, on the host surface only',
         const body = template(readFileSync(full, 'utf8'))
         for (const tag of ['MediaGallery', 'HostMediaCard']) {
           for (const at of [...body.matchAll(new RegExp(`<${tag}(?![\\w-])`, 'g'))].map(m => m.index!)) {
+            callSites += 1
             const open = body.slice(at, body.indexOf('>', at))
             if (!/:timezone=/.test(open)) bindings.push(`${rel(full)}: <${tag}> with no :timezone`)
           }
@@ -1114,15 +1116,17 @@ describe('what a ticket says is written by a planner, on the host surface only',
     }
     visit(PAGES)
     expect(bindings).toEqual([])
-    // THE ANTI-VACUITY GUARD. `bindings` is empty both when every call site
-    // binds the zone and when the walk found no call sites at all — a renamed
-    // component, a moved directory — so the three that exist today are named.
-    const sites = [
-      template(sfc('pages', 'i', '[token].vue')),
-      template(sfc('pages', 'host', '[slug].vue')),
-      template(sfc('components', 'HostMediaCard.vue'))
-    ]
-    expect(sites.filter(t => /:timezone=/.test(t))).toHaveLength(3)
+    // THE ANTI-VACUITY GUARD, and it counts what the WALK found rather than
+    // what a hand-written list says. `bindings` is empty both when every call
+    // site binds the zone and when the walk found no call sites at all — a
+    // renamed component, a moved directory, a `<template>` regex that stopped
+    // matching. Three exist today: the gallery on the guest page, the host card
+    // on the host page, and the gallery nested inside the host card.
+    //
+    // Counting `:timezone=` in those three files instead would prove nothing:
+    // both pages bind a zone on `DatePoll` and `EventTimeline` too, so the
+    // count stays at three with this feature's binding deleted.
+    expect(callSites).toBe(3)
 
     // AND THE HOST CARD WATCHES THE ZONE, not only its own fetch. Its ticket
     // drafts hold a WALL CLOCK, seeded eagerly at mount, so a zone edited
