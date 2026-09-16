@@ -450,11 +450,57 @@ concurrency:
 # plus the bindings in `MediaGallery.vue` pinned structurally, which is the only
 # thing in this repository that catches a deleted `<p>`. 787 -> 832.
 #
+# +47 FOR THE TICKET THAT IS FINALLY SHOWN ON ITS STEP (#38). `timeline_item_id`
+# has pinned media to an itinerary item since the transplant: `/api/v1` has
+# carried it the whole time and the two reads a PERSON looks at dropped it, so
+# no screen ever said it back — and nothing could SET it either.
+#
+# SEVEN OF THE 47 NEED NO BUCKET and are the credential half: the new verb is a
+# planner's, on the host surface, and a service token, an invite token and no
+# credential at all are each 401 against it, while the invite link has no such
+# route to reach. Two more are the body: `timelineItemId` is required AND
+# nullable, so an absent field is a 400 rather than a silent un-pin — which is
+# the one outcome a planner cannot tell from "it did not save".
+#
+# THE OTHER 40 NEED AN UPLOAD and skip as ONE line without `S3_*`, like the #35,
+# #36 and #37 blocks above; this job fails on any `skip` at all. Their fixture
+# is TWO steps and THREE files — a ticket, a paper and a photograph — and it is
+# built around the wrong answers: with one step, "pinned to the 09:14" cannot be
+# told from "pinned to everything", and a MOVE cannot be asserted at all. It is
+# two set comparisons (the pin LEAVING one step as it arrives at the other), and
+# an implementation that only ever added passes one of them.
+#
+# FIVE ARE THE ONES THAT WOULD HAVE CAUGHT THE BUG ITSELF: every surface is
+# asked for `timelineItemId` BEFORE anything is pinned, and `null` ("pinned to
+# nothing") is distinguished from `no-field` ("this read does not carry the
+# pin"), which is what both human reads answered for the whole life of the
+# column. `media_field` cannot tell those apart — hence `pinned_step`.
+#
+# THREE ARE THAT A PIN IS NOT AN EDIT of the row it is written on: the ticket
+# keeps its assignees (#36) and its seat (#35) across the pin, the move and the
+# un-pin, because a `returning()` over the wrong columns reads exactly like
+# those two features having been undone by somebody moving a ticket.
+#
+# AND SIX ARE THE REFUSALS, each with the state re-read afterwards rather than
+# the status taken on trust: a photograph is a 422 (the schema let it through
+# and the domain declined), a step on another trip is a 404 in one direction and
+# a media id from another trip is a 404 in the other — this planner owns both
+# events, so a lookup that forgot `where event_id` would answer 200 — and a
+# pending upload is a 409.
+#
+# WHAT THESE 47 CANNOT SEE is the itinerary rendering any of it, for the reason
+# #35's 52 and #37's 45 could not see a seat or a button: the media list is
+# fetched by the BROWSER, so no SSR'd HTML carries it. That half is
+# `test/pinned-media.test.ts` — the grouping executed, and the call sites in
+# `EventTimeline.vue`, `HostTimelineCard.vue` and the guest page pinned in
+# `<script setup>` as well as in `<template>`, which is where the mutations that
+# survive a green pipeline actually live. 832 -> 879.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '832'
+  MIN_SMOKE_CHECKS: '879'
 
 jobs:
   ci:

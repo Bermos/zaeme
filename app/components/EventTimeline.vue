@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { PinnedMediaItem } from '#shared/utils/pinned-media'
+
 /**
  * The plan — arrive, food, the film, … For a multi-day event (a trip) the
  * entries group under day headings so the itinerary reads like an itinerary.
@@ -10,6 +12,24 @@
  * lands: the items keep the host's order exactly, and a leg slots in ahead of
  * the first item that starts after it. An event with no legs renders exactly as
  * it did before that function existed, which is the point.
+ *
+ * AND SINCE #38 A STEP CARRIES ITS PAPERS. `events_media.timeline_item_id` has
+ * said "this ticket belongs to the 09:14 to Porto" since the transplant and no
+ * screen has ever said it back, so the ticket lived four cards further down
+ * while the departure time lived here. A pinned ticket now renders ON the step,
+ * with #35's booking reference and seat as text beside a download, because at a
+ * barrier you read the seat off the page and show the PDF afterwards.
+ *
+ * THE GUEST RULE IS #37's. Every invite holder reaches every ticket on the
+ * event, marked `mine` or not and labelled with who it is for — so a pinned
+ * ticket is shown to everybody with the same sentence the Tickets section uses
+ * (`ticketAssigneeLine`), never filtered down to the viewer's own. A second,
+ * quieter rule on this screen would be the pre-#37 behaviour restored in the
+ * one place four friends at a barrier are actually looking.
+ *
+ * A STEP WITH NOTHING PINNED RENDERS EXACTLY AS IT DID. That is an acceptance
+ * criterion and it is a property of `pinnedMediaByTimelineItem`, which has no
+ * key for such a step: `pinnedFor` answers `[]` and `v-for` draws nothing.
  */
 interface TimelineItem {
   id: string
@@ -42,6 +62,20 @@ const props = withDefaults(defineProps<{
   timeline: TimelineItem[]
   legs?: Leg[]
   places?: Place[]
+  /**
+   * The tickets and papers pinned to these steps (#38), already normalised by
+   * `timelinePinnedMedia` — every one of them, pinned or not; this card keeps
+   * the ones with a step.
+   *
+   * REQUIRED, AND NOT OPTIONAL WITH A `[]` DEFAULT. The two are the same value
+   * on the way in and opposite statements about the caller: `[]` by default
+   * means a page that forgets the binding renders an itinerary with no papers
+   * on it and nothing anywhere red — which is exactly the shape of this whole
+   * issue, a column carried by the data and dropped before it reached a screen.
+   * Required is what makes `nuxt typecheck` refuse the omission at the call
+   * site, the lesson #77's review paid for with a deleted `:timezone`.
+   */
+  media: PinnedMediaItem[]
   /**
    * The event's display zone (#31) — the wall clock every time below is read
    * against. Null, which is the default, is "the reader's own", and this card
@@ -111,6 +145,23 @@ const groups = computed(() => {
   }))
 })
 
+/**
+ * WHAT IS PINNED WHERE — one grouping for the whole itinerary rather than a
+ * scan per step, and the grouping itself is
+ * `shared/utils/pinned-media.ts`, where `test/pinned-media.test.ts` executes
+ * it. A step with nothing pinned has no key, so `pinnedFor` answers `[]` and
+ * the step renders as it always did.
+ */
+const pinnedMedia = computed(() => pinnedMediaByTimelineItem(props.media))
+
+function pinnedFor(itemId: string): PinnedMediaItem[] {
+  return pinnedMedia.value.get(itemId) ?? []
+}
+
+function pinnedIcon(item: PinnedMediaItem): string {
+  return item.type === 'ticket' ? '🎟️' : '📄'
+}
+
 function legLine(leg: Leg): string {
   const from = leg.fromPlaceName ?? 'somewhere'
   const to = leg.toPlaceName ?? 'somewhere'
@@ -160,7 +211,7 @@ function legDetail(leg: Leg): string | null {
           >
             <template v-if="entry.kind === 'item'">
               <span class="text-lg leading-6">{{ entry.item.icon || TYPE_ICONS[entry.item.type] || '📍' }}</span>
-              <div>
+              <div class="min-w-0 flex-1">
                 <p class="font-medium">
                   <span
                     v-if="at(entry.item.startsAt)"
@@ -189,6 +240,60 @@ function legDetail(leg: Leg): string | null {
                 >
                   📍 {{ entry.item.location }}
                 </p>
+
+                <!--
+                  THE PAPERS FOR THIS STEP (#38) — the ticket that gets you
+                  through the barrier and the reservation you show at the desk,
+                  on the step they belong to rather than four cards down.
+
+                  The seat and the booking reference are TEXT beside the
+                  download and not inside it (#35): at a barrier you read
+                  "coach 12, seat 41A" off the page, and the PDF is what you
+                  show afterwards if it has finished rendering.
+
+                  WHOSE IT IS, ON EVERY PINNED TICKET, because since #37 every
+                  invite holder reaches every ticket — so this list is the whole
+                  step's, and the line says which one is yours rather than the
+                  card hiding the other three.
+
+                  Nothing renders at all when nothing is pinned, which is the
+                  acceptance criterion about an unchanged itinerary.
+                -->
+                <div
+                  v-if="pinnedFor(entry.item.id).length"
+                  class="flex flex-col gap-2 mt-1.5"
+                >
+                  <div
+                    v-for="m in pinnedFor(entry.item.id)"
+                    :key="m.id"
+                    class="flex flex-col gap-0.5 min-w-0"
+                  >
+                    <UButton
+                      :to="m.url"
+                      external
+                      target="_blank"
+                      variant="soft"
+                      color="primary"
+                      size="xs"
+                      class="justify-start max-w-full"
+                    >
+                      <span class="truncate">{{ pinnedIcon(m) }} {{ m.caption || m.fileName }}</span>
+                    </UButton>
+                    <p
+                      v-if="m.type === 'ticket'"
+                      class="text-xs text-muted pl-1"
+                    >
+                      {{ ticketAssigneeLine(m) }}
+                    </p>
+                    <p
+                      v-for="(line, i) in ticketDetailLines(m.ticket, timezone)"
+                      :key="i"
+                      class="text-xs text-muted pl-1"
+                    >
+                      {{ line }}
+                    </p>
+                  </div>
+                </div>
               </div>
             </template>
 

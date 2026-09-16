@@ -3,6 +3,7 @@ import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
 import { assertPlanner, loadEventBySlug } from './permissions'
+import { isPinnableToTimeline } from '../../shared/utils/pinned-media'
 
 /**
  * Event media: the per-type MIME/size policy, the storage-key layout, and the
@@ -169,6 +170,21 @@ export interface MediaItemView {
    * rule `listMediaForViewer` applies below.
    */
   assignedRsvpIds: string[]
+  /**
+   * The itinerary step this item is pinned to, or `null` (#38).
+   *
+   * THE COLUMN HAS EXISTED SINCE THE TRANSPLANT AND NO HUMAN SURFACE HAS EVER
+   * CARRIED IT. `server/domain/events-data.ts` selects it for `/api/v1`, so
+   * Enterprise has been told which step a ticket belongs to for as long as the
+   * field has existed, while the two reads a PERSON looks at — this view, which
+   * feeds the host card and the invite link — dropped it before it reached a
+   * screen. That is why the itinerary never said it back.
+   *
+   * `null` is "pinned to nothing", which is every photo, every receipt and most
+   * papers; it is never "this caller did not look", because it comes straight
+   * off the row like `expenseId` below it.
+   */
+  timelineItemId: string | null
   /** The expense this item is the receipt for, or `null` (#29). */
   expenseId: string | null
   /**
@@ -223,6 +239,7 @@ function toView(
     caption: r.caption,
     takenAt: r.takenAt,
     assignedRsvpIds,
+    timelineItemId: r.timelineItemId,
     expenseId: r.expenseId,
     ticket: detail ? toDetailView(detail) : null,
     createdAt: r.createdAt
@@ -657,6 +674,116 @@ export async function setTicketDetail(
   // re-renders from, and a ticket that reported nobody because somebody typed a
   // seat number into it would read as an assignment that had been undone.
   return toView(item, saved, (await loadTicketAssignments([item.id])).get(item.id) ?? [])
+}
+
+/* ---------------------- the itinerary pin (#38) ---------------------------- */
+
+/**
+ * WHAT MAY BE PINNED TO AN ITINERARY STEP, and the rule is about what a reader
+ * standing at that step needs in their hand.
+ *
+ * A ticket gets you through the barrier and a shared paper is the reservation
+ * you show at the desk, so both belong ON the 09:14 rather than four cards
+ * further down. A photo and a video are the GALLERY — the social memory of the
+ * trip, browsed afterwards — and pinning one to a step would put it somewhere
+ * no screen renders it: `EventTimeline.vue` draws a file and the two lines a
+ * ticket says, and a photograph in that list is a download button with nothing
+ * to read beside it.
+ *
+ * THIS IS THE NARROW READING AND IT IS DELIBERATE. `events_media.timeline_item_id`
+ * accepts any media row and always has; nothing in the database stops a planner
+ * pinning a photo. Widening this list later is additive and changes no stored
+ * value, while shipping the wide version and discovering the gallery needs its
+ * own rendering is not. The refusal below is what keeps a host from pinning
+ * something that then appears nowhere.
+ *
+ * THE LIST ITSELF LIVES IN `shared/utils/pinned-media.ts`, because the host's
+ * picker applies the same rule when it decides what to OFFER. Two copies of
+ * "what may go on a step" is a picker that offers a photo and a server that
+ * refuses it, which is the drift `shared/utils/` exists to stop.
+ */
+
+/**
+ * Pin a ticket or a shared paper to an itinerary step, or un-pin it (`null`).
+ *
+ * ONE VERB FOR BOTH DIRECTIONS, because there is exactly one thing being said:
+ * this item belongs to that step, or to no step. A `POST …/pin` plus a
+ * `DELETE …/pin` would be two ways to write one nullable column, and the pair
+ * would have to agree about what re-pinning an already-pinned item means.
+ *
+ * IT NEEDS NO LOCK, WHICH IS THE DIFFERENCE FROM `pinReceipt` ABOVE. That one
+ * holds "at most one receipt per expense" — an invariant over OTHER rows, which
+ * two concurrent writers can break without either of them seeing the other, so
+ * it serialises them on the expense row. Here the invariant is "at most one
+ * step per media item", and that is the column itself: a single UPDATE of a
+ * single row, where the loser of a race is simply the earlier write. A step
+ * carries as many pinned items as the planner puts on it, so there is nothing
+ * to clear first and nothing for a second writer to trample.
+ *
+ * THE STEP IS CHECKED ON THE EVENT, not merely by id. `timeline_item_id` is a
+ * plain foreign key to `events_timeline_item` with no composite key behind it,
+ * so Postgres would happily accept a step id belonging to a DIFFERENT trip —
+ * which would pin somebody's ticket to a day they cannot see and leave it
+ * rendered nowhere. Same 404 for "no such step" and "a step on another trip":
+ * which of the two it is, is not something this caller is entitled to learn.
+ */
+export async function setMediaTimelineItem(
+  userId: string,
+  slug: string,
+  mediaId: string,
+  timelineItemId: string | null
+): Promise<MediaItemView> {
+  const ev = await loadEventBySlug(slug)
+  // The same role set the itinerary itself takes (`addTimelineItem`,
+  // `moveTimelineItem`) and the same one that says who a ticket is for
+  // (`assertMayAssign`): pinning is an edit to the plan, made from the plan.
+  // `logistics` is not one of them, on both of those counts.
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+
+  const db = useDb()
+  const [item] = await db
+    .select()
+    .from(tables.media)
+    .where(and(eq(tables.media.id, mediaId), eq(tables.media.eventId, ev.id)))
+    .limit(1)
+  if (!item) throw createError({ statusCode: 404, message: 'Media not found' })
+  if (item.status !== 'ready') {
+    throw createError({ statusCode: 409, message: 'That upload has not finished yet' })
+  }
+  if (!isPinnableToTimeline(item.type)) {
+    throw createError({
+      statusCode: 422,
+      message: 'A ticket or a shared document goes on a step of the plan — photos and videos live in the gallery'
+    })
+  }
+
+  if (timelineItemId) {
+    const [step] = await db
+      .select({ id: tables.timelineItem.id })
+      .from(tables.timelineItem)
+      .where(and(eq(tables.timelineItem.id, timelineItemId), eq(tables.timelineItem.eventId, ev.id)))
+      .limit(1)
+    if (!step) throw createError({ statusCode: 404, message: 'That step is not on this trip' })
+  }
+
+  const [pinned] = await db
+    .update(tables.media)
+    .set({ timelineItemId })
+    .where(and(eq(tables.media.id, item.id), eq(tables.media.eventId, ev.id)))
+    .returning()
+  // Zero rows is reachable: a planner may delete the file between the read
+  // above and this write. A refusal, not a 500.
+  if (!pinned) throw createError({ statusCode: 404, message: 'Media not found' })
+
+  // The detail and the assignees come back with it, for the reason
+  // `ticketAfterAssignment` gives: this is what a caller re-renders from, and
+  // answering "nobody, nothing written on it" because somebody moved the ticket
+  // onto the 09:14 would read as an assignment that had been undone.
+  const [details, assignments] = await Promise.all([
+    loadTicketDetails([pinned.id]),
+    loadTicketAssignments([pinned.id])
+  ])
+  return toView(pinned, details.get(pinned.id), assignments.get(pinned.id) ?? [])
 }
 
 /**

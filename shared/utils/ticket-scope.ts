@@ -67,6 +67,43 @@ export function ticketsInScope<T extends ScopedTicket>(tickets: readonly T[], sc
   return scope === 'all' ? [...tickets] : tickets.filter(t => t.mine)
 }
 
+/** What a ticket has to carry for its assignees to be written as a sentence. */
+export interface LabelledTicket extends ScopedTicket {
+  /**
+   * Everybody this ticket is for, BY NAME — resolved by the server
+   * (`listMediaForViewer`), because the guest page is given names and no RSVP
+   * ids and an id here would render as a cuid2.
+   */
+  assignedTo: Array<{ rsvpId: string, name: string }>
+}
+
+/**
+ * WHOSE TICKET THIS IS, IN ONE LINE — "Yours — Ana, Ben", "For Cleo", or "Not
+ * assigned to anybody yet".
+ *
+ * IT LIVES HERE BECAUSE IT IS NOW SAID IN TWO PLACES. It was four lines inside
+ * `MediaGallery.vue` while the Tickets section was the only screen that named
+ * an assignee; #38 puts a pinned ticket on the itinerary step as well, and a
+ * step that said "For Ana" where the ticket list says "Yours — Ana, Ben" would
+ * be two screens disagreeing about the same row. A copy in each card is a rule
+ * that drifts silently — nothing in this repository executes a `.vue` file, so
+ * neither copy has a check where it stands.
+ *
+ * IT NAMES EVERYBODY (#36) EVEN WHEN IT IS YOURS. A pair fare reads
+ * "Yours — Ana, Ben" on both their screens, so neither of them has to work out
+ * why the same file is on the other's; dropping the names from the `mine` case
+ * would make the pair fare look like two different tickets.
+ *
+ * `mine` is the SERVER's marker (#37) and not a re-derivation: the browser does
+ * not have the viewer's RSVP ids, and a client matching on a typed name gets a
+ * pair fare wrong in both directions.
+ */
+export function ticketAssigneeLine(ticket: LabelledTicket): string {
+  if (ticket.assignedTo.length === 0) return 'Not assigned to anybody yet'
+  const names = ticket.assignedTo.map(a => a.name).join(', ')
+  return ticket.mine ? `Yours — ${names}` : `For ${names}`
+}
+
 /** What the list knows about itself when it is deciding whether to explain. */
 export interface TicketScopeCounts {
   /** Every ticket on the event — what `all` renders. */

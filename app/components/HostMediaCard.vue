@@ -47,9 +47,20 @@ const props = defineProps<{
   timezone: string | null
 }>()
 
+/**
+ * SHARED WITH `HostTimelineCard` UNDER AN EXPLICIT KEY (#38), which is the one
+ * thing holding the upload-then-pin flow together: that card offers what may go
+ * on a step, and before the key it held a SEPARATE copy of this list — so a
+ * ticket uploaded here was missing from its picker until a page reload. One
+ * keyed entry means the `refresh()` calls below invalidate what both cards
+ * render, and the host page fetches and signs this list once instead of twice.
+ *
+ * The key is spelled out rather than generated, so the sharing is visible in
+ * both files; `test/pinned-media.test.ts` pins the literal in each.
+ */
 const { data, refresh } = await useFetch<{ media: MediaItem[] }>(
   `/api/host/events/${props.slug}/media`,
-  { server: false, default: () => ({ media: [] }) }
+  { key: `host-media-${props.slug}`, server: false, default: () => ({ media: [] }) }
 )
 const toast = useToast()
 

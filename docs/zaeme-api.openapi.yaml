@@ -2367,7 +2367,22 @@ components:
             surface, where adding and removing one attendee are separate verbs;
             adding a verb to this API is the owner's decision and not this
             issue's (Bermos/zaeme#8).
-        timelineItemId: { type: [string, 'null'] }
+        timelineItemId:
+          type: [string, 'null']
+          description: >-
+            The itinerary step this ticket or shared paper is pinned to
+            (Bermos/zaeme#38), or null. The column has existed since the
+            transplant and this surface has carried it throughout; until #38 it
+            was carried by NOTHING a person could see and written by nothing at
+            all, so every instance answered null. It is now rendered on the step
+            on zäme's own guest itinerary and set from the host one.
+
+            READ-ONLY HERE, and the same sentence as `expenseId` below: the pin
+            is made on zäme's human surfaces, where it is an edit to the plan;
+            adding a verb to this API is the owner's decision and not this
+            issue's (Bermos/zaeme#8). A photo and a video are never pinned — a
+            step renders a file you hold up, and the gallery is the trip's
+            memory.
         expenseId:
           type: [string, 'null']
           description: >-

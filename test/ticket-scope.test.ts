@@ -238,7 +238,7 @@ describe('the card that renders it', () => {
     expect(body).toMatch(/scope = 'all'/)
     // AND WHO EACH ONE IS FOR IS ON SCREEN — the half of the acceptance
     // criteria that is about `All` being usable rather than merely full.
-    expect(body).toMatch(/assignedLine\(t\)/)
+    expect(body).toMatch(/ticketAssigneeLine\(t\)/)
   })
 
   it('makes the viewer identity a required prop, and binds it everywhere', () => {

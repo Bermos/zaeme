@@ -196,19 +196,17 @@ const shownTickets = computed(() => ticketView.value.shown)
  */
 const ticketNotice = computed(() => ticketView.value.notice)
 
-/**
- * WHO A TICKET IS FOR, ON SCREEN — the half of this issue that makes `All`
- * usable rather than merely full. A list of four PDFs named `ticket.pdf` with
- * nothing against them is not something you can hand to the right friend.
+/*
+ * WHO A TICKET IS FOR, ON SCREEN — the half of #37 that makes `All` usable
+ * rather than merely full — is `ticketAssigneeLine` in
+ * `shared/utils/ticket-scope.ts`, called straight from the template below.
  *
- * It names everybody (#36): a pair fare reads "Yours — Ana, Ben" on both their
- * screens, so neither has to work out why the same file is on the other's.
+ * It USED to be four lines here. #38 renders a pinned ticket on its itinerary
+ * step as well, and a step reading "For Ana" beside a list reading
+ * "Yours — Ana, Ben" would be two screens disagreeing about one row — so the
+ * sentence moved to where `test/ticket-scope.test.ts` can execute it, which a
+ * function in a `.vue` file never was.
  */
-function assignedLine(t: TicketItem): string {
-  if (t.assignedTo.length === 0) return 'Not assigned to anybody yet'
-  const names = t.assignedTo.map(a => a.name).join(', ')
-  return t.mine ? `Yours — ${names}` : `For ${names}`
-}
 </script>
 
 <template>
@@ -308,7 +306,7 @@ function assignedLine(t: TicketItem): string {
           </UButton>
           <!-- Whose it is, so `All` is a list you can hand around (#37/#36). -->
           <p class="text-sm text-muted pl-1">
-            {{ assignedLine(t) }}
+            {{ ticketAssigneeLine(t) }}
           </p>
           <p
             v-for="(line, i) in ticketDetailLines(t.ticket, timezone)"
