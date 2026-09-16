@@ -78,6 +78,13 @@
       "when": 1789556131178,
       "tag": "0010_skinny_thanos",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789567541335,
+      "tag": "0011_volatile_joystick",
+      "breakpoints": true
     }
   ]
 }

@@ -45,7 +45,12 @@ const BRIDGE = {
   category: 'man_made',
   type: 'bridge',
   name: 'Ponte 25 de Abril',
-  display_name: 'Ponte 25 de Abril, Lisboa, Portugal'
+  display_name: 'Ponte 25 de Abril, Lisboa, Portugal',
+  // What `addressdetails=1` adds, and the ONE field zäme reads out of it: the
+  // country code is how a geocoded place offers the trip's display zone (#31).
+  // Portugal on purpose — it has three zones, so the suggestion has to arrive
+  // as a list a host chooses from rather than as one answer picked for them.
+  address: { country_code: 'pt' }
 }
 
 /**

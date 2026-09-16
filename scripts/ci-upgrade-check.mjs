@@ -33,6 +33,17 @@
  * sums to zero, every entry still lands in the category account it was filed
  * under, every line points at an account that exists).
  *
+ * AND WHAT A MIGRATION INVENTED, which is the other half of the same idea and
+ * the one a purely additive release needs. #31 added `events_event.timezone`
+ * with no backfill on purpose: an event that already exists has no display zone
+ * and NULL is the truth about it, so a migration that reached for a constant —
+ * the instance's own clock, the first place's country — would put a zone on
+ * every trip nobody chose and quietly relabel every time on its itinerary. The
+ * snapshot records what the previous release reported (nothing at all, before
+ * that release; the stored value afterwards) and `verify` asserts against THAT
+ * rather than against a constant, which is the mistake that broke every branch
+ * until #72.
+ *
  * AND THE CURRENCY A TRIP IS DENOMINATED IN, which #59 added and which is the
  * one figure a migration may NOT restate even though it looks derived. That
  * release moved the currency off the instance and onto the event, filling
@@ -104,23 +115,26 @@ const HEADERS = {
  *       verification, carries its lines, sums to zero, every line has an
  *       account, still filed under its category)
  *   1   the trip still settles in what it settled in
+ *   1   the migration invented no display zone for it (#31)
  *   2   everybody who had a balance still has one; the balances still close
  *   4   the write block: readable, recorded, filed under Food, total moved
  *  ---
- *  22
+ *  23
  *
  * `snapshot` refuses to write a file unless the canary came back with both of
- * those expenses AND a category on each, so every one of the 22 is reachable —
+ * those expenses AND a category on each, so every one of the 23 is reachable —
  * the producer's guarantee and this consumer's floor are the same statement,
  * which is the bug this number had when it was 24 against a canary worth 20.
  * (The prose said 19 in two places while the arithmetic above said 22, from the
- * recount that fixed that bug. Nothing reads a comment, so it stayed wrong.)
+ * recount that fixed that bug. Nothing reads a comment, so it stayed wrong. The
+ * zone line above is the one #31 adds, counted the same way: one per event, and
+ * the canary is the one event `snapshot` guarantees.)
  *
  * Whatever a run finds BEYOND the canary is the smoke suite's leftovers, and
  * this deliberately does not depend on how many of those there are: that file
  * is free to change what it leaves behind.
  */
-const MIN_ASSERTIONS = 22
+const MIN_ASSERTIONS = 23
 
 let pass = 0
 let fail = 0
@@ -260,6 +274,12 @@ async function snapshot(file) {
     if (!slug) continue
     const budget = await api('GET', `/events/${slug}/budget`)
     if (budget.status !== 200) continue
+    // WHAT THIS RELEASE SAYS THE EVENT'S DISPLAY ZONE IS (#31), off the summary
+    // this loop already has. `undefined` here means the previous release has no
+    // such field at all, which is a fact about that release and not a value in
+    // its database; it is normalised to null and `verify` reads the two cases
+    // apart the same way `verificationClaim` does.
+    const timezone = summary.timezone ?? null
     // An event with NO expenses used to be skipped here, which left the half of
     // #59's backfill that fills from the instance setting checked by nothing —
     // and that is the only half this job can check at all. They are cheap (one
@@ -268,6 +288,7 @@ async function snapshot(file) {
     const expenses = Array.isArray(budget.json?.expenses) ? budget.json.expenses : []
     events.push({
       slug,
+      timezone,
       currency: budget.json.currency ?? null,
       totalCents: budget.json.totalCents ?? null,
       expenses: expenses.map(e => ({
@@ -299,10 +320,11 @@ async function snapshot(file) {
 
   // What `verify`'s floor rests on, asserted HERE, where the previous release
   // is still up and can say what went wrong. Both expenses, each with the
-  // category it was filed under: those two facts are what make all 22 of that
-  // floor's assertions reachable, so if this release reports its budget
+  // category it was filed under: those two facts are what make 22 of that
+  // floor's 23 assertions reachable, so if this release reports its budget
   // differently the run stops at the producer rather than at the consumer with
-  // a count nobody can explain.
+  // a count nobody can explain. The twenty-third — #31's display zone — needs
+  // nothing extra of the canary: every event in the snapshot carries one.
   const canary = events.find(e => e.slug === canarySlug)
   if (!canary || canary.expenses.length !== 2) {
     abort(`the canary trip ${canarySlug} came back with ${canary?.expenses.length ?? 'no'} expenses, not 2`)
@@ -346,6 +368,14 @@ async function verify(file) {
   if (!snap?.events?.length || !snap.canarySlug) {
     abort(`the snapshot at ${file} names no events — nothing would be asserted`)
   }
+
+  // The event summaries the NEW release answers, read once. `timezone` (#31)
+  // lives here rather than on the budget, and a map beats one request per event.
+  const summaries = await api('GET', '/events')
+  if (summaries.status !== 200 || !Array.isArray(summaries.json)) {
+    abort(`GET /api/v1/events answered ${summaries.status} on the new release: ${summaries.text.slice(0, 300)}`)
+  }
+  const zoneNow = new Map(summaries.json.filter(e => e?.slug).map(e => [e.slug, e.timezone ?? null]))
 
   for (const before of snap.events) {
     const res = await api('GET', `/events/${before.slug}/budget`)
@@ -483,6 +513,26 @@ async function verify(file) {
       `${before.slug}: the trip still settles in what it settled in`,
       before.currency === null || after.currency === before.currency,
       `was ${before.currency}, now ${after.currency}`
+    )
+
+    /*
+     * THE DISPLAY ZONE THE MIGRATION DID NOT INVENT (#31).
+     *
+     * Compared against the SNAPSHOT and never against a constant, for the
+     * reason the verification claim above is: "every event is null" is a
+     * property of WHICH RELEASE HAPPENS TO BE THE BASE, true only while no
+     * release could write a zone, and stale the moment one can — which is the
+     * shape that broke every branch cut from #59's commit until #72.
+     *
+     * Both halves are live against different bases. Where the snapshot has no
+     * zone at all — any release before #31 — the only honest fill is NONE, and
+     * a migration that defaulted every trip to the instance's clock fails here.
+     * Where it has one, the migration must have left it alone.
+     */
+    assert(
+      `${before.slug}: the migration invented no display zone for it`,
+      (zoneNow.get(before.slug) ?? null) === (before.timezone ?? null),
+      `was ${JSON.stringify(before.timezone ?? null)}, now ${JSON.stringify(zoneNow.get(before.slug) ?? null)}`
     )
 
     const nowBalances = new Map((after.balances ?? []).map(b => [b.email, b.netCents]))

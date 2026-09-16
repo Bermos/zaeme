@@ -117,7 +117,8 @@ const bridge: PlaceSuggestion = {
   lng: -9.177222,
   osmType: 'way',
   osmId: '4306103',
-  category: 'bridge'
+  category: 'bridge',
+  countryCode: 'pt'
 }
 
 const BASE_URL = process.env.BASE_URL
@@ -579,6 +580,42 @@ describe('a geocoder that cannot be reached is not a failed page', () => {
 
 /* ------------------------- reverse, and the request ----------------------- */
 
+describe('a geocoded place offers the trip\'s zone (#31)', () => {
+  it('derives the zones from the country the answer landed in', async () => {
+    const { store } = memoryStore()
+    const { provider } = stubProvider(async () => [bridge])
+    const answer = await searchPlaces('ponte 25 de abril', { provider, store, gate: openGate })
+    // Portugal, so three — the host picks. A single answer picked for them
+    // would be wrong for anybody going to the Azores.
+    expect(answer.results[0]?.timeZones).toContain('Europe/Lisbon')
+    expect(answer.results[0]?.timeZones).toContain('Atlantic/Azores')
+  })
+
+  it('derives them on the way out, so a cached answer is not a frozen zone list', async () => {
+    // `countryCode` is what the geocoder said and keeps for thirty days;
+    // `timeZones` is ICU's answer about that country and is re-derived on every
+    // read. A cache hit therefore carries the same list a fresh fetch would.
+    const { store } = memoryStore()
+    const { provider, calls } = stubProvider(async () => [bridge])
+    await searchPlaces('ponte 25 de abril', { provider, store, gate: openGate })
+    const cached = await searchPlaces('ponte 25 de abril', { provider, store, gate: openGate })
+    expect(cached.cached).toBe(true)
+    expect(calls()).toBe(1)
+    expect(cached.results[0]?.timeZones).toContain('Europe/Lisbon')
+  })
+
+  it('offers nothing when the geocoder named no country, and still answers the place', async () => {
+    // A row cached before `addressdetails` was asked for, or a pin in the sea.
+    // Search is unaffected; there is simply no suggestion to make.
+    const { store } = memoryStore()
+    const { provider } = stubProvider(async () => [{ ...bridge, countryCode: null }])
+    const answer = await searchPlaces('ponte 25 de abril', { provider, store, gate: openGate })
+    expect(answer.status).toBe('ok')
+    expect(answer.results[0]?.name).toBe('Ponte 25 de Abril')
+    expect(answer.results[0]?.timeZones).toEqual([])
+  })
+})
+
 describe('dropping a pin names a place', () => {
   it('asks about the rounded point it keyed, not the one it was handed', async () => {
     // Otherwise the cached answer is an answer to a question that was never
@@ -786,8 +823,27 @@ describe('a result lands in the column by #30\'s own rule', () => {
       lng: -9.177222,
       osmType: 'way',
       osmId: '4306103',
-      category: 'bridge'
+      category: 'bridge',
+      // `addressdetails=1` is asked for so that a geocoded place can offer the
+      // trip's display zone (#31). Absent here, because this fixture is the
+      // shape Nominatim answers WITHOUT it — which is also every row cached
+      // before that parameter was added, and they have to keep mapping.
+      countryCode: null
     })
+  })
+
+  it('reads the country code `addressdetails=1` adds, and nothing else from it', () => {
+    // The ONE field that parameter is asked for (#31): it is what lets a
+    // geocoded place offer the trip's display zone. Lower-cased, because
+    // Nominatim sends it lower-case and `Intl` is asked for an upper-case
+    // region — one normalisation, here, rather than at each reader.
+    const withCountry = { ...raw, address: { country_code: 'PT', city: 'Lisboa' } }
+    expect(mapNominatimResult(withCountry)?.countryCode).toBe('pt')
+    // Anything that is not two letters identifies no country and is dropped
+    // rather than sent to `Intl` to be refused there.
+    expect(mapNominatimResult({ ...raw, address: { country_code: 'Portugal' } })?.countryCode).toBeNull()
+    expect(mapNominatimResult({ ...raw, address: { country_code: 7 } })?.countryCode).toBeNull()
+    expect(mapNominatimResult({ ...raw, address: {} })?.countryCode).toBeNull()
   })
 
   it('names an unnamed result from the first line of its address', () => {

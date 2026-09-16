@@ -8,6 +8,26 @@ import type { EventAttributes, DateArray } from 'ics'
  * Deliberately domain-light — it speaks `IcsEventInput`, not the `events_*`
  * schema — so the routes and the confirmation-email job both map onto it
  * rather than this file reaching into the database.
+ *
+ * ── AND WHY #31'S DISPLAY ZONE IS NOT HERE ────────────────────────────────
+ *
+ * #31 gave `events_event` a `timezone`, and asked that these feeds be checked
+ * and left alone if they were already right. They were. Every `DTSTART` this
+ * file emits is form 2 of RFC 5545 §3.3.5 — `20260701T081400Z`, an absolute
+ * UTC instant — because `startInputType: 'utc'` is paired with a UTC date
+ * array. An instant is unambiguous, needs no `VTIMEZONE`, and every calendar
+ * client already renders it against the clock of whoever is reading, which is
+ * what a calendar is for and is the one place the phone's zone is the right
+ * answer.
+ *
+ * The alternative is `DTSTART;TZID=Europe/Lisbon:20260701T091400`, and it is
+ * worse in both directions: it names the same moment, so nothing on anybody's
+ * screen improves, and RFC 5545 §3.2.19 requires a matching `VTIMEZONE`
+ * component in the same iCalendar object — which the `ics` package does not
+ * emit. Adding the parameter without it would produce a document that is
+ * invalid, and that a strict client is entitled to reject: a feed that stops
+ * working, to change nothing. So the zone is a zäme-screen concern and this
+ * file carries no knowledge of it.
  */
 
 export interface IcsEventInput {

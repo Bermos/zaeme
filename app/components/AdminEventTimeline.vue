@@ -22,7 +22,22 @@ interface TimelineItem {
   sortOrder: number | null
 }
 
-const props = defineProps<{ slug: string }>()
+const props = withDefaults(
+  defineProps<{
+    slug: string
+    /**
+     * The event's display zone (#31), from the row this editor is nested in.
+     *
+     * IT IS NOT OPTIONAL POLISH HERE. This component edits the SAME column
+     * `HostTimelineCard` edits, so if one of them reads `09:14` against Lisbon
+     * and the other against the owner's own clock, a correction made from
+     * `/admin` moves the item by the difference — and `/admin` exists precisely
+     * for the events the owner does not plan and cannot check on `/host`.
+     */
+    timezone?: string | null
+  }>(),
+  { timezone: null }
+)
 
 const toast = useToast()
 
@@ -57,19 +72,16 @@ function message(e: unknown, fallback: string): string {
   return (e as { data?: { message?: string } }).data?.message ?? fallback
 }
 
-/** `datetime-local` wants `YYYY-MM-DDTHH:mm` in LOCAL time, not an ISO string. */
+/** `datetime-local` wants `YYYY-MM-DDTHH:mm`, on the EVENT's clock (#31). */
 function toLocalInput(value: string | null): string {
-  if (!value) return ''
-  const d = new Date(value)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return toZonedInputValue(value, props.timezone)
 }
 
 function when(iso: string | null): string | null {
-  return iso
-    ? new Date(iso).toLocaleString('en-CH', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
-    : null
+  return formatInZone(iso, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }, props.timezone)
 }
+
+const zoneLine = computed(() => zoneNote(props.timezone))
 
 const editingId = ref<string | null>(null)
 const saving = ref(false)
@@ -93,7 +105,7 @@ async function saveEdit(id: string) {
       body: {
         title: draft.title,
         type: draft.type,
-        startsAt: draft.when ? new Date(draft.when).toISOString() : null,
+        startsAt: draft.when ? isoFromZonedInput(draft.when, props.timezone) : null,
         location: draft.location || null,
         description: draft.description || null
       }
@@ -137,6 +149,12 @@ async function move(id: string, direction: 'up' | 'down') {
 
 <template>
   <div class="flex flex-col gap-1 py-2">
+    <p
+      v-if="zoneLine && !pending"
+      class="text-xs text-muted"
+    >
+      🕓 {{ zoneLine }} — type them as they are there.
+    </p>
     <p
       v-if="pending"
       class="text-muted text-sm"

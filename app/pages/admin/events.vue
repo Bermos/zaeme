@@ -229,7 +229,10 @@ const WHEN_ITEMS = [
                   colspan="8"
                   class="px-3 pb-3 bg-elevated/50"
                 >
-                  <AdminEventTimeline :slug="ev.slug" />
+                  <AdminEventTimeline
+                    :slug="ev.slug"
+                    :timezone="ev.timezone"
+                  />
                 </td>
               </tr>
             </template>

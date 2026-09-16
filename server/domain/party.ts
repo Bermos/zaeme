@@ -21,6 +21,8 @@ export interface CreatePartyInput {
   description?: string | null
   posterUrl?: string | null
   location?: string | null
+  /** The display zone (#31), same rule as every other creation path. */
+  timezone?: string | null
   /** The core group who pick the date — one personalised `core` invite each. */
   coreInvites: Array<{ name: string, email?: string | null }>
   /** Candidate dates the core group votes on. */
@@ -45,7 +47,8 @@ export async function createParty(userId: string, input: CreatePartyInput) {
     type: 'party',
     description: input.description ?? null,
     posterUrl: input.posterUrl ?? null,
-    location: input.location ?? null
+    location: input.location ?? null,
+    timezone: input.timezone ?? null
   })
 
   for (const option of input.dateOptions) {

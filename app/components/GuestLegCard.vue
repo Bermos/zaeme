@@ -17,7 +17,20 @@
  */
 interface Place { id: string, name: string }
 
-const props = defineProps<{ token: string, places: Place[] }>()
+const props = withDefaults(
+  defineProps<{
+    token: string
+    places: Place[]
+    /**
+     * The trip's display zone (#31). The rest of this page reads its times
+     * against it, so the departure typed here is read against it too — usually
+     * the same clock the phone is on, and not the same one for the friend who
+     * is writing up the afternoon from home.
+     */
+    timezone?: string | null
+  }>(),
+  { timezone: null }
+)
 const emit = defineEmits<{ updated: [] }>()
 
 const toast = useToast()
@@ -35,6 +48,7 @@ const MODE_ITEMS = [
 
 const placeItems = computed(() => props.places.map(p => ({ label: p.name, value: p.id })))
 const enough = computed(() => props.places.length >= 2)
+const zoneLine = computed(() => zoneNote(props.timezone))
 
 const form = reactive({ fromPlaceId: '', toPlaceId: '', mode: 'walk', departsAt: '', durationMinutes: '', note: '' })
 const saving = ref(false)
@@ -49,7 +63,7 @@ async function add() {
         fromPlaceId: form.fromPlaceId,
         toPlaceId: form.toPlaceId,
         mode: form.mode,
-        departsAt: form.departsAt ? new Date(form.departsAt).toISOString() : null,
+        departsAt: form.departsAt ? isoFromZonedInput(form.departsAt, props.timezone) : null,
         durationMinutes: form.durationMinutes ? Number(form.durationMinutes) : null,
         note: form.note || null
       }
@@ -79,6 +93,12 @@ async function add() {
         </p>
         <p class="text-sm text-muted">
           Plans change. Add how the group actually travelled between two places — no account needed.
+        </p>
+        <p
+          v-if="zoneLine"
+          class="text-xs text-muted mt-0.5"
+        >
+          🕓 {{ zoneLine }} — type the time as it is there.
         </p>
       </div>
     </template>

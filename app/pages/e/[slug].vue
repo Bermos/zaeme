@@ -51,10 +51,22 @@ async function iGo(status: 'yes' | 'cheering' | 'no') {
   }
 }
 
+/**
+ * The gig's own clock (#31), when it has one. A concert page is PUBLIC and
+ * SSR'd, so this is the one place the zone has to be right in the HTML before
+ * any JavaScript runs — a fan opening the link from abroad reads the doors time
+ * off the server's render.
+ *
+ * The abbreviation is stamped per instant rather than per page; see the note on
+ * the invite page's `when`.
+ */
 function when(iso: string | Date | null | undefined): string | null {
-  return iso
-    ? new Date(iso).toLocaleString('en-CH', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
-    : null
+  const zone = page.value?.event.timezone ?? null
+  return formatInZone(
+    iso,
+    { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZoneName: zone ? 'short' : undefined },
+    zone
+  )
 }
 </script>
 

@@ -5,25 +5,39 @@
  * and the programme strip of upcoming showings. Deliberately the one dark
  * corner of an otherwise light, stock-Nuxt-UI app: a cinema is dark.
  */
-defineProps<{
-  series: {
-    title: string
-    cadence: string | null
-    upcoming: Array<{ title: string, startsAt: string | Date | null }>
-    pastCount: number
-  }
-  eventTitle: string
-  posterUrl: string | null
-  startsAt: string | Date | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    series: {
+      title: string
+      cadence: string | null
+      upcoming: Array<{ title: string, startsAt: string | Date | null, timezone?: string | null }>
+      pastCount: number
+    }
+    eventTitle: string
+    posterUrl: string | null
+    startsAt: string | Date | null
+    /** THIS showing's display zone (#31); null is the reader's own. */
+    timezone?: string | null
+  }>(),
+  { timezone: null }
+)
 
+/** The showtime of the showing being read, against its own clock. */
 function showtime(value: string | Date | null): string | null {
-  if (!value) return null
-  return new Date(value).toLocaleString('en-CH', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
+  return formatInZone(
+    value,
+    { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZoneName: props.timezone ? 'short' : undefined },
+    props.timezone
+  )
 }
 
-function short(value: string | Date | null): string {
-  return value ? new Date(value).toLocaleDateString('en-CH', { day: 'numeric', month: 'short' }) : 'TBD'
+/**
+ * A sibling showing, against ITS OWN clock and not this one's. Two showings of
+ * a series can be in different places, and one zone over the whole programme
+ * strip would be the multi-zone claim #31 deliberately did not make.
+ */
+function short(value: string | Date | null, zone?: string | null): string {
+  return formatInZone(value, { day: 'numeric', month: 'short' }, zone ?? null) ?? 'TBD'
 }
 </script>
 
@@ -69,7 +83,7 @@ function short(value: string | Date | null): string {
           v-for="(u, i) in series.upcoming"
           :key="i"
         >
-          {{ i > 0 ? ' · ' : '' }}{{ u.title }} ({{ short(u.startsAt) }})
+          {{ i > 0 ? ' · ' : '' }}{{ u.title }} ({{ short(u.startsAt, u.timezone) }})
         </span>
       </p>
     </div>

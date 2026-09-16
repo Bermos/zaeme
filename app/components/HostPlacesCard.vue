@@ -64,7 +64,15 @@ interface Leg {
 }
 interface Geography { places: Place[], legs: Leg[] }
 
-const props = defineProps<{ slug: string, geography: Geography }>()
+const props = withDefaults(
+  defineProps<{
+    slug: string
+    geography: Geography
+    /** The trip's display zone (#31): what the leg times below are read against. */
+    timezone?: string | null
+  }>(),
+  { timezone: null }
+)
 const emit = defineEmits<{ updated: [] }>()
 
 const toast = useToast()
@@ -110,6 +118,8 @@ interface Suggestion {
   osmType: string | null
   osmId: string | null
   category: string | null
+  /** The zones the country this landed in has (#31). See `offerZones` below. */
+  timeZones?: string[]
 }
 interface GeocodeAnswer {
   status: 'ok' | 'unavailable'
@@ -190,6 +200,7 @@ const addingPlace = ref(false)
  * second pin on the first.
  */
 function useSuggestion(s: Suggestion) {
+  offerZones(s)
   newPlace.name = s.name
   newPlace.address = s.address ?? ''
   newPlace.lat = String(s.lat)
@@ -394,7 +405,7 @@ async function addLeg() {
         fromPlaceId: newLeg.fromPlaceId,
         toPlaceId: newLeg.toPlaceId,
         mode: newLeg.mode,
-        departsAt: newLeg.departsAt ? new Date(newLeg.departsAt).toISOString() : null,
+        departsAt: newLeg.departsAt ? isoFromZonedInput(newLeg.departsAt, props.timezone) : null,
         durationMinutes: newLeg.durationMinutes ? Number(newLeg.durationMinutes) : null,
         note: newLeg.note || null,
         isPlanned: newLeg.isPlanned
@@ -446,9 +457,57 @@ async function togglePlanned(leg: Leg) {
 }
 
 function when(value: string | Date | null): string | null {
-  return value
-    ? new Date(value).toLocaleString('en-CH', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
-    : null
+  return formatInZone(value, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }, props.timezone)
+}
+
+const zoneLine = computed(() => zoneNote(props.timezone))
+
+/* ---- the zone a geocoded place suggests (#31 over #32) ---- */
+
+/**
+ * WHAT A GEOCODED PLACE OFFERS, AND WHAT IT NEVER DOES.
+ *
+ * The zone is the one field of this feature a host is unlikely to know by name
+ * — `Europe/Lisbon` is not how anybody says "Lisbon" — and a place that has
+ * just been looked up on a map already knows which country it is in. So
+ * choosing a search result offers the zones of that country, from ICU's own
+ * data (`shared/utils/timezone.ts`), and a click sets it.
+ *
+ * IT IS AN OFFER AND NEVER A WRITE. Picking a search result fills a form; it
+ * must not also relabel the whole trip's clock behind the planner's back —
+ * especially not on the third place of a trip that crosses a border, where the
+ * silent version would leave the itinerary reading against wherever the last
+ * pin happened to be. Portugal has THREE zones and the United States has
+ * twenty-nine: the honest answer to "which one" is to show them and let the
+ * person who is going say.
+ *
+ * The offer is skipped when the trip is already in one of that country's
+ * zones, which is the usual case from the second place onwards.
+ */
+const zoneOffer = ref<{ place: string, zones: string[] } | null>(null)
+const settingZone = ref<string | null>(null)
+
+function offerZones(s: Suggestion) {
+  const zones = (s.timeZones ?? []).slice(0, 4)
+  if (!zones.length || (props.timezone && zones.includes(props.timezone))) {
+    zoneOffer.value = null
+    return
+  }
+  zoneOffer.value = { place: s.name, zones }
+}
+
+async function useZone(zone: string) {
+  settingZone.value = zone
+  try {
+    await $fetch(`/api/host/events/${props.slug}`, { method: 'PATCH', body: { timezone: zone } })
+    zoneOffer.value = null
+    emit('updated')
+    toast.add({ title: `Times now shown in ${zone}`, color: 'success' })
+  } catch (e) {
+    toast.add({ title: message(e, 'Could not set the time zone'), color: 'error' })
+  } finally {
+    settingZone.value = null
+  }
 }
 
 function coordinates(place: Place): string | null {
@@ -466,6 +525,12 @@ function coordinates(place: Place): string | null {
         <p class="text-sm text-muted">
           Pin the hotel, the trailhead, the restaurant — coordinates optional — then say how you travel between them.
           Guests see a place's name and its position; notes and addresses stay with the planning team.
+        </p>
+        <p
+          v-if="zoneLine"
+          class="text-xs text-muted mt-0.5"
+        >
+          🕓 {{ zoneLine }} — type departure times as they are there.
         </p>
       </div>
     </template>
@@ -614,6 +679,37 @@ function coordinates(place: Place): string | null {
             <p class="text-xs text-muted">
               {{ attribution }}
             </p>
+          </div>
+          <!-- The zone that place suggests (#31): an offer, never a write. -->
+          <div
+            v-if="zoneOffer"
+            class="flex flex-col gap-1.5 rounded-md bg-elevated px-3 py-2"
+          >
+            <p class="text-sm">
+              🕓 {{ zoneOffer.place }} is in
+              {{ zoneOffer.zones.length > 1 ? 'one of these zones' : zoneOffer.zones[0] }}.
+              Show this trip's times in it?
+            </p>
+            <div class="flex flex-wrap gap-1.5">
+              <UButton
+                v-for="zone in zoneOffer.zones"
+                :key="zone"
+                size="xs"
+                variant="soft"
+                :loading="settingZone === zone"
+                @click="useZone(zone)"
+              >
+                {{ zone }}
+              </UButton>
+              <UButton
+                size="xs"
+                variant="ghost"
+                color="neutral"
+                @click="zoneOffer = null"
+              >
+                Not now
+              </UButton>
+            </div>
           </div>
           <!-- The two states that must never read as each other. -->
           <p

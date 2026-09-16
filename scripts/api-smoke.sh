@@ -448,6 +448,30 @@ leg_orders() {
 tl_titles() { printf '%s' "$1" | grep -o '"title":"[^"]*"' | sed 's/^"title":"//;s/"$//' | tr '\n' ' ' | sed 's/ $//'; }
 tl_orders() { printf '%s' "$1" | grep -o '"sortOrder":[0-9-]*' | sed 's/^"sortOrder"://' | tr '\n' ' ' | sed 's/ $//'; }
 tl_ids()    { printf '%s' "$1" | grep -o '"id":"[^"]*"' | sed 's/^"id":"//;s/"$//' | tr '\n' ' ' | sed 's/ $//'; }
+# `tl_start <body> <title>` — the RAW instant one itinerary item is stored at
+# (#31), out of a `/api/v1` timeline array or out of any aggregate carrying a
+# `timeline`.
+#
+# A `grep -o` over `"startsAt":"…"` would have done it in one line and would
+# have been the wrong tool: an aggregate carries an event's own start, a poll
+# option's and a timeline item's under that same key, so the regex matches its
+# SIBLINGS and the answer depends on which surface is read. Naming the item is
+# what makes "this instant did not move" a statement about one row. Sentinels
+# rather than an empty string, for the usual reason: two empty strings compare
+# equal, so a dead server would read as proof that nothing changed.
+tl_start() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const list = Array.isArray(b) ? b : (b.timeline ?? [])
+      if (!Array.isArray(list)) return process.stdout.write("no-timeline")
+      const item = list.find(x => x.title === process.argv[1])
+      if (!item) return process.stdout.write("no-such-item")
+      process.stdout.write(item.startsAt == null ? "null" : String(item.startsAt))
+    })' "$2"
+}
 
 # `geocode_shape <body>` (#32) — "well-formed", or what is wrong with it.
 #
@@ -494,6 +518,40 @@ geocode_shape() {
         if ((r.osmType === null) !== (r.osmId === null)) return process.stdout.write("result-with-half-an-osm-reference")
       }
       process.stdout.write("well-formed")
+    })'
+}
+
+# `geocode_zones <body>` (#31 over #32) — whether the zone suggestion is honest.
+#
+# Same discipline as `geocode_shape` above, and the same reason: a geocoder is
+# somebody else's server, so this is a verdict about the RULE rather than an
+# expectation of a particular place. The rule is that every result carries a
+# `timeZones` array, and that a result which names a country carries at least
+# one zone in it — ICU knows the zones of every country there is, so an empty
+# list beside a country code means the derivation was dropped rather than that
+# the country has no clocks. A result with no country (a pin in the sea, a row
+# cached before `addressdetails` was asked for) offers nothing, which is
+# correct and is not a fault.
+#
+# `well-zoned` is therefore also the right answer for an EMPTY result list and
+# for the unavailable envelope: there is nothing to suggest and nothing wrong.
+geocode_zones() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      if (!Array.isArray(b.results)) return process.stdout.write("no-results-array")
+      for (const r of b.results) {
+        if (!Array.isArray(r.timeZones)) return process.stdout.write("result-with-no-zone-list")
+        if (r.countryCode && r.timeZones.length === 0) return process.stdout.write("country-without-zones")
+        for (const z of r.timeZones) {
+          if (typeof z !== "string" || !/^[A-Za-z][A-Za-z0-9_-]*(\/[A-Za-z0-9_+-]+)+$/.test(z) || /^Etc\//.test(z)) {
+            return process.stdout.write("zone-that-is-not-a-region-name")
+          }
+        }
+      }
+      process.stdout.write("well-zoned")
     })'
 }
 
@@ -2574,6 +2632,13 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   contains "...echoing the query as it was keyed"      "$S1" '"query":"ponte 25 de abril"'
   contains "...naming the geocoder that answered"      "$S1" '"provider":"nominatim"'
   contains "...and the attribution OSM data needs"     "$S1" 'OpenStreetMap contributors'
+  # THE ZONE A GEOCODED PLACE OFFERS (#31). `addressdetails=1` is asked for so
+  # that a result can carry the country it landed in, and the zones of that
+  # country are derived from ICU on the way out — which is how a host who does
+  # not know that Lisbon is spelled `Europe/Lisbon` gets offered it. Asserted as
+  # a verdict about the rule rather than about Portugal, for the reason the
+  # whole section gives: no check here may need Nominatim to answer.
+  equals "...offering the zones of the country it is in" "$(geocode_zones "$S1")" "well-zoned"
 
   # THE CACHE, on a query NOTHING has ever asked — this suite re-runs against
   # the database the last run left behind, and "Ponte 25 de Abril" may well be
@@ -2602,6 +2667,7 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   equals "...in one of the two shapes as well"    "$(geocode_shape "$R1")" "well-formed"
   contains "...keyed on the pin, not on a name"        "$R1" '"query":"38.68944,-9.17722"'
   contains "...and a finer pin is the same question"   "$(body "${PLN32[@]}" "$HREVERSE?lat=38.6894441&lng=-9.1772221")" '"query":"38.68944,-9.17722"'
+  equals "...and a named pin offers a zone too (#31)" "$(geocode_zones "$R1")" "well-zoned"
 
   # THREE PLANNERS AT ONCE. The rate limiter is a queue in one process, so the
   # thing worth executing is that it neither deadlocks nor 500s when three
@@ -2655,6 +2721,169 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # issue is on the path of adding one, and the form works with the geocoder
   # unreachable because that is still the only way a place is written.
   contains "...and still has no coordinates at all"    "$KEPT" '"name":"Ana upstairs flat","address":null,"lat":null,"lng":null'
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
+
+echo
+echo "== an event abroad shows its itinerary in its own zone (Bermos/zaeme#31) =="
+# WHAT IS EXECUTED HERE, and why none of it is decidable from the source.
+#
+# `events_event.timezone` is a DISPLAY label: what it must never do is move a
+# stored instant, and "we did not write a conversion" is a claim about today's
+# code rather than about the database. So the itinerary's departure is written
+# BEFORE the zone is set and read back AFTER — twice, on two surfaces, against
+# the value it was written with rather than against a constant. A refactor that
+# "helpfully" rebased the stored times onto the new zone reddens here and
+# nowhere else in this repository.
+#
+# The rest is the validation's PERMIT SET, which is the half a refusal test
+# usually misses: `Intl.DateTimeFormat` accepts `+01:00`, `Etc/GMT+5` and `UTC`,
+# and every one of them reads correctly in March and an hour wrong in April. A
+# unit test proves the rule; this proves the ROUTE applies it, on the surface a
+# person actually uses — the host session, where `BudgetCard`'s lesson applies:
+# proving it on `/api/v1` would prove nothing about the screen, and in this case
+# `/api/v1` deliberately does not take the field at all.
+TZTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke abroad $SUFFIX\",\"type\":\"trip\"}")
+TZSLUG=$(printf '%s' "$TZTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+TZHOST="$BASE/api/host/events/$TZSLUG"
+echo "  trip: $TZSLUG"
+
+# A trip planned with no zone HAS no zone — null, not the instance's clock and
+# not the server's. Read off the machine surface, which is where the field is
+# reported: the create response carries only an id and a slug.
+contains "a new trip has no zone at all"         "$(body "${AUTH[@]}" "$API/events/$TZSLUG")" '"timezone":null'
+# A DISPLAY ZONE IS NOT A CREDENTIAL AND NOT A MACHINE FIELD. Setting one is
+# the host's screen, which is the decision the read-only `/api/v1` shape
+# records; a body carrying it is refused by the strict schema rather than
+# silently ignored, which is the difference between "not offered" and "accepted
+# and dropped".
+check "setting a zone needs a session"           401 "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"Europe/Lisbon"}'
+check "...and a service token is not one"        401 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"Europe/Lisbon"}'
+check "the machine API does not take a zone"     422 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$API/events/$TZSLUG" -d '{"timezone":"Europe/Lisbon"}'
+check "...nor on the way in"                     422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Zoned at birth $SUFFIX\",\"timezone\":\"Europe/Lisbon\"}"
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  TZP=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+
+  # The 09:14 out of Lisbon, written as the instant it is. This is the value
+  # every assertion below compares against — never a constant, so a migration or
+  # a refactor that shifted it by an hour cannot agree with the expectation.
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TZSLUG/timeline" \
+    -d '{"title":"The early ferry west","startsAt":"2027-07-01T08:14:00Z","type":"transport"}' > /dev/null
+  TZBEFORE=$(tl_start "$(body "${AUTH[@]}" "$API/events/$TZSLUG/timeline")" "The early ferry west")
+  # THE ANTI-VACUITY GUARD, and the only literal in this block. Every comparison
+  # below is against `$TZBEFORE`; if the helper found nothing it would answer a
+  # sentinel both times and "the instant did not move" would be two sentinels
+  # agreeing with each other. This is the line that says the fixture is there,
+  # and is the instant it was written as.
+  equals "the itinerary has a departure to watch" "$TZBEFORE" "2027-07-01T08:14:00.000Z"
+
+  SET=$(body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"Europe/Lisbon"}')
+  contains "a planner sets the trip's zone"           "$SET" '"timezone":"Europe/Lisbon"'
+  contains "...and the host aggregate reports it"     "$(body "${TZP[@]}" "$TZHOST")" '"timezone":"Europe/Lisbon"'
+  contains "...as does the machine API, read-only"    "$(body "${AUTH[@]}" "$API/events/$TZSLUG")" '"timezone":"Europe/Lisbon"'
+
+  # THE BOUNDARY THE ISSUE DRAWS IN TERMS: storage does not change. Compared
+  # against what was written above, on the machine surface and again on the
+  # human one, because the two read through different projections.
+  equals "setting a zone moves no stored instant" \
+    "$(tl_start "$(body "${AUTH[@]}" "$API/events/$TZSLUG/timeline")" "The early ferry west")" "$TZBEFORE"
+  equals "...on the host surface either"          \
+    "$(tl_start "$(body "${TZP[@]}" "$TZHOST")" "The early ferry west")" "$TZBEFORE"
+
+  # The guest is who this is for: an invite link is what gets forwarded, and it
+  # is SSR'd, so the zone has to reach the page that renders the departure.
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TZSLUG/status" -d '{"status":"published"}' > /dev/null
+  TZTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TZSLUG/invites" -d '{"label":"Zone smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  TZINVITE=$(body "$BASE/api/invites/$TZTOK")
+  contains "the invite link carries the zone"         "$TZINVITE" '"timezone":"Europe/Lisbon"'
+  equals "...and the departure on it is untouched"    "$(tl_start "$TZINVITE" "The early ferry west")" "$TZBEFORE"
+
+  # THE RENDER, AND NOT ONLY THE FIELD. Everything above proves the zone is
+  # stored and reported; none of it would go red if every screen went on
+  # formatting against the reader's clock, because JSON carries an instant and
+  # not a rendering. The invite page is SSR'd — that is the whole reason the
+  # zone exists, since a forwarded link has to say the right time in the HTML
+  # before any JavaScript runs — so the rendered page is fetched and read.
+  #
+  # The fixture item is called "The early ferry west" ON PURPOSE. It used to be
+  # "The 09:14 to Lisbon", which put the asserted time in the TITLE: the needle
+  # would have matched its own sibling and passed with the rendering dropped.
+  #
+  # `08:14` is the same instant read against this server's own clock, and its
+  # absence is what says the page is not quietly rendering in the container's
+  # zone. That half is only DISCRIMINATING on a server that is not itself in
+  # Europe/Lisbon (CI is UTC); the zone note above it is discriminating
+  # everywhere, because a page rendering in its own clock never names another.
+  #
+  # BOTH TIME NEEDLES ARE ANCHORED ON THE ELEMENT BOUNDARIES (`>09:14<`), and
+  # that is not fussiness: Nuxt serialises the whole payload into
+  # `__NUXT_DATA__` on the same page, so the raw instant
+  # `2027-07-01T08:14:00.000Z` is in the HTML by construction and a bare
+  # `excludes '08:14'` fails against a perfectly correct render. It did, which
+  # is how this note came to be written.
+  TZHTML=$(body "$BASE/i/$TZTOK")
+  contains "the SSR'd invite page names the clock"    "$TZHTML" 'Times are in Europe/Lisbon'
+  contains "...and renders the ferry at 09:14 there"  "$TZHTML" '>09:14<'
+  excludes "...not at this server's own 08:14"        "$TZHTML" '>08:14<'
+
+  # CASE IS FOLDED, AN ALIAS IS NOT. A host who types it in lower case gets the
+  # spelling back that every screen will then show.
+  contains "a lower-case zone comes back canonical"   "$(body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"europe/lisbon"}')" '"timezone":"Europe/Lisbon"'
+
+  # THE PERMIT SET. Every one of these is accepted by `Intl.DateTimeFormat` and
+  # refused here, and the reason is the third acceptance criterion: a fixed
+  # offset cannot follow a daylight-saving change, so a trip labelled `+01:00`
+  # is right in March and an hour wrong in April with nothing saying so.
+  #
+  # 422 AND NOT 400 IS THE POINT. The route's schema bounds the length and
+  # nothing else, so a 400 here would mean zod refused it and the domain rule
+  # was never consulted — which is a different finding and the same colour.
+  check "a fixed offset is not a time zone"       422 "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"+01:00"}'
+  check "...nor is the Etc area that spells one"  422 "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"Etc/GMT+5"}'
+  check "...nor UTC"                              422 "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"UTC"}'
+  check "...nor a region that does not exist"     422 "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"America/Nowhere"}'
+  contains "...and the refusal says what one looks like" \
+    "$(body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"America/Nowhere"}')" 'Use a region name like Europe/Lisbon'
+  # A REFUSAL WRITES NOTHING. Four 422s in a row must leave the trip exactly as
+  # it was; a handler that assigned before validating would leave it on the last
+  # thing anybody typed.
+  contains "four refusals later the zone is untouched" "$(body "${TZP[@]}" "$TZHOST")" '"timezone":"Europe/Lisbon"'
+
+  # CLEARING IT IS A VALUE, NOT A MISTAKE — it is what every event had before
+  # this column and what a host who wants the reader's own clock is asking for.
+  # It must not arrive as the 422 above.
+  CLEARED=$(body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":null}')
+  contains "clearing the zone is allowed"             "$CLEARED" '"timezone":null'
+  contains "...and an empty string means the same"    "$(body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":""}')" '"timezone":null'
+  equals "...and clearing it moves no instant either" \
+    "$(tl_start "$(body "${AUTH[@]}" "$API/events/$TZSLUG/timeline")" "The early ferry west")" "$TZBEFORE"
+  # Absent is not null: a PATCH about something else must not clear the zone.
+  body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"Pacific/Chatham"}' > /dev/null
+  body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"location":"Cais do Sodre"}' > /dev/null
+  contains "a PATCH about something else keeps it"    "$(body "${TZP[@]}" "$TZHOST")" '"timezone":"Pacific/Chatham"'
+
+  # A SHOWING INHERITS ITS SERIES' CLOCK, which is a decision taken on the
+  # owner's behalf and is executed here because nothing else can see it: a
+  # showing is a separate event row, written by `scheduleOccurrence` in the same
+  # breath as the description, the location and the currency it already
+  # inherited. Without this the container's page would list the showtime in the
+  # series' clock while the showing's own invite link rendered the same instant
+  # in the reader's — one screen contradicting the other about one evening.
+  TZSER=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke cinema abroad $SUFFIX\",\"type\":\"series\"}")
+  TZSERSLUG=$(printf '%s' "$TZSER" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${TZP[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$TZSERSLUG" -d '{"timezone":"Europe/Lisbon"}' > /dev/null
+  TZSHOW=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TZSERSLUG/series/showings" \
+    -d '{"title":"Fados","startsAt":"2027-07-08T19:00:00+01:00"}')
+  contains "a showing inherits the series' clock"     "$TZSHOW" '"timezone":"Europe/Lisbon"'
+  # …and a series with NO zone still mints showings with none, which is the half
+  # that says this is inheritance and not a default somebody reached for.
+  TZSER2=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke cinema at home $SUFFIX\",\"type\":\"series\"}")
+  TZSERSLUG2=$(printf '%s' "$TZSER2" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  contains "...and a zoneless series mints zoneless ones" \
+    "$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TZSERSLUG2/series/showings" -d '{"title":"Heat","startsAt":"2027-07-09T20:00:00+02:00"}')" '"timezone":null'
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
 fi

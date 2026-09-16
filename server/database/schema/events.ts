@@ -65,6 +65,35 @@ export const event = pgTable('events_event', {
   posterUrl: text('poster_url'),
   startsAt: timestamp('starts_at', { withTimezone: true }),
   endsAt: timestamp('ends_at', { withTimezone: true }),
+  /**
+   * WHICH WALL CLOCK THIS EVENT'S TIMES ARE READ AGAINST (#31). An IANA region
+   * name — `Europe/Lisbon` — and NULL for "the viewer's own", which is what
+   * every screen did before this column and is the right answer for a party
+   * happening where the people coming are standing.
+   *
+   * IT CHANGES NOTHING THAT IS STORED. `starts_at`, `ends_at`,
+   * `events_timeline_item.starts_at` and `events_itinerary_leg.departs_at` are
+   * `timestamptz` and stay `timestamptz`: an instant, in UTC, unchanged by
+   * anybody setting or clearing this. The 09:14 from Lisbon is one moment; the
+   * only question this answers is whether the itinerary says 09:14 or 10:14 to
+   * the friend reading it in Zürich, which on a trip is the difference between
+   * catching the train and watching it leave.
+   *
+   * ONE ZONE PER EVENT is deliberately the cheap answer. A multi-city trip
+   * really has more than one, and `events_place` (#30) is where a per-place
+   * zone would live if that turns out to matter — but a column there is a
+   * different feature with a different question behind it ("which place is this
+   * time at?"), and guessing at it now would be building the expensive answer
+   * before anybody has asked for it.
+   *
+   * NULLABLE, no default and no backfill: an event that already exists
+   * genuinely has no zone, and filling one in from the instance's own clock
+   * would state something about a trip nobody said. What may be written here is
+   * decided by `shared/utils/timezone.ts` — a NAMED REGION zone only, because a
+   * fixed offset (`+01:00`, `Etc/GMT+5`) reads correctly in March and an hour
+   * wrong in April with nothing on screen to say so.
+   */
+  timezone: text('timezone'),
   location: text('location'),
   venueStation: text('venue_station'),
   // Concert-specific fields
