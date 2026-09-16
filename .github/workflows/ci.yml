@@ -193,11 +193,48 @@ concurrency:
 # value read back, because a `countRecordedExpenses` that always returned 0
 # would otherwise fail nothing while /admin/settings prints its answer.
 #
+# #27 makes an expense correctable instead of add-or-delete, and adds 77.
+# Nothing is removed and nothing is renamed. They are here because the whole of
+# this feature is a re-split of a balanced entry, and neither half of that can be
+# seen without a database: `resplitFromRecord` is unit-tested, but whether the
+# rewritten entry still balances, whether the audit recorded who changed it, and
+# whether a participant may correct somebody else's expense are all questions
+# about rows.
+#
+# The fixtures are LOPSIDED, because the plausible wrong answer here is an even
+# split: a weight split of 3/2/1 corrected from 88.40 to 100.01 gives
+# 50.00/33.34/16.67, where re-splitting evenly gives 33.34/33.34/33.33 — two of
+# the three shares differ, and the middle one is 33.34 EITHER WAY, which is why
+# the assertion is `equals` on the whole vector and not a `contains` on a figure. `entry_shares` and `entry_weights` are two
+# new node helpers for that, because a split assertion has to be about the
+# VECTOR: `contains` on one figure passes on a split that put it on the wrong
+# person, and `totalCents` passes on any split at all.
+#
+# Four are worth naming. An edit that says nothing about the category must LEAVE
+# it — resolving it unconditionally answers `Uncategorised`, which would move
+# every edited expense out of its category while every other check here stayed
+# green. An edit that touches no money must leave `fxRateSource`/
+# `statedAmountCents` alone, which is the only executed proof that correcting a
+# title does not re-fetch a rate over a figure somebody verified against a bank
+# statement. The two cases #26 did not record — a new total on an `exact` split,
+# and one on an `even` split with an amount pinned by hand — are refused rather
+# than guessed, and the budget is read back to confirm the refusal wrote
+# nothing. And the guest account, holding an RSVP and nothing else, corrects an
+# expense the owner recorded and is still refused the DELETE, which is the
+# asymmetry the issue chose. Eight more came out of the review, and they are the
+# ones that matter most: they execute the body `BudgetCard.vue` actually
+# composes, which nothing here did. It sent `splitMode` and `participants` on
+# every correction, so a title-only fix re-split a hand-pinned `even` expense
+# evenly and moved money between people; and it resent the prefilled rate, so
+# every correction of a foreign row relabelled it as checked against a bank
+# statement. Both passed every check written against this script's own bodies.
+# 444 -> 521.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '444'
+  MIN_SMOKE_CHECKS: '521'
 
 jobs:
   ci:

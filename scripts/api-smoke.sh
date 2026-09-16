@@ -206,6 +206,60 @@ entry_order() {
     })' "$2"
 }
 
+# `expense_id <body> <title>` — the id of the named entry, from a budget or from
+# the single expense a /api/v1 write answers with. `no-such-entry` and not an
+# empty string, because an empty one turns `…/expenses/$ID` into `…/expenses/`,
+# which 404s for a reason that has nothing to do with what is being tested.
+expense_id() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const e = (budget.expenses ?? [budget]).find(x => x.title === process.argv[1])
+      process.stdout.write(e?.id ?? "no-such-entry")
+    })' "$2"
+}
+
+# `entry_shares <body> <title>` — the named entry's share amounts AS SPENT, in
+# the order the payload lists them.
+#
+# A SPLIT ASSERTION HAS TO BE ABOUT THE VECTOR (#26, #27). `totalCents` is the
+# expense amount whatever the shares are, and a `contains` on ONE figure passes
+# on a split that put that figure on the wrong person — which is exactly the
+# difference between re-splitting an expense the way it was split and
+# re-splitting it evenly, for every mode where those two disagree.
+entry_shares() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const e = (budget.expenses ?? [budget]).find(x => x.title === process.argv[1])
+      if (!e) return process.stdout.write("no-such-entry")
+      process.stdout.write((e.shares ?? []).map(sh => sh.amountCents).join(" "))
+    })' "$2"
+}
+
+# `entry_weights <body> <title>` — the percentages or share counts ENTERED on
+# the named entry, in the same order. `null` where there was none, spelled out,
+# so "the weights were dropped" and "the entry is not there" cannot both read as
+# an empty string.
+entry_weights() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const e = (budget.expenses ?? [budget]).find(x => x.title === process.argv[1])
+      if (!e) return process.stdout.write("no-such-entry")
+      process.stdout.write((e.shares ?? []).map(sh => sh.weight === null ? "null" : sh.weight).join(" "))
+    })' "$2"
+}
+
 # `account_id <body> <name>` — the id of the named account, from a budget or an
 # `{accounts:…}` body.
 account_id() {
@@ -1359,6 +1413,275 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}
   AOWN=$(audit_await "$BASE/api/admin/audit?actorKind=owner&surface=me&eventSlug=$ATRIP&limit=10" \
     "\"actorLabel\":\"$OEMAIL\"")
   contains "...and the owner's own write is still the owner's" "$AOWN" "\"actorLabel\":\"$OEMAIL\""
+else
+  echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
+fi
+
+echo
+echo "== an expense can be corrected, not only added and deleted (Bermos/zaeme#27) =="
+# EVERY FIGURE HERE WAS WORKED OUT BY HAND in exact integers and is written as a
+# literal, against a real Postgres. The fixtures are LOPSIDED on purpose: a
+# weight split of 1/1/1 IS an even split, and a total that divides cleanly hides
+# a dropped remainder, so neither could tell a re-split that reads what #26
+# recorded from one that ignores it and splits evenly.
+#
+#   Ski pass      even, four ways, CHF 100.00 -> 25.00 each. Corrected to
+#                 120.00: 30.00 each, and not 25.00 each with an orphaned 20.00
+#   Airport taxi  weight 3/2/1 of CHF 88.40 -> 44.20 / 29.47 / 14.73. Corrected
+#                 to 100.01: 50.00 / 33.34 / 16.67. The two leftover cents land
+#                 on the SMALLEST shares; an even split of that same total is
+#                 33.34 / 33.34 / 33.33, so two of the three shares differ — the
+#                 MIDDLE one is 33.34 either way, which is exactly why this is
+#                 asserted with `equals` on the whole vector rather than with a
+#                 `contains` on any one figure
+#   Groceries     percentage 70/20/10 of CHF 100.00. Corrected to 44.44:
+#                 31.11 / 8.89 / 4.44
+#   Museum        exact 60.00 / 30.00 / 10.00. A new total is REFUSED — those
+#                 amounts were chosen against a total that no longer exists
+#   Fondue        even with Ana pinned at 40.00 of 100.00 -> 40 / 30 / 30. A new
+#                 total is REFUSED as well, because WHICH participants were
+#                 pinned is recorded nowhere (#26, #60) — but a new title is not
+#   Alpine hotel  EUR 245.25 stated at CHF 234.00, an effective 0.9541284404.
+#                 Corrected to EUR 200.00 with nothing else said: 200.00 at that
+#                 rate is 190.82568808 -> CHF 190.83, and the row stops claiming
+#                 it was checked against a statement
+ETRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke edit $SUFFIX\",\"type\":\"trip\"}")
+ESLUG=$(printf '%s' "$ETRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+EEXP="$API/events/$ESLUG/expenses"
+echo "  trip: $ESLUG"
+
+SKI=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$EEXP" \
+  -d '{"title":"Ski pass","amountCents":10000,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"},{"name":"D","email":"d@e.com"}]}')
+SKI_ID=$(expense_id "$SKI" "Ski pass")
+equals "an even split starts where it always did" "$(entry_shares "$SKI" "Ski pass")" "2500 2500 2500 2500"
+check "correcting the total of an even split"     200 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"amountCents":12000}'
+SKI2=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"amountCents":12000}')
+equals "...re-splits it evenly at the NEW total"  "$(entry_shares "$SKI2" "Ski pass")" "3000 3000 3000 3000"
+equals "...in an entry that still balances"       "$(ledger_imbalance "$SKI2")" "0"
+contains "...under the id it was recorded with"   "$SKI2" "\"id\":\"$SKI_ID\""
+contains "...at rate 1, the trip's own currency"  "$SKI2" '"amountCents":12000,"currency":"CHF","amountBaseCents":12000,"baseCurrency":"CHF","fxRate":"1","fxRateSource":"fetched","statedAmountCents":null,"statedCurrency":null'
+
+TAXI=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$EEXP" \
+  -d '{"title":"Airport taxi","amountCents":8840,"splitMode":"weight","paidByName":"B","paidByEmail":"b@e.com","participants":[{"name":"A","email":"a@e.com","weight":"3"},{"name":"B","email":"b@e.com","weight":"2"},{"name":"C","email":"c@e.com","weight":"1"}]}')
+TAXI_ID=$(expense_id "$TAXI" "Airport taxi")
+equals "a weighted split starts lopsided"         "$(entry_shares "$TAXI" "Airport taxi")" "4420 2947 1473"
+TAXI2=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$TAXI_ID" -d '{"amountCents":10001}')
+# THE CHECK THIS BLOCK EXISTS FOR. An implementation that re-split evenly rather
+# than at the recorded weights answers 3334 3334 3333 here — the same in the
+# middle position and different in the other two, so the assertion has to be on
+# the whole vector.
+equals "correcting its total re-applies the WEIGHTS" "$(entry_shares "$TAXI2" "Airport taxi")" "5000 3334 1667"
+equals "...and hands them back for the next edit"    "$(entry_weights "$TAXI2" "Airport taxi")" "3 2 1"
+equals "...in an entry that still balances"          "$(ledger_imbalance "$TAXI2")" "0"
+
+GROC=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$EEXP" \
+  -d '{"title":"Groceries","amountCents":10000,"splitMode":"percentage","paidByName":"C","paidByEmail":"c@e.com","participants":[{"name":"A","email":"a@e.com","weight":"70"},{"name":"B","email":"b@e.com","weight":"20"},{"name":"C","email":"c@e.com","weight":"10"}]}')
+GROC_ID=$(expense_id "$GROC" "Groceries")
+equals "a percentage split starts at its percentages" "$(entry_shares "$GROC" "Groceries")" "7000 2000 1000"
+GROC2=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$GROC_ID" -d '{"amountCents":4444}')
+equals "...and re-applies them at the new total"      "$(entry_shares "$GROC2" "Groceries")" "3111 889 444"
+equals "...with the percentages still recorded"       "$(entry_weights "$GROC2" "Groceries")" "70 20 10"
+
+MUS=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$EEXP" \
+  -d '{"title":"Museum","amountCents":10000,"splitMode":"exact","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":6000},{"name":"B","email":"b@e.com","amountCents":3000},{"name":"C","email":"c@e.com","amountCents":1000}]}')
+MUS_ID=$(expense_id "$MUS" "Museum")
+check "a new total on an EXACT split"             422 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$MUS_ID" -d '{"amountCents":12000}'
+contains "...says the amounts have to come with it" "$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$MUS_ID" -d '{"amountCents":12000}')" 'split by exact amounts'
+# The refusal REFUSED: 72.00 / 36.00 / 12.00 is what apportioning those amounts
+# to the new total would have produced, and it is a proportional split nobody
+# asked for from amounts that meant "Ana's ticket, Ben's, Cy's".
+equals "...and nothing at all was written"        "$(entry_shares "$(body "${AUTH[@]}" "$API/events/$ESLUG/budget")" "Museum")" "6000 3000 1000"
+MUS2=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$MUS_ID" \
+  -d '{"amountCents":12000,"splitMode":"exact","participants":[{"name":"A","email":"a@e.com","amountCents":7200},{"name":"B","email":"b@e.com","amountCents":3600},{"name":"C","email":"c@e.com","amountCents":1200}]}')
+equals "...while amounts sent WITH the total are taken" "$(entry_shares "$MUS2" "Museum")" "7200 3600 1200"
+
+FON=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$EEXP" \
+  -d '{"title":"Fondue","amountCents":10000,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":4000},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"}]}')
+FON_ID=$(expense_id "$FON" "Fondue")
+equals "an even split can have an amount pinned by hand" "$(entry_shares "$FON" "Fondue")" "4000 3000 3000"
+check "a new total on a MIXED even split"         422 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$FON_ID" -d '{"amountCents":12000}'
+contains "...says which people were pinned was never recorded" "$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$FON_ID" -d '{"amountCents":12000}')" 'fixed by hand'
+# ...and the total that did NOT move needs no re-split at all, which is what
+# lets the one unrecoverable case still have its title corrected.
+FON2=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$FON_ID" -d '{"title":"Fondue night"}')
+equals "...but correcting only its title leaves the shares alone" "$(entry_shares "$FON2" "Fondue night")" "4000 3000 3000"
+FON3=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$FON_ID" \
+  -d '{"amountCents":12000,"splitMode":"even","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"}]}')
+equals "...and sending the split with the total works" "$(entry_shares "$FON3" "Fondue night")" "4000 4000 4000"
+
+# ---- what an edit does to the conversion, and to the evidence behind it ----
+HOTEL=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$EEXP" \
+  -d '{"title":"Alpine hotel","amountCents":24525,"currency":"EUR","targetAmountCents":23400,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
+H_ID=$(expense_id "$HOTEL" "Alpine hotel")
+contains "a stated figure is recorded as one somebody checked" "$HOTEL" '"amountBaseCents":23400,"baseCurrency":"CHF","fxRate":"0.9541284404","fxRateSource":"manual","statedAmountCents":23400,"statedCurrency":"CHF"'
+H1=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$H_ID" -d '{"title":"Alpine hotel, night 1"}')
+# THE EVIDENCE RULE, half one: an edit that touches no money must not re-fetch a
+# rate over a figure a person verified against their bank statement.
+contains "correcting the title leaves the conversion untouched" "$H1" '"amountBaseCents":23400,"baseCurrency":"CHF","fxRate":"0.9541284404","fxRateSource":"manual","statedAmountCents":23400,"statedCurrency":"CHF"'
+H2=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$H_ID" -d '{"amountCents":20000}')
+contains "correcting the amount keeps the rate it was frozen at" "$H2" '"amountCents":20000,"currency":"EUR","amountBaseCents":19083,"baseCurrency":"CHF","fxRate":"0.9541284404"'
+# ...and half two: the figure somebody stated was about a receipt that has just
+# been declared wrong, so the row stops claiming to have been checked rather
+# than carrying that statement onto a number nobody stated.
+contains "...and the row stops claiming it was checked" "$H2" '"fxRate":"0.9541284404","fxRateSource":"fetched","statedAmountCents":null,"statedCurrency":null'
+equals "...in an entry that still balances"       "$(ledger_imbalance "$H2")" "0"
+equals "...with the receipt re-split across the two of them" "$(entry_shares "$H2" "Alpine hotel, night 1")" "10000 10000"
+contains "...and the base shares apportioned as a group" "$H2" '"amountCents":10000,"amountBaseCents":9542'
+H3=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$H_ID" -d '{"targetAmountCents":19000}')
+contains "saying again what was paid makes it checked again" "$H3" '"amountBaseCents":19000,"baseCurrency":"CHF","fxRate":"0.95","fxRateSource":"manual","statedAmountCents":19000,"statedCurrency":"CHF"'
+check "a rate AND a stated total on an edit"      422 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$H_ID" -d '{"fxRate":"0.9","targetAmountCents":18000}'
+contains "...is refused exactly as it is on a write" "$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$H_ID" -d '{"fxRate":"0.9","targetAmountCents":18000}')" 'not both'
+H4=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$H_ID" -d '{"currency":"GBP","fxRate":"1.2345678901"}')
+contains "changing the receipt's currency settles it afresh" "$H4" '"amountCents":20000,"currency":"GBP","amountBaseCents":24691,"baseCurrency":"CHF","fxRate":"1.2345678901","fxRateSource":"manual"'
+equals "...still balancing"                       "$(ledger_imbalance "$H4")" "0"
+
+# ---- absent is not null, and neither of them is "whatever the default is" ----
+EFOOD=$(account_id "$(body "${AUTH[@]}" "$API/events/$ESLUG/budget")" "Food")
+SKI3=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d "{\"accountId\":\"$EFOOD\"}")
+contains "an edit can move a cost into a category" "$SKI3" '"category":"Food"'
+SKI4=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"note":"six days, lift included"}')
+# THE MUTATION THIS CATCHES is one line: resolving the category unconditionally
+# rather than only when the edit mentions it. Every other check here passes with
+# it, and every expense anybody edits quietly leaves its category.
+contains "...and an edit that says nothing about it leaves it there" "$SKI4" '"category":"Food"'
+contains "...while the note it DID say lands"     "$SKI4" '"note":"six days, lift included"'
+SKI5=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"note":null}')
+contains "a null note clears it"                  "$SKI5" '"note":null'
+contains "...without disturbing the category"     "$SKI5" '"category":"Food"'
+SKI6=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"accountId":null}')
+contains "a null category moves the cost back to Uncategorised" "$SKI6" '"category":"Uncategorised"'
+
+# ---- the payer, and the two refusals that keep an edit honest ----
+TAXI3=$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$TAXI_ID" -d '{"paidByName":"Cy","paidByEmail":"c@e.com"}')
+contains "an edit can move who fronted the money"  "$TAXI3" '"paidByName":"Cy","paidByEmail":"c@e.com"'
+# BY EMAIL, because that is the identity. The entry HEADER records "Cy", which
+# is what was typed, while the member ACCOUNT goes on saying "C": `addExpense`
+# and this both hand `ensureMemberAccountsWithin` the payer FOLLOWED BY the
+# split, its map is keyed on the address, and the last name written wins — so a
+# payer who is also in the split is named by the split. Asserted on the address
+# so this check is about the money moving and not about that.
+contains "...crediting the new payer the whole entry" "$TAXI3" '"accountKind":"member","accountEmail":"c@e.com","amountCents":-10001'
+excludes "...and taking that credit off the old one" "$TAXI3" '"accountEmail":"b@e.com","amountCents":-10001'
+equals "...while the split stays exactly where it was" "$(entry_shares "$TAXI3" "Airport taxi")" "5000 3334 1667"
+equals "...in an entry that still balances"        "$(ledger_imbalance "$TAXI3")" "0"
+check "half a payer"                               422 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$TAXI_ID" -d '{"paidByEmail":"d@e.com"}'
+contains "...is refused, naming both halves"       "$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$TAXI_ID" -d '{"paidByEmail":"d@e.com"}')" 'both their name and their email'
+check "a split MODE with no split behind it"       422 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"splitMode":"percentage"}'
+contains "...says to send the participants with it" "$(body "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"splitMode":"percentage"}')" 'needs the split itself'
+check "correcting an expense that is not there"    404 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$API/events/$ESLUG/expenses/nope_not_an_id" -d '{"title":"x"}'
+check "an unknown field on the machine surface"    422 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"nope":1}'
+check "a total of nothing"                         422 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"amountCents":0}'
+check "an anonymous correction"                    401 "${JSON[@]}" -X PATCH "$BASE/api/me/events/$ESLUG/expenses/$SKI_ID" -d '{"title":"x"}'
+check "...and a service token on the human surface" 401 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$BASE/api/me/events/$ESLUG/expenses/$SKI_ID" -d '{"title":"x"}'
+check "...and a service token on the host one"     401 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$ESLUG/expenses/$SKI_ID" -d '{"title":"x"}'
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  EOWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  EGUEST=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
+  MEEXPE="$BASE/api/me/events/$ESLUG/expenses"
+  HOSTEXPE="$BASE/api/host/events/$ESLUG/expenses"
+  check "a guest session cannot correct through /api/v1" 401 "${EGUEST[@]}" "${JSON[@]}" -X PATCH "$EEXP/$SKI_ID" -d '{"title":"x"}'
+  # Signed in and real, with no RSVP and no planner row on this trip — 403 and
+  # not 401: the credential is fine, the standing is not. It runs BEFORE the
+  # RSVP below, which is the thing that gives this account standing.
+  check "a signed-in account with no standing on the trip" 403 "${EGUEST[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$SKI_ID" -d '{"title":"nope"}'
+
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$ESLUG/status" -d '{"status":"published"}' > /dev/null
+  ETOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$ESLUG/invites" -d '{"label":"Edit smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  EGEMAIL=$(body "${EGUEST[@]}" "$BASE/api/auth/get-session" | grep -o '"email":"[^"]*"' | head -1 | sed 's/^"email":"//;s/"$//')
+  body "${JSON[@]}" -X POST "$BASE/api/invites/$ETOK/rsvp" \
+    -d "{\"status\":\"yes\",\"guestName\":\"CI Guest\",\"guestEmail\":\"$EGEMAIL\"}" > /dev/null
+
+  # THE SURFACES A PERSON ACTUALLY WRITES ON. `BudgetCard.vue` PATCHes
+  # `${expensesBase}/{id}` — /api/me on the invite page, /api/host on the host
+  # page — which is two more zod schemas for one verb, neither of them the one
+  # everything above went through. #26 shipped exactly this shape once: 29
+  # checks on /api/v1 while both human schemas were broken.
+  EW='{"title":"Chalet","amountCents":8840,"splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"3"},{"name":"B","email":"b@e.com","weight":"2"},{"name":"C","email":"c@e.com","weight":"1"}]}'
+  CHALET=$(body "${EOWNER[@]}" "${JSON[@]}" -X POST "$MEEXPE" -d "$EW")
+  CH_ID=$(expense_id "$CHALET" "Chalet")
+  CH2=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$CH_ID" -d '{"amountCents":10001}')
+  equals "the ACCOUNT surface re-splits at the recorded weights" "$(entry_shares "$CH2" "Chalet")" "5000 3334 1667"
+  equals "...keeping the weights on it"             "$(entry_weights "$CH2" "Chalet")" "3 2 1"
+  equals "...in an entry that still balances"       "$(ledger_imbalance "$CH2")" "0"
+  # Its OWN mixed entry, because "Fondue night" above has since been given an
+  # explicit even split and is no longer one — a refusal check pointed at an
+  # entry that has stopped being the refusable case passes for the wrong reason.
+  RAC=$(body "${EOWNER[@]}" "${JSON[@]}" -X POST "$MEEXPE" \
+    -d '{"title":"Raclette","amountCents":10000,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":4000},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"}]}')
+  RAC_ID=$(expense_id "$RAC" "Raclette")
+  check "...and a mixed even split is refused there too" 422 "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$RAC_ID" -d '{"amountCents":15000}'
+  # 422 and not 400: the refusal comes from the DOMAIN, having read the shares,
+  # rather than from a schema that never let the field through.
+  contains "...with the domain's own message behind it" "$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$RAC_ID" -d '{"amountCents":15000}')" 'fixed by hand'
+
+  EH='{"title":"Lift pass","amountCents":8840,"splitMode":"weight","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","weight":"3"},{"name":"B","email":"b@e.com","weight":"2"},{"name":"C","email":"c@e.com","weight":"1"}]}'
+  LIFT=$(body "${EOWNER[@]}" "${JSON[@]}" -X POST "$HOSTEXPE" -d "$EH")
+  LF_ID=$(expense_id "$LIFT" "Lift pass")
+  LF2=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$HOSTEXPE/$LF_ID" -d '{"amountCents":10001}')
+  equals "...and so does the HOST surface"          "$(entry_shares "$LF2" "Lift pass")" "5000 3334 1667"
+  equals "...with the weights on it there too"      "$(entry_weights "$LF2" "Lift pass")" "3 2 1"
+
+  # THE ACCEPTANCE CRITERION, executed. The guest account has an RSVP on this
+  # trip and nothing else: it did not record "Chalet", it did not pay it, and it
+  # does not plan the event. It may still correct it.
+  check "a participant corrects an expense somebody ELSE recorded" 200 "${EGUEST[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$CH_ID" -d '{"title":"Chalet, 3 nights"}'
+  contains "...and the correction is actually on the budget" "$(body "${AUTH[@]}" "$API/events/$ESLUG/budget")" '"title":"Chalet, 3 nights"'
+  # ...and may STILL not delete it, which is the asymmetry #27 chose on purpose:
+  # a wrong figure fixed by the wrong person is still fixed, and a wrong
+  # deletion is undoable by nobody.
+  check "...and still may not delete it"            403 "${EGUEST[@]}" -X DELETE "$MEEXPE/$CH_ID"
+
+  # WHO CHANGED IT is the audit's answer and not a column on the expense, so
+  # this is the only place the attribution can be read back at all.
+  # ---- THE BODY THE FORM ACTUALLY SENDS (#27 review) ----
+  # Everything above composes its own bodies. `BudgetCard.vue` composes a
+  # different one, and the gap between them is where the defect lived: it sent
+  # `splitMode` and `participants` on EVERY correction, so a title-only fix took
+  # the "replace the split" path and re-split a hand-pinned `even` expense
+  # evenly — 40.00/30.00/30.00 became 33.34/33.33/33.33, the toast said "Expense
+  # updated", and this ledger keeps no history to recover it from. Nothing in
+  # this file executed that shape, which is why it survived review twice.
+  RACUNCAT=$(account_id "$(body "${AUTH[@]}" "$API/events/$ESLUG/budget")" "Uncategorised")
+  FORMHEAD="\"accountId\":\"$RACUNCAT\",\"currency\":\"CHF\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\""
+  RAC2=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$RAC_ID" \
+    -d "{\"title\":\"Raclette, second night\",$FORMHEAD,\"amountCents\":10000}")
+  equals "the form's title-only correction leaves a hand-pinned split ALONE" "$(entry_shares "$RAC2" "Raclette, second night")" "4000 3000 3000"
+  equals "...in an entry that still balances"        "$(ledger_imbalance "$RAC2")" "0"
+  # ...and the body it sends once somebody HAS touched the split still replaces it.
+  RAC3=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$RAC_ID" \
+    -d "{\"title\":\"Raclette, second night\",$FORMHEAD,\"amountCents\":12000,\"splitMode\":\"exact\",\"participants\":[{\"name\":\"A\",\"email\":\"a@e.com\",\"amountCents\":6000},{\"name\":\"B\",\"email\":\"b@e.com\",\"amountCents\":3000},{\"name\":\"C\",\"email\":\"c@e.com\",\"amountCents\":3000}]}")
+  equals "...while the body it sends once it HAS been touched replaces it" "$(entry_shares "$RAC3" "Raclette, second night")" "6000 3000 3000"
+
+  # ---- THE EVIDENCE RULE, ON THE SURFACE A PERSON USES (#71) ----
+  # The form prefills the rate field — with today's quote on a write, with the
+  # frozen rate on an edit — and used to send it back verbatim. So every
+  # correction relabelled the row `manual` ("a figure checked against a
+  # statement") and every amount correction resent the OLD stated total beside
+  # the NEW receipt. It now sends neither unless the field was changed, which is
+  # what puts these two branches on the human path at all: until this, the
+  # centrepiece of #27's conversion rule was reachable only from /api/v1.
+  FERRY=$(body "${EOWNER[@]}" "${JSON[@]}" -X POST "$MEEXPE" \
+    -d '{"title":"Ferry","amountCents":10000,"currency":"EUR","fxRate":"0.9412","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
+  FY_ID=$(expense_id "$FERRY" "Ferry")
+  contains "a rate somebody typed there is a checked figure" "$FERRY" '"fxRate":"0.9412","fxRateSource":"manual","statedAmountCents":9412,"statedCurrency":"CHF"'
+  FY1=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$FY_ID" \
+    -d "{\"title\":\"Ferry, return\",\"accountId\":\"$RACUNCAT\",\"currency\":\"EUR\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"amountCents\":10000}")
+  contains "the form's title-only correction leaves a checked figure checked" "$FY1" '"fxRate":"0.9412","fxRateSource":"manual","statedAmountCents":9412,"statedCurrency":"CHF"'
+  FY2=$(body "${EOWNER[@]}" "${JSON[@]}" -X PATCH "$MEEXPE/$FY_ID" \
+    -d "{\"title\":\"Ferry, return\",\"accountId\":\"$RACUNCAT\",\"currency\":\"EUR\",\"paidByName\":\"A\",\"paidByEmail\":\"a@e.com\",\"amountCents\":20000}")
+  # 200.00 EUR at the rate this row was frozen at is exactly 188.24 CHF.
+  contains "...and its AMOUNT correction rides on the frozen rate" "$FY2" '"amountCents":20000,"currency":"EUR","amountBaseCents":18824,"baseCurrency":"CHF","fxRate":"0.9412"'
+  # THE LIE THIS REPLACES: resending the prefilled stated total would have
+  # recorded "EUR 200.00 cost me CHF 94.12" as something somebody checked.
+  contains "...with the row no longer claiming anybody checked it" "$FY2" '"fxRateSource":"fetched","statedAmountCents":null,"statedCurrency":null'
+  equals "...still balancing"                        "$(ledger_imbalance "$FY2")" "0"
+
+  EAUD=$(audit_await "$BASE/api/admin/audit?actorKind=participant&surface=me&eventSlug=$ESLUG&limit=20" \
+    "\"path\":\"/api/me/events/$ESLUG/expenses/$CH_ID\"")
+  contains "the audit records the correction, by path" "$EAUD" "\"path\":\"/api/me/events/$ESLUG/expenses/$CH_ID\""
+  contains "...against the account that made it, not the one that recorded it" "$EAUD" "\"actorLabel\":\"$EGEMAIL\""
 else
   echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
 fi

@@ -100,9 +100,9 @@ const HEADERS = {
  * than estimated, because the canary is the one event `snapshot` guarantees:
  *
  *   1   the budget still loads
- *  14   two expenses x seven (survived, amount as spent, its rate is not
- *       claimed to have been checked, carries its lines, sums to zero, every
- *       line has an account, still filed under its category)
+ *  14   two expenses x seven (survived, amount as spent, what it claims about
+ *       verification, carries its lines, sums to zero, every line has an
+ *       account, still filed under its category)
  *   1   the trip still settles in what it settled in
  *   2   everybody who had a balance still has one; the balances still close
  *   4   the write block: readable, recorded, filed under Food, total moved
@@ -110,9 +110,11 @@ const HEADERS = {
  *  22
  *
  * `snapshot` refuses to write a file unless the canary came back with both of
- * those expenses AND a category on each, so every one of the 19 is reachable —
+ * those expenses AND a category on each, so every one of the 22 is reachable —
  * the producer's guarantee and this consumer's floor are the same statement,
  * which is the bug this number had when it was 24 against a canary worth 20.
+ * (The prose said 19 in two places while the arithmetic above said 22, from the
+ * recount that fixed that bug. Nothing reads a comment, so it stayed wrong.)
  *
  * Whatever a run finds BEYOND the canary is the smoke suite's leftovers, and
  * this deliberately does not depend on how many of those there are: that file
@@ -159,6 +161,29 @@ async function api(method, path, body) {
     json = null
   }
   return { status: res.status, json, text }
+}
+
+/**
+ * WHAT AN ENTRY CLAIMS ABOUT VERIFICATION: the label and the figure behind it.
+ *
+ * Read as ONE fact, because that is what it is (#59). `fx_rate_source` set to
+ * `manual` means a PERSON stated what this cost — by typing the rate or by
+ * typing what came out of their account — and `stated_amount_cents` /
+ * `stated_currency` are that statement. The label without the figure is a claim
+ * nobody can check; the figure without the label is a number with no
+ * provenance. A migration may invent neither and destroy neither, so they are
+ * snapshotted together and compared together.
+ *
+ * Every field is normalised to `null` when the release did not report it, so a
+ * snapshot taken from a release that predates the columns compares cleanly
+ * against one taken from a release that has them.
+ */
+function verificationClaim(row) {
+  return {
+    fxRateSource: row.fxRateSource ?? null,
+    statedAmountCents: row.statedAmountCents ?? null,
+    statedCurrency: row.statedCurrency ?? null
+  }
 }
 
 /* --------------------------------- snapshot -------------------------------- */
@@ -257,7 +282,15 @@ async function snapshot(file) {
         // before that release must not move with it.
         baseCurrency: e.baseCurrency ?? null,
         paidByEmail: e.paidByEmail ?? null,
-        shareCount: Array.isArray(e.shares) ? e.shares.length : null
+        shareCount: Array.isArray(e.shares) ? e.shares.length : null,
+        // WHAT THIS ROW CLAIMS ABOUT VERIFICATION (#59), recorded so `verify`
+        // can compare against it instead of against a constant — see the long
+        // note there. `null` in any of the three means the previous release
+        // reported no such field at all, which is a fact about that release and
+        // not a value in its database: `fx_rate_source` is NOT NULL, so a
+        // release that has the column always answers with one of its two
+        // values, and a release from before #59 answers with nothing.
+        ...verificationClaim(e)
       })),
       balances: (Array.isArray(budget.json?.balances) ? budget.json.balances : [])
         .map(b => ({ email: b.email, netCents: b.netCents }))
@@ -266,7 +299,7 @@ async function snapshot(file) {
 
   // What `verify`'s floor rests on, asserted HERE, where the previous release
   // is still up and can say what went wrong. Both expenses, each with the
-  // category it was filed under: those two facts are what make all 19 of that
+  // category it was filed under: those two facts are what make all 22 of that
   // floor's assertions reachable, so if this release reports its budget
   // differently the run stops at the producer rather than at the consumer with
   // a count nobody can explain.
@@ -346,15 +379,52 @@ async function verify(file) {
       // The claim it was trying to make lives at the event level, where the
       // backfill actually writes, and is asserted after this loop.
       //
-      // A column that has to be filled for every existing row and has no
-      // accurate value to fill it with: `fetched` is the conservative one —
-      // "nobody told us this was checked against a statement" — and a row that
-      // came back `manual` would be this migration inventing a claim about
-      // verification that never happened.
+      // WHAT THE ROW CLAIMS ABOUT VERIFICATION — compared against the SNAPSHOT,
+      // and not against a constant.
+      //
+      // This read `now.fxRateSource === 'fetched'` until #27, and the intent
+      // behind it is right and is kept: a column that has to be filled for
+      // every existing row has no accurate value to fill it with, `fetched` is
+      // the conservative one — "nobody told us this was checked against a
+      // statement" — and a migration that reached for `manual` would be
+      // inventing a verification that never happened.
+      //
+      // BUT "NO ROW MAY BE MANUAL" WAS ONLY EVER TRUE WHILE NO RELEASE COULD
+      // WRITE ONE. It passed on #59's own branch because the release it
+      // replaced was `eb69fde`, which has no `fx_rate_source` column at all, so
+      // the migration wrote `fetched` everywhere and "is it fetched?" was
+      // trivially true. Once #59 landed on `main` the previous release began
+      // legitimately writing `manual` rows — `scripts/api-smoke.sh` writes a
+      // dozen — and this failed for every branch cut from that commit onwards,
+      // whatever its diff. An assertion that encodes a property of WHICH
+      // RELEASE HAPPENS TO BE THE BASE is stale the moment the base moves.
+      //
+      // The honest form of the same intent is "the migration did not change
+      // this row's claim", which is what is asserted now, and it keeps biting:
+      // a migration that turned a `fetched` row into a `manual` one, or that
+      // rewrote or dropped the figure behind a `manual` one, fails here.
+      //
+      // Where the snapshot has NO claim at all — any release before #59 — there
+      // is nothing for it to be unchanged from, and the original assertion is
+      // exactly the right one: the fill has to be the conservative value, with
+      // no stated figure invented beside it. Both halves of the guard are
+      // therefore live, against different base releases.
+      const claimed = verificationClaim(was)
+      const claims = verificationClaim(now)
+      // The migration left the claim alone: the base release had one.
+      const unchanged = claims.fxRateSource === claimed.fxRateSource
+        && claims.statedAmountCents === claimed.statedAmountCents
+        && claims.statedCurrency === claimed.statedCurrency
+      // The migration FILLED the claim, because the base release had no such
+      // columns: the only honest fill is the conservative label with nothing
+      // invented beside it.
+      const filledConservatively = claims.fxRateSource === 'fetched'
+        && claims.statedAmountCents === null
+        && claims.statedCurrency === null
       assert(
-        `${before.slug}/${was.title}: its rate is not claimed to have been checked`,
-        now.fxRateSource === undefined || now.fxRateSource === 'fetched',
-        `fxRateSource came back as ${JSON.stringify(now.fxRateSource)}`
+        `${before.slug}/${was.title}: what it claims about verification is unchanged`,
+        claimed.fxRateSource === null ? filledConservatively : unchanged,
+        `was ${JSON.stringify(claimed)}, now ${JSON.stringify(claims)}`
       )
 
       // The lines ARE the ledger since #61. If they ever stop being in the

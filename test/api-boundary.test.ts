@@ -252,9 +252,14 @@ describe('the account surface is a session, and the invite link never becomes on
 
     const expensePost = join(API_ROOT, 'me', 'events', '[slug]', 'expenses', 'index.post.ts')
     const expenseDelete = join(API_ROOT, 'me', 'events', '[slug]', 'expenses', '[id].delete.ts')
+    // #27 added a third verb to this surface, and it belongs in the same list:
+    // an edit is a money write, so the reason it may not live under
+    // `/api/invites/**` is the reason the other two may not.
+    const expensePatch = join(API_ROOT, 'me', 'events', '[slug]', 'expenses', '[id].patch.ts')
     expect(existsSync(expensePost)).toBe(true)
     expect(existsSync(expenseDelete)).toBe(true)
-    for (const f of [expensePost, expenseDelete]) {
+    expect(existsSync(expensePatch)).toBe(true)
+    for (const f of [expensePost, expenseDelete, expensePatch]) {
       expect(readFileSync(f, 'utf8')).toMatch(/AsParticipant/)
     }
   })
@@ -348,6 +353,56 @@ describe('the account surface is a session, and the invite link never becomes on
     // behind an identified visitor, never behind the mere presence of a link.
     const invitePage = readFileSync(join(ROOT, 'app', 'pages', 'i', '[token].vue'), 'utf8')
     expect(invitePage).toMatch(/:show-amounts="complete \|\| !!account"/)
+  })
+
+  it('the expense form sends the split and the rate ONLY when somebody touched them', () => {
+    // #27 review, and this is the one thing no smoke check in this repository
+    // can see. `scripts/api-smoke.sh` composes its own bodies, so it pins what
+    // the SERVER does with the shape the form currently sends; nothing there
+    // notices if the form goes back to sending a different one. It did exactly
+    // that twice:
+    //
+    //  - `splitMode` + `participants` on EVERY correction took the "replace the
+    //    split" path, so correcting the TITLE of an `even` expense with amounts
+    //    pinned by hand re-split it evenly and moved money between people —
+    //    40.00/30.00/30.00 became 33.34/33.33/33.33 with a success toast, and
+    //    this ledger keeps no history to recover it from.
+    //  - the prefilled `fxRate` on every correction relabelled a `fetched` row
+    //    `manual`, which is the claim that a person checked the figure against a
+    //    bank statement (#71), and on an amount correction resent the OLD stated
+    //    total beside the NEW receipt.
+    //
+    // Pinned on the CALL SITE rather than by grepping the file for a word: the
+    // word appears in the comments that explain it.
+    const card = readFileSync(join(ROOT, 'app', 'components', 'BudgetCard.vue'), 'utf8')
+    expect(card).toMatch(/\.\.\.\(!editing \|\| splitTouched\.value\s*\n?\s*\? \{ splitMode: splitMode\.value, participants: splitParticipantsBody\(\) \}/)
+    expect(card).toMatch(/&& \(!editing \|\| fxRateTouched\.value \|\| currencyChanged\.value\)/)
+    expect(card).toMatch(/&& \(!editing \|\| paidAmountTouched\.value \|\| currencyChanged\.value\)/)
+
+    // And the two predicates are about what the FORM put there, not about
+    // whether the field is empty: a prefill is not a statement.
+    expect(card).toMatch(/const fxRateTouched = computed\(\(\) => fxRate\.value\.trim\(\) !== fxRatePrefilled\.value\.trim\(\)\)/)
+    expect(card).toMatch(/fxRatePrefilled\.value = q\.rate/)
+  })
+
+  it('the form and the server ask ONE function whether an even split was pinned', () => {
+    // The rule that decides whether a recorded `even` split can be re-split at a
+    // new total. The server refuses when it cannot; the form has to reach the
+    // same answer one step earlier to hand the amounts back. Two copies agreeing
+    // today and drifting tomorrow would mean one side re-splitting an expense
+    // the other says cannot be re-split, which moves money — so it lives in
+    // `shared/`, which Nuxt auto-imports into both.
+    const shared = readFileSync(join(ROOT, 'shared', 'utils', 'even-split.ts'), 'utf8')
+    expect(shared).toMatch(/export function isPlainEvenSplit/)
+
+    const domain = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
+    expect(domain).toMatch(/import \{ isPlainEvenSplit, splitEvenlyCents \} from '\.\.\/\.\.\/shared\/utils\/even-split'/)
+    expect(domain).toMatch(/isPlainEvenSplit\(shares\.map\(s => s\.amountCents\), previousAmountCents\)/)
+    // Neither side may keep its own copy of the arithmetic.
+    expect(domain).not.toMatch(/function splitEvenlyCents/)
+    const card = readFileSync(join(ROOT, 'app', 'components', 'BudgetCard.vue'), 'utf8')
+    expect(card).toMatch(/isPlainEvenSplit\(was\.shares\.map\(s => s\.amountCents\), was\.amountCents\)/)
+    expect(card).not.toMatch(/function splitEvenlyCents/)
   })
 
   it('records the account surface in the audit, like every other human one', () => {
