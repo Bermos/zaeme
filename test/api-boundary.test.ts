@@ -270,9 +270,17 @@ describe('the account surface is a session, and the invite link never becomes on
     // so a route cannot accidentally call the write without it. Importing or
     // CALLING it is the offence — naming it in a comment, as the two expense
     // handlers do to say where their gate lives, is not.
+    //
+    // `assertMayWriteExpenses` is in the list because #28 EXPORTED it, so that
+    // `server/domain/settlements.ts` could use the expense gate rather than a
+    // second one shaped like it. Exported is reachable from a handler through
+    // `#server/domain/index`, and a handler that called the gate and then a raw
+    // domain function would have moved the decision back out of the domain by
+    // the same door this rule closes for `assertParticipant`.
     const offenders = allHandlers.filter((f) => {
       const src = readFileSync(f, 'utf8')
-      return /import[^\n]*\bassertParticipant\b/.test(src) || /\bassertParticipant\s*\(/.test(src)
+      return /import[^\n]*\b(assertParticipant|assertMayWriteExpenses)\b/.test(src)
+        || /\b(assertParticipant|assertMayWriteExpenses)\s*\(/.test(src)
     })
     expect(offenders.map(rel)).toEqual([])
 
@@ -607,6 +615,123 @@ describe('the account surface is a session, and the invite link never becomes on
     const middleware = readFileSync(join(ROOT, 'server', 'middleware', 'audit.ts'), 'utf8')
     expect(middleware).toMatch(/'\/api\/me\/'/)
     expect(eventSlugFromPath('/api/me/events/lugano-weekend/expenses')).toBe('lugano-weekend')
+  })
+})
+
+/**
+ * SETTLING UP (#28) is a money write, and it is written as an ENTRY.
+ *
+ * Two things can go wrong here that nothing else in this file would catch, and
+ * both of them move money quietly:
+ *
+ *   1. the write lands on the wrong credential. Recording "Ana paid Matthew
+ *      300" is a claim about a person's money, so it needs an account exactly
+ *      as an expense does (#48) — not the invite link, and not a fourth gate
+ *      shaped like the expense gate but subtly wider;
+ *   2. a transfer acquires a category. The trip total is the sum of debits into
+ *      category accounts, so a settlement is excluded from it BY ITS SHAPE. Give
+ *      one a category line and CHF 300 handed over to clear a debt is counted as
+ *      CHF 300 spent on something, with no error anywhere.
+ */
+describe('a settlement is an entry, on the same credential and with no category', () => {
+  it('lives on both money surfaces and nowhere near the invite link', () => {
+    for (const surface of [['me', 'AsParticipant'], ['host', 'AsPlanner']] as const) {
+      const post = join(API_ROOT, surface[0], 'events', '[slug]', 'settlements', 'index.post.ts')
+      const del = join(API_ROOT, surface[0], 'events', '[slug]', 'settlements', '[id].delete.ts')
+      expect(existsSync(post), post).toBe(true)
+      expect(existsSync(del), del).toBe(true)
+      for (const f of [post, del]) {
+        const src = readFileSync(f, 'utf8')
+        expect(src, f).toMatch(/requireGuestUser\(/)
+        expect(src, f).toMatch(new RegExp(`SettlementAs${surface[1].slice(2)}`))
+      }
+    }
+    // The capability URL gained nothing: a settlement written over a forwarded
+    // link would be money moved by whoever has the link, which is the whole of
+    // what #48 took away.
+    expect(guestHandlers.filter(f => /settlement/i.test(rel(f))).map(rel)).toEqual([])
+    // …and so did the machine surface. Adding a verb to /api/v1 is the owner's
+    // decision (#8) and this issue asked for the participant gate; Enterprise
+    // can read settlements in the budget it already fetches.
+    expect(machineHandlers.filter(f => /settlement/i.test(rel(f))).map(rel)).toEqual([])
+  })
+
+  it('reuses the expense gate rather than growing a second one', () => {
+    // Two gates answering one verb is how a role restriction stops meaning
+    // anything — #48 shipped exactly that, with `logistics` 403'd on one
+    // surface and 200'd on the other. Recording a payment is a write on the
+    // same ledger, so it asks the SAME function, imported, and the role set
+    // above (`EXPENSE_WRITERS`) is the only one there is.
+    const settlements = readFileSync(join(ROOT, 'server', 'domain', 'settlements.ts'), 'utf8')
+    expect(settlements).toMatch(/import \{[\s\S]*assertMayWriteExpenses[\s\S]*\} from '\.\/expenses'/)
+    expect(settlements).toMatch(/await assertMayWriteExpenses\(slug, actor\)/)
+    // No second role list, and no second call to the participant gate that
+    // could answer a different question from the one the expense writes ask.
+    expect(settlements).not.toMatch(/assertParticipant/)
+    expect(settlements).not.toMatch(/WRITERS\s*[:=]/)
+    // The host half matches `addExpenseAsPlanner` exactly, `logistics` included.
+    const plannerGate = /assertPlanner\(ev\.id, userId, \{ roles: \[([^\]]*)\] \}\)/.exec(settlements)?.[1] ?? ''
+    expect(plannerGate).toBe('\'owner\', \'co_planner\'')
+  })
+
+  it('is written through the expense write path, not a second one', () => {
+    // The issue's own words: "It fills one share; do not build a second write
+    // path." One transaction writes every entry on this ledger, so the event
+    // lock, the conversion, `buildEntryLines` and `assertEntryBalances` cannot
+    // be true of an expense and false of a settlement.
+    const settlements = readFileSync(join(ROOT, 'server', 'domain', 'settlements.ts'), 'utf8')
+    expect(settlements).toMatch(/\}, by, 'transfer'\)/)
+    for (const forbidden of [/db\.transaction\(/, /buildEntryLines\(/, /assertEntryBalances\(/, /apportionCents\(/, /convertCents\(/]) {
+      expect(settlements).not.toMatch(forbidden)
+    }
+    // …and the destination is a PARAMETER, never a column: a stored `kind`
+    // could disagree with the lines beside it, and the shape cannot.
+    const schema = readFileSync(join(ROOT, 'server', 'database', 'schema', 'events.ts'), 'utf8')
+    expect(schema).not.toMatch(/'settlement'/)
+    const table = schema.slice(schema.indexOf('export const expense = pgTable'))
+    const expenseTable = table.slice(0, table.indexOf('pgTable', 40))
+    expect(expenseTable).toMatch(/'events_expense'/)
+    expect(expenseTable).not.toMatch(/\bkind:/)
+  })
+
+  it('never lets a transfer become a cost', () => {
+    // On the server: an edit may correct a mistyped settlement like any other
+    // entry, but the one field that would change what it IS is refused.
+    const expenses = readFileSync(join(ROOT, 'server', 'domain', 'expenses.ts'), 'utf8')
+    expect(expenses).toMatch(
+      /recordedCategory === null && \(input\.accountId !== undefined \|\| input\.category !== undefined\)/
+    )
+    // On the screen: the ✎ that composes that PATCH iterates `costs`, which is
+    // the list settlements are not in, and the payment form sends no category,
+    // no account and no split at all — four fields and a note.
+    const card = readFileSync(join(ROOT, 'app', 'components', 'BudgetCard.vue'), 'utf8')
+    expect(card).toMatch(/const costs = computed\(\(\) => props\.budget\.expenses\.filter\(x => !isSettlement\(x\)\)\)/)
+    expect(card).toMatch(/v-for="x in costs"/)
+    const save = card.slice(card.indexOf('async function saveSettlement()'), card.indexOf('async function removeSettlement('))
+    expect(save).not.toBe('')
+    expect(save).toMatch(/fromName: from\.name/)
+    expect(save).toMatch(/amountCents: settleCents\.value/)
+    for (const forbidden of [/accountId/, /category/, /splitMode/, /participants/, /fxRate/]) {
+      expect(save).not.toMatch(forbidden)
+    }
+  })
+
+  it('the form and the server tell the two apart by ONE rule', () => {
+    // Same shape as `isPlainEvenSplit` above. The screen has to decide which
+    // entries are payments to render them apart and to keep them out of the
+    // edit form; the server decides it by writing no category line. A second
+    // copy of the predicate in the card would agree until somebody changed one
+    // of them, after which a settlement renders as an expense and the ✎ beside
+    // it moves CHF 300 into the trip total.
+    const shared = readFileSync(join(ROOT, 'shared', 'utils', 'settlement.ts'), 'utf8')
+    expect(shared).toMatch(/export function isSettlement/)
+    // ABSENT IS NOT NULL: a payload without the field reads as a cost, or a
+    // budget from a client that dropped it renders as nothing but payments.
+    expect(shared).toMatch(/entry\.categoryAccountId === null/)
+
+    const card = readFileSync(join(ROOT, 'app', 'components', 'BudgetCard.vue'), 'utf8')
+    expect(card).toMatch(/isSettlement\(x\)/)
+    expect(card).not.toMatch(/categoryAccountId === null/)
   })
 })
 

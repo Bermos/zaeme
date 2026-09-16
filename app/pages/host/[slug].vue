@@ -690,6 +690,7 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
         :participants="splitParticipants"
         :viewer="me"
         :receipt-upload-base="`/api/host/events/${slug}/media`"
+        :settlements-base="`/api/host/events/${slug}/settlements`"
         show-amounts
         can-remove-any
         @updated="() => refresh()"

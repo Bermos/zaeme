@@ -1769,6 +1769,203 @@ else
 fi
 
 echo
+echo "== settling up: a paid debt leaves the balance (Bermos/zaeme#28) =="
+# EVERY FIGURE HERE WAS WORKED OUT BY HAND in exact integers and is written as a
+# literal, against a real Postgres. The fixture is LOPSIDED on purpose: CHF
+# 300.00 owed 50 / 150 / 100 is not what any even, weighted or percentage split
+# of that total produces by accident, and the two debts are different sizes — so
+# the PLAN has an order (balances sort by net descending, so the SMALLER debt is
+# matched first) that an implementation ignoring the amounts gets wrong.
+#
+#   Chalet, CHF 300.00 fronted by Ana, owed 50 / 150 / 100
+#       Ana +250.00 · Ben −150.00 · Cleo −100.00
+#       plan: Cleo pays Ana 100.00, then Ben pays Ana 150.00
+#   Cleo pays Ana 100.00   → Cleo 0, Ana +150.00, one leg left
+#   Ben pays Ana 40.00     → PARTIAL: Ben −110.00, and the plan asks for 110.00
+#   ...deleted             → Ben −150.00 again, exactly what it was before it
+#   Ben pays Ana 150.00    → everybody at zero and nothing left to suggest
+#   Cleo pays Ana 25.00    → EXCESS: Cleo +25.00, and the plan asks ANA for it
+#   ...deleted             → square again
+#   the trip moves to EUR at 1.0645 — a franc is worth MORE than a euro, and a
+#       fixture with that backwards proves its arithmetic against nonsense —
+#       with three entries already settled: 300.00 → 319.35, its three debts
+#       re-expressed ONE AT A TIME (#59) as 53.23 / 159.68 / 106.45, which come
+#       to 319.36 and leave a centime on `Rounding`; both transfers re-expressed
+#       with them, so everybody is STILL at zero and the total — which never
+#       counted a transfer — is 319.35
+#   the Chalet is corrected to 360.00 (80 / 180 / 100 as spent) at that frozen
+#       rate: 383.22, apportioned 85.16 / 191.61 / 106.45. Settling re-opens by
+#       exactly 31.93 and the plan asks Ben for it.
+#
+# THE BODIES ARE THE ONES `BudgetCard.vue` COMPOSES, field for field — four
+# names and an amount, with `note` only when somebody typed one. #27 shipped two
+# money-moving defects that every check in this file was blind to because
+# nothing executed the shape the form actually sends.
+STRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke settle $SUFFIX\",\"type\":\"trip\"}" \
+  | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$STRIP/status" -d '{"status":"published"}' > /dev/null
+SETTLE="$BASE/api/me/events/$STRIP/settlements"
+SEXP="$BASE/api/me/events/$STRIP/expenses"
+PAY='{"fromName":"Cleo","fromEmail":"cleo@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":10000}'
+echo "  trip: $STRIP"
+
+# No cookie, no payment: recording one is a claim about a person's money and
+# needs an account, exactly as an expense does (#48).
+check "an anonymous payment is refused"            401 "${JSON[@]}" -X POST "$SETTLE" -d "$PAY"
+check "...and a service token is not an account"   401 "${AUTH[@]}" "${JSON[@]}" -X POST "$SETTLE" -d "$PAY"
+if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  check "...nor is an account with no standing"    403 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "${JSON[@]}" -X POST "$SETTLE" -d "$PAY"
+else
+  echo "  skip  set ZAEME_TEST_GUEST_COOKIE to a NON-participant session to run this"
+fi
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  SETR=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  # The trip settles in CHF, said here rather than assumed: the instance default
+  # is a VALUE somebody can change (#25 D6) and every figure below is in it.
+  # From === to is a no-op that answers 200, so this is safe either way.
+  body "${SETR[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$STRIP/currency" -d '{"currency":"CHF"}' > /dev/null
+
+  OWED=$(body "${SETR[@]}" "${JSON[@]}" -X POST "$SEXP" -d '{"title":"Chalet","amountCents":30000,"splitMode":"exact","paidByName":"Ana","paidByEmail":"ana@e.com","participants":[{"name":"Ana","email":"ana@e.com","amountCents":5000},{"name":"Ben","email":"ben@e.com","amountCents":15000},{"name":"Cleo","email":"cleo@e.com","amountCents":10000}]}')
+  equals "a lopsided debt starts the trip off" "$(entry_shares "$OWED" "Chalet")" "5000 15000 10000"
+  equals "...and the plan matches the SMALLER debt first" \
+    "$(json_field "$OWED" budget.settlements.0.fromName)>$(json_field "$OWED" budget.settlements.0.toName):$(json_field "$OWED" budget.settlements.0.amountCents)" \
+    "Cleo>Ana:10000"
+  equals "...then the larger one"                                                  \
+    "$(json_field "$OWED" budget.settlements.1.fromName)>$(json_field "$OWED" budget.settlements.1.toName):$(json_field "$OWED" budget.settlements.1.amountCents)" \
+    "Ben>Ana:15000"
+
+  # MARK AS PAID, on the surface the card posts to, with the body it composes.
+  PAID1=$(body "${SETR[@]}" "${JSON[@]}" -X POST "$SETTLE" -d "$PAY")
+  contains "a recorded payment clears exactly that debt" "$PAID1" '"email":"cleo@e.com","paidCents":10000,"owedCents":10000,"netCents":0'
+  contains "...and leaves the other one alone"           "$PAID1" '"email":"ben@e.com","paidCents":0,"owedCents":15000,"netCents":-15000'
+  equals "...so one leg is left"                         "$(json_field "$PAID1" budget.settlements.length)" "1"
+  equals "...which is the one that was not paid"         \
+    "$(json_field "$PAID1" budget.settlements.0.fromName)>$(json_field "$PAID1" budget.settlements.0.toName):$(json_field "$PAID1" budget.settlements.0.amountCents)" \
+    "Ben>Ana:15000"
+  # THE CRITERION THE WHOLE SHAPE EXISTS FOR: CHF 300.00 of expenses and CHF
+  # 100.00 of transfers still reports CHF 300.00. A `kind` flag nobody set, or a
+  # category line on the transfer, and this is 400.00.
+  equals "...while the trip still cost what it cost"     "$(json_field "$PAID1" budget.totalCents)" "30000"
+  equals "a payment is TWO lines and no more"            "$(entry_lines "$PAID1" "Cleo → Ana")" "2"
+  contains "...posting to no category account at all"    "$PAID1" '"title":"Cleo → Ana","category":"Uncategorised","categoryAccountId":null'
+  equals "...in a ledger that still balances"            "$(ledger_imbalance "$PAID1")" "0"
+  equals "...and a plan that still closes"               "$(plan_closes "$PAID1")" "closed"
+
+  # PARTIAL: 40.00 of the 150.00 Ben owes. Not a fraction of it and not a round
+  # number of it — an implementation that closed the debt outright, or that used
+  # the plan's figure rather than the one typed, differs from this.
+  PART=$(body "${SETR[@]}" "${JSON[@]}" -X POST "$SETTLE" \
+    -d '{"fromName":"Ben","fromEmail":"ben@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":4000,"note":"Twint, Tuesday"}')
+  contains "a partial payment reduces the debt by THAT much" "$PART" '"email":"ben@e.com","paidCents":4000,"owedCents":15000,"netCents":-11000'
+  equals "...and the plan asks for the rest"                 \
+    "$(json_field "$PART" budget.settlements.0.fromName)>$(json_field "$PART" budget.settlements.0.toName):$(json_field "$PART" budget.settlements.0.amountCents)" \
+    "Ben>Ana:11000"
+  contains "...carrying the note somebody typed"             "$PART" '"note":"Twint, Tuesday"'
+  equals "...with the total untouched by it too"             "$(json_field "$PART" budget.totalCents)" "30000"
+
+  # …AND IT CAN BE TAKEN BACK. A settlement is a claim about the physical world;
+  # a mistyped one that nobody can undo leaves the ledger asserting a transfer
+  # that never happened.
+  PART_ID=$(expense_id "$PART" "Ben → Ana")
+  UNDO=$(body "${SETR[@]}" -X DELETE "$SETTLE/$PART_ID")
+  contains "removing it restores the balance exactly" "$UNDO" '"email":"ben@e.com","paidCents":0,"owedCents":15000,"netCents":-15000'
+  equals "...and the entry is gone with it"           "$(entry_lines "$UNDO" "Ben → Ana")" "no-such-entry"
+  equals "...leaving the plan as it was before"       \
+    "$(json_field "$UNDO" budget.settlements.0.fromName)>$(json_field "$UNDO" budget.settlements.0.toName):$(json_field "$UNDO" budget.settlements.0.amountCents)" \
+    "Ben>Ana:15000"
+
+  # EXCESS. Ben owes 150.00 and sends 200.00 — he rounded up, or paid for
+  # something else. Nothing refuses it and nothing caps it at the debt: he stops
+  # being a debtor and becomes a creditor for the 50.00 he is now out, which is
+  # true, and the plan starts asking ANA for it.
+  OVER=$(body "${SETR[@]}" "${JSON[@]}" -X POST "$SETTLE" \
+    -d '{"fromName":"Ben","fromEmail":"ben@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":20000}')
+  equals "paying more than you owe turns the plan around" \
+    "$(json_field "$OVER" budget.settlements.0.fromName)>$(json_field "$OVER" budget.settlements.0.toName):$(json_field "$OVER" budget.settlements.0.amountCents)" \
+    "Ana>Ben:5000"
+  contains "...and the payer is now the one owed"        "$OVER" '"email":"ben@e.com","paidCents":20000,"owedCents":15000,"netCents":5000'
+  OVER_ID=$(expense_id "$OVER" "Ben → Ana")
+  BACK=$(body "${SETR[@]}" -X DELETE "$SETTLE/$OVER_ID")
+  equals "...until it is taken back off again"           \
+    "$(json_field "$BACK" budget.settlements.0.fromName)>$(json_field "$BACK" budget.settlements.0.toName):$(json_field "$BACK" budget.settlements.0.amountCents)" \
+    "Ben>Ana:15000"
+
+  SQUARE=$(body "${SETR[@]}" "${JSON[@]}" -X POST "$SETTLE" \
+    -d '{"fromName":"Ben","fromEmail":"ben@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":15000}')
+  contains "the last suggested transfer lands Ana on zero"  "$SQUARE" '"email":"ana@e.com","paidCents":30000,"owedCents":30000,"netCents":0'
+  contains "...and Ben"                                     "$SQUARE" '"email":"ben@e.com","paidCents":15000,"owedCents":15000,"netCents":0'
+  contains "...and Cleo"                                    "$SQUARE" '"email":"cleo@e.com","paidCents":10000,"owedCents":10000,"netCents":0'
+  equals "...with nothing left to suggest"                  "$(json_field "$SQUARE" budget.settlements.length)" "0"
+  equals "...and the trip still cost CHF 300.00"            "$(json_field "$SQUARE" budget.totalCents)" "30000"
+
+  # The refusals a person can actually hit.
+  check "paying yourself is refused"                 422 "${SETR[@]}" "${JSON[@]}" -X POST "$SETTLE" \
+    -d '{"fromName":"Ana","fromEmail":"ana@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":5000}'
+  check "...as is a payment of nothing"              400 "${SETR[@]}" "${JSON[@]}" -X POST "$SETTLE" \
+    -d '{"fromName":"Ben","fromEmail":"ben@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":0}'
+  CHALET_ID=$(expense_id "$SQUARE" "Chalet")
+  SETTLED_ID=$(expense_id "$SQUARE" "Ben → Ana")
+  # The payments route is not a way around `removeExpense`'s narrower rule.
+  check "an EXPENSE cannot be removed as a payment" 422 "${SETR[@]}" -X DELETE "$SETTLE/$CHALET_ID"
+  # …and a transfer cannot be relabelled a cost, which would put money people
+  # handed each other into the trip total.
+  check "a payment cannot be given a category"      422 "${SETR[@]}" "${JSON[@]}" -X PATCH "$SEXP/$SETTLED_ID" \
+    -d "{\"accountId\":\"$(account_id "$SQUARE" "Uncategorised")\"}"
+  # Read back over a THIRD surface, because "the refusal wrote nothing" is a
+  # claim about the database and not about the response that refused.
+  equals "...so the total is what it was"           "$(json_field "$(body "${AUTH[@]}" "$API/events/$STRIP/budget")" totalCents)" "30000"
+
+  # NO LOCK-OUT ONCE PEOPLE HAVE SETTLED (#59, and the owner's rule): the trip's
+  # currency still moves, and a settlement re-derives with everything else
+  # because it is an entry like everything else. Three entries recomputed at
+  # 1.0645 leave all three people at zero — 300.00 → 319.35, its debts 53.23 /
+  # 159.68 / 106.45, and the two transfers 106.45 and 159.68 against them.
+  EUR=$(body "${SETR[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$STRIP/currency" -d '{"currency":"EUR","fxRate":"1.0645"}')
+  contains "a settled trip can still change currency"  "$EUR" '"entriesRecomputed":3'
+  equals "...and everybody stays square"               "$(json_field "$EUR" budget.settlements.length)" "0"
+  equals "...at the recomputed total"                  "$(json_field "$EUR" budget.totalCents)" "31935"
+  # EVERY money column of the transfer, against figures worked out by hand, and
+  # the shape with them: what was handed over never moves (CHF 100.00), what it
+  # settles for is re-expressed (EUR 106.45), the rate on the row says so, and it
+  # STILL touches no category account. An `entry_shares` assertion would have
+  # passed unchanged here — an as-spent share is the same before and after.
+  contains "...with the transfer re-expressed with them" "$EUR" '"title":"Cleo → Ana","category":"Uncategorised","categoryAccountId":null,"amountCents":10000,"currency":"CHF","amountBaseCents":10645,"baseCurrency":"EUR","fxRate":"1.0645","fxRateSource":"fetched"'
+  contains "...down to its single debit"                 "$EUR" '"shares":[{"name":"Ana","email":"ana@e.com","amountCents":10000,"amountBaseCents":10645,"weight":null}]'
+  # THE CENTIME THE RECOMPUTE LEAVES, asserted rather than described. Converting
+  # three debts one at a time gives 53.23 + 159.68 + 106.45 = 319.36 against a
+  # total of 319.35, and that difference is a real artefact of the change rather
+  # than money moved between friends — so it goes on `Rounding`, where somebody
+  # can read it, and the member side still nets to zero.
+  contains "...with the centime it leaves on Rounding" "$EUR" '"name":"Rounding","email":null,"isSystem":true,"debitCents":1,"creditCents":0'
+  equals "...in a ledger that still balances"          "$(ledger_imbalance "$EUR")" "0"
+  equals "...and a plan that still closes"             "$(plan_closes "$EUR")" "closed"
+
+  # …and an expense can still be CORRECTED afterwards, which re-opens exactly
+  # the difference rather than refusing the edit. 360.00 at the rate this entry
+  # is frozen at is 383.22, apportioned 85.16 / 191.61 / 106.45 — so Ben, who has
+  # paid 159.68, is short by exactly 31.93 and nobody else moves.
+  FIXED=$(body "${SETR[@]}" "${JSON[@]}" -X PATCH "$SEXP/$CHALET_ID" \
+    -d '{"amountCents":36000,"splitMode":"exact","participants":[{"name":"Ana","email":"ana@e.com","amountCents":8000},{"name":"Ben","email":"ben@e.com","amountCents":18000},{"name":"Cleo","email":"cleo@e.com","amountCents":10000}]}')
+  equals "correcting an expense after settling is allowed" "$(entry_shares "$FIXED" "Chalet")" "8000 18000 10000"
+  equals "...and re-opens exactly the difference"          \
+    "$(json_field "$FIXED" budget.settlements.0.fromName)>$(json_field "$FIXED" budget.settlements.0.toName):$(json_field "$FIXED" budget.settlements.0.amountCents)" \
+    "Ben>Ana:3193"
+  equals "...against the recomputed total"                 "$(json_field "$FIXED" budget.totalCents)" "38322"
+  equals "...in a ledger that still balances"              "$(ledger_imbalance "$FIXED")" "0"
+
+  # THE OTHER SURFACE THE CARD POSTS TO. `BudgetCard.vue` renders on the host
+  # page as well, against /api/host — a second handler with a second zod schema,
+  # which the /api/me checks above cannot exercise at all.
+  HOSTPAY=$(body "${SETR[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$STRIP/settlements" \
+    -d '{"fromName":"Ben","fromEmail":"ben@e.com","toName":"Ana","toEmail":"ana@e.com","amountCents":3193}')
+  equals "a payment recorded on the HOST surface settles it" "$(json_field "$HOSTPAY" budget.settlements.length)" "0"
+  contains "...landing the person who owed it on zero"       "$HOSTPAY" '"email":"ben@e.com","paidCents":19161,"owedCents":19161,"netCents":0'
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
+
+echo
 echo "== the receipt on an expense (Bermos/zaeme#29) =="
 # "What was that 84 francs?" — and the answer is a photo somebody already took.
 #

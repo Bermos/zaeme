@@ -275,7 +275,7 @@ everything planned inside zäme.
 | Invites & RSVP | `invite.ts`, `guest.ts` | `/api/invites/{token}` | `/api/host/events/{slug}/invites` | `RsvpCard.vue`, `AttendeeList.vue` |
 | Date poll | `poll.ts` | `…/votes` | `…/date-options`, `…/lock` | `DatePoll.vue` |
 | Bring list | `contributions.ts` | `…/contributions`, claim/release | `…/contributions` | `BringList.vue` |
-| Budget | `expenses.ts` | `…/expenses`, `…/budget` | `…/expenses` | `BudgetCard.vue` |
+| Budget | `expenses.ts`, `accounts.ts`, `settlements.ts` | `…/budget` (read only since #48) | `…/expenses`, `…/settlements` | `BudgetCard.vue` |
 | Timeline | `events-data.ts` | read via the invite page | `…/timeline` (POST/PATCH/DELETE) | `EventTimeline.vue`, `HostTimelineCard.vue` |
 | Media | `media.ts` | `…/media/presign`, `…/media/confirm` | same + assign a ticket, delete | `MediaGallery.vue`, `HostMediaCard.vue` |
 | Chat | `chat.ts` | `…/messages` | `…/messages` | `EventChat.vue` |

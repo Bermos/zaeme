@@ -2396,6 +2396,15 @@ components:
         `lines` is the entry itself — every posting, credits included, summing to
         zero. `shares` is the member DEBIT lines of that same entry, the shape
         this schema has always had.
+
+        SOME ENTRIES ARE SETTLEMENTS (#28), and they are in this list too. One
+        friend paying another back is an entry like any other — paid by the
+        sender, split 100% to the recipient — that touches NO category account,
+        which is why it is not a cost and is excluded from totalCents by its
+        shape rather than by a flag. Tell one apart by categoryAccountId being
+        null; there is no `kind` field and deliberately so. A client that sums
+        amountBaseCents over this list to get what a trip cost will count
+        money people handed each other: read totalCents, which never does.
       properties:
         id: { type: string }
         title: { type: string }
@@ -2413,6 +2422,12 @@ components:
           description: >-
             The account that name belongs to. Summing the debits into one of
             these is what "what did accommodation cost" means.
+
+            NULL MEANS THIS ENTRY IS A SETTLEMENT (#28): a transfer between two
+            people, with no category line at all and therefore no cost. It is
+            the only way to tell one from an expense, and `category` on such an
+            entry reads "Uncategorised" — the name of nothing, since there is no
+            category account behind it.
         amountCents: { type: integer, description: 'As spent, in `currency`.' }
         currency: { type: string, description: 'What was actually spent.' }
         amountBaseCents:
@@ -2562,6 +2577,9 @@ components:
             conversion residual away from zero by design.
         expenses:
           type: array
+          description: >-
+            Every entry on the trip, costs and settlements alike (#28). A
+            settlement carries categoryAccountId null; see the Expense schema.
           items: { $ref: '#/components/schemas/Expense' }
         balances:
           type: array

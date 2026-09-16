@@ -84,7 +84,9 @@ import { isPlainEvenSplit, splitEvenlyCents } from '../../shared/utils/even-spli
  *   balances     per member account: credits paid, debits owed
  *   settlements  member to member, touching no category account — which is why
  *                a transfer between friends is structurally not a cost and
- *                needs no `kind` flag to be left out of the total
+ *                needs no `kind` flag to be left out of the total. #28 writes
+ *                them, in `server/domain/settlements.ts`, through the write
+ *                path below and not a second one
  *
  * And an entry that does not add up has somewhere honest to put the difference:
  * the event's `Rounding` account. Nothing on this path ever produces one — the
@@ -279,7 +281,9 @@ export interface ExpenseView {
   /**
    * That account's id — the thing "what did accommodation cost" sums over.
    * `null` only for an entry with no category line at all, which is what a
-   * transfer between two friends will be (#28); nothing writes one yet.
+   * transfer between two friends IS: `server/domain/settlements.ts` writes
+   * them (#28), and `shared/utils/settlement.ts` is the one rule that reads
+   * this field to tell the two apart.
    */
   categoryAccountId: string | null
   /** As spent, in `currency`. */
@@ -866,7 +870,8 @@ export function buildEntryLines(input: {
   /**
    * Where the cost lands. `null` writes NO category line at all, which is what
    * a transfer between two friends is: member to member, structurally not a
-   * cost, excluded from the trip total with no flag to forget (#28).
+   * cost, excluded from the trip total with no flag to forget (#28). That is
+   * what `recordSettlement` passes, through `addExpense`'s `destination`.
    */
   categoryAccountId: string | null
   roundingAccountId: string
@@ -1405,6 +1410,24 @@ async function resolveConversion(
 }
 
 /**
+ * WHETHER THIS ENTRY IS A COST OR A TRANSFER (#28) — the ONE thing a settlement
+ * decides differently from an expense, and the reason there is no second write
+ * path for one.
+ *
+ * `category` resolves a category account (`Uncategorised` when nobody picked
+ * anything) and posts the cost through it. `transfer` writes no category line
+ * at all, so the entry is member-to-member and the trip total — the sum of
+ * debits into category accounts — cannot see it.
+ *
+ * IT IS A PARAMETER, NOT A COLUMN, and that distinction is the whole of the
+ * owner's call on this issue. Nothing is stored, nothing can be set wrong on a
+ * row, and nothing downstream reads a flag: what is persisted is the SHAPE, and
+ * `shared/utils/settlement.ts` is the single rule that reads it back. A stored
+ * `kind` could disagree with the lines beside it; this cannot.
+ */
+export type EntryDestination = 'category' | 'transfer'
+
+/**
  * Record an expense as a balanced journal entry, in one transaction.
  *
  * The order matters. Shares are resolved and the rate settled BEFORE the
@@ -1413,8 +1436,20 @@ async function resolveConversion(
  * is checked to balance, and only then is anything written. An entry that does
  * not balance is never persisted — the check is the last thing before the
  * insert, not a report afterwards.
+ *
+ * `destination` is how a SETTLEMENT is written (#28): the same validation, the
+ * same conversion, the same event lock, the same `buildEntryLines` /
+ * `assertEntryBalances` pair, the same insert — with no category line. The
+ * issue asked for one share filled in and no second write path, and this is
+ * that, rather than sixty lines of transaction copied into another file to
+ * drift away from this one.
  */
-export async function addExpense(eventId: string, input: AddExpenseInput, by: ExpenseActor) {
+export async function addExpense(
+  eventId: string,
+  input: AddExpenseInput,
+  by: ExpenseActor,
+  destination: EntryDestination = 'category'
+) {
   if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
     throw createError({ statusCode: 422, message: 'The amount must be a positive number of cents' })
   }
@@ -1467,7 +1502,16 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
     }
 
     const accounts = await ensureEventAccountsWithin(tx, eventId)
-    const destination = resolveCategoryAccount(accounts, { accountId: input.accountId, category: input.category })
+    // A transfer has no category, and a caller that named one is confused
+    // about what it is writing rather than being helpful. 500, not 422:
+    // nothing a person can type reaches this — `recordSettlement` sends
+    // neither field.
+    if (destination === 'transfer' && (input.accountId != null || input.category != null)) {
+      throw createError({ statusCode: 500, message: 'A transfer between two people has no category' })
+    }
+    const categoryAccountId = destination === 'transfer'
+      ? null
+      : resolveCategoryAccount(accounts, { accountId: input.accountId, category: input.category }).id
     const rounding = accounts.find(a => a.kind === 'rounding')
     if (!rounding) {
       throw createError({ statusCode: 500, message: `This event has no ${ROUNDING} account` })
@@ -1485,7 +1529,7 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
       amountCents: input.amountCents,
       amountBaseCents,
       payerAccountId: payerAccount.id,
-      categoryAccountId: destination.id,
+      categoryAccountId,
       roundingAccountId: rounding.id,
       shares: resolved.map(share => ({
         accountId: members.get(share.email)!.id,
@@ -1746,6 +1790,20 @@ export async function updateExpense(eventId: string, expenseId: string, input: U
       l => byAccountId.get(l.accountId)?.kind === 'category' && l.amountCents > 0
     )?.accountId ?? null
 
+    // NO CATEGORY LINE MEANS THIS IS A SETTLEMENT (#28), and giving one a
+    // category would make a payment between two friends a cost: the trip total
+    // is the sum of debits into category accounts, so CHF 300 handed over to
+    // clear a debt would be counted as CHF 300 spent on something. Everything
+    // else about an edit works on a transfer — a mistyped amount is corrected
+    // here like any other — so this refuses the one field that changes what the
+    // entry IS, rather than refusing the edit.
+    if (recordedCategory === null && (input.accountId !== undefined || input.category !== undefined)) {
+      throw createError({
+        statusCode: 422,
+        message: 'This entry is a payment between two people, not a cost, so it has no category.'
+      })
+    }
+
     const splitMode = input.splitMode ?? row.splitMode
     const resolved = input.participants
       ? resolveShares(amountCents, input.participants, splitMode)
@@ -1909,8 +1967,14 @@ const EXPENSE_WRITERS: readonly ParticipantRole[] = ['participant', 'owner', 'co
  * The lifecycle half used to come free with `resolveInviteToken`; it does not
  * come free here, and without it an expense records happily against a cancelled
  * trip (#48 review).
+ *
+ * EXPORTED so `server/domain/settlements.ts` can use THIS function rather than
+ * a second one shaped like it (#28). Recording a payment is a money write on
+ * the same ledger, and two gates answering one verb is how a role restriction
+ * stops meaning anything — #48 shipped exactly that bug once, with `logistics`
+ * 403'd on one surface and 200'd on the other.
  */
-async function assertMayWriteExpenses(slug: string, actor: ParticipantActor) {
+export async function assertMayWriteExpenses(slug: string, actor: ParticipantActor) {
   const ev = await loadEventBySlug(slug)
   assertEventOpenToGuests(ev)
   const role = await assertParticipant(ev.id, actor.id)
