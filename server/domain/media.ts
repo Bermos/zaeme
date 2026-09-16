@@ -687,10 +687,23 @@ export async function deleteMedia(userId: string, slug: string, mediaId: string)
  * pinning one widens NOTHING: every reader of the pin could already fetch the
  * object from the gallery.
  *
- * `ticket` is excluded for that reason and no other. A ticket is per-person —
- * visible to the attendee it is assigned to and to planners — and pinning one
- * to an expense would publish it to the whole trip through a side door, which
- * is a change to who may read what and therefore not this issue's to make.
+ * `ticket` WAS EXCLUDED FOR THAT REASON, AND SINCE #37 IT IS NOT. That
+ * sentence used to read: a ticket is per-person, so pinning one to an expense
+ * would publish it to the whole trip through a side door. The side door is
+ * gone — `listMediaForViewer` hands every ticket on the event to anybody
+ * holding the invite link, which is the same population that reads the budget,
+ * so adding `ticket` here would now widen nothing either. THE EXCLUSION STANDS
+ * ON A DIFFERENT FOOT, and it is `video`'s: a receipt is what you were
+ * CHARGED, a ticket is what you were ISSUED, and filing a boarding pass where
+ * the bill belongs answers a question nobody asked. A ticket also already has
+ * two surfaces of its own — what it says (#35) and who it is for (#36) —
+ * neither of which an expense row knows anything about, so a pinned one would
+ * render in the budget stripped of the half that makes it useful.
+ *
+ * So if somebody wants `ticket` in this list, the question in front of them is
+ * about MEANING and not about privacy. Do not reach for the old argument; it
+ * has been spent.
+ *
  * `video` is excluded because a receipt is a still or a paper; it would be
  * harmless (the gallery shows videos to everyone) and it is simply not the
  * thing.

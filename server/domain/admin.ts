@@ -407,11 +407,14 @@ export async function mediaLibrary(filter: MediaFilter = {}) {
        *
        * The library is a cross-event housekeeping list and the one thing it
        * says about assignment is the `unassigned` badge on `/admin/media`:
-       * a ticket nobody will be able to see. `assigned_rsvp_id` used to answer
-       * that by being null; a many-to-many answers it by being empty, and 0 is
-       * the same sentence with none of the ids — which keeps this read from
-       * handing the instance owner a list of RSVP ids across every event they
-       * have no use for.
+       * a ticket nobody has been GIVEN. That used to be the same sentence as
+       * "a ticket nobody can see"; since #37 it is the opposite — everybody on
+       * the event sees it, and what is missing is the name against it, so the
+       * badge is a planner's loose end rather than a visibility warning.
+       * `assigned_rsvp_id` used to answer this by being null; a many-to-many
+       * answers it by being empty, and 0 is the same sentence with none of the
+       * ids — which keeps this read from handing the instance owner a list of
+       * RSVP ids across every event they have no use for.
        *
        * A CORRELATED SUB-SELECT rather than a join, for the reason the note at
        * the top of this file gives: a join to a 0..N table multiplies the rows

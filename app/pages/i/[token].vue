@@ -382,7 +382,9 @@ const errorMessage = computed(() => {
         @updated="onBudgetUpdated"
       />
 
-      <!-- Shared gallery + papers (tickets matched to your email) -->
+      <!-- Shared gallery + papers. EVERY ticket on the event (#37), with the
+           address below deciding which are marked yours rather than which come
+           back — `Mine` and `All` are two buttons over one response. -->
       <MediaGallery
         :gallery="media.gallery"
         :documents="media.documents"

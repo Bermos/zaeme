@@ -632,7 +632,11 @@ export const ticketAssignment = pgTable('events_ticket_assignment', {
 }, table => [
   uniqueIndex('events_ticket_assignment_media_rsvp_unique').on(table.mediaId, table.rsvpId),
   index('events_ticket_assignment_media_idx').on(table.mediaId),
-  // The guest read's index: "every ticket assigned to any of my RSVPs".
+  // NOT the guest read's index any more (#37): that query was "every ticket
+  // assigned to any of my RSVPs" and the guest read no longer asks it — it
+  // takes every ticket on the event and marks the viewer's. What still needs
+  // this index is the referencing side of the `(event_id, rsvp_id)` foreign
+  // key: deleting an RSVP has to find the rows pointing at it.
   index('events_ticket_assignment_rsvp_idx').on(table.rsvpId),
   index('events_ticket_assignment_event_idx').on(table.eventId),
   foreignKey({
