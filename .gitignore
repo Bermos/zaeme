@@ -25,3 +25,9 @@ logs
 
 # npm lock file (project uses pnpm)
 package-lock.json
+
+# Agent worktrees. The Claude Code harness checks the repo out again under here
+# when a subagent runs in worktree isolation, so this is a whole second copy of
+# the tree — never repo content, and committing it would be committing the repo
+# into itself.
+.claude/worktrees/
