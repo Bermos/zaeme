@@ -1,8 +1,8 @@
 -- Currency belongs to the trip (#59).
 --
--- THE FIRST MIGRATION IN THIS REPO WHOSE ENTIRE CONTENT IS A BACKFILL. Both new
--- columns are NOT NULL and neither has a constant that is true of every row, so
--- the generated form —
+-- THE FIRST MIGRATION IN THIS REPO WHOSE CONTENT IS MOSTLY A BACKFILL. Two of
+-- the four new columns are NOT NULL and neither has a constant that is true of
+-- every row, so the generated form —
 --
 --     ALTER TABLE events_event   ADD COLUMN currency       text NOT NULL;
 --     ALTER TABLE events_expense ADD COLUMN fx_rate_source text NOT NULL;
@@ -23,10 +23,16 @@
 --     #25's 409 refused to let the instance base drift away from the recorded
 --     ones, so on a healthy database the two agree - and it is equivalent right
 --     up until the one database where they do not, which is the kind of
---     reasoning that produces wrong money. The `upgrade` job asserts that each
---     trip's currency and its recorded base survive this migration unchanged, so
---     a backfill that reached for a constant or for the setting goes red there
---     rather than in somebody's budget.
+--     reasoning that produces wrong money.
+--
+--     BE HONEST ABOUT WHAT CHECKS THIS. The two sources are indistinguishable on
+--     any database the previous release's own API can build, so the `upgrade`
+--     job cannot tell them apart and neither can anything else automated; the
+--     divergent case was executed by hand, against a scratch database filled
+--     through a trimmed journal. What the `upgrade` job DOES check is the other
+--     half - an event with no expenses takes the instance setting, and the
+--     verifier now snapshots those events too, so a backfill that reached for a
+--     constant goes red there.
 --
 --     For an event with NO expenses there is nothing recorded to preserve, so it
 --     takes the instance setting - exactly what it would have got had it been
@@ -41,11 +47,18 @@
 --     statement", which is true of every row here; `manual` would be a claim
 --     about verification that never happened.
 --
--- The DEFAULT is dropped again on that column immediately. A default left on a
--- NOT NULL column is a silent-wrong-value generator: an insert that sets the
--- amount and forgets where its rate came from would inherit `fetched` rather
--- than aborting, which is the whole reason the four conversion columns on that
--- table carry no defaults.
+--   events_expense.stated_amount_cents / stated_currency - NULL, and nullable
+--     for good. They record what a payer said they were out of pocket, in the
+--     currency they said it in, and no existing row carries that: the old schema
+--     had nowhere to put it and the figure is gone. Consistent with the line
+--     above - every migrated row is `fetched`, and a `fetched` row has nothing
+--     stated about it.
+--
+-- The DEFAULT on `fx_rate_source` is dropped again immediately. A default left
+-- on a NOT NULL column is a silent-wrong-value generator: an insert that sets
+-- the amount and forgets where its rate came from would inherit `fetched`
+-- rather than aborting, which is the whole reason the conversion columns on
+-- that table carry no defaults.
 --
 -- No foreign key and no unique index here, so the 42830 constraint-before-index
 -- trap documented in 0007's header does not apply.
@@ -77,4 +90,8 @@ UPDATE "events_event"
 ALTER TABLE "events_event" ALTER COLUMN "currency" SET NOT NULL;--> statement-breakpoint
 
 ALTER TABLE "events_expense" ADD COLUMN "fx_rate_source" text DEFAULT 'fetched' NOT NULL;--> statement-breakpoint
-ALTER TABLE "events_expense" ALTER COLUMN "fx_rate_source" DROP DEFAULT;
+ALTER TABLE "events_expense" ALTER COLUMN "fx_rate_source" DROP DEFAULT;--> statement-breakpoint
+
+-- Nullable with no default and nothing to backfill: see the header.
+ALTER TABLE "events_expense" ADD COLUMN "stated_amount_cents" integer;--> statement-breakpoint
+ALTER TABLE "events_expense" ADD COLUMN "stated_currency" text;

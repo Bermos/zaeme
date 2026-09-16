@@ -191,6 +191,17 @@ export function contribution(row: object) {
  * instance derived it: a lookup, an identity conversion, or a recompute after
  * the trip's currency changed.
  *
+ * `statedAmountCents`/`statedCurrency` are that figure AS IT WAS STATED, kept
+ * unchanged by every later recomputation while `amountBaseCents` is re-derived.
+ * They are null on a `fetched` row. A client showing "checked against a
+ * statement" should show these beside the settled figure when the two differ,
+ * or it is attributing a chained conversion to a person.
+ *
+ * `fxRate` is 1 only when nothing was applied. It is NOT 1 merely because
+ * `currency` equals `baseCurrency`: a stated figure survives a trip moving to
+ * the currency its own receipt is in, which leaves the two codes equal and the
+ * two amounts apart. Anything deciding "was this converted" must read `fxRate`.
+ *
  * `splitMode`, and the `weight` on each share, say how the total was divided
  * (#26). Both are a record of intent — the shares are materialised, so a client
  * that ignores them gets every figure it got before they existed.
@@ -218,6 +229,8 @@ export function expense(row: object) {
     baseCurrency: r.baseCurrency,
     fxRate: r.fxRate,
     fxRateSource: r.fxRateSource,
+    statedAmountCents: r.statedAmountCents ?? null,
+    statedCurrency: r.statedCurrency ?? null,
     splitMode: r.splitMode,
     note: r.note ?? null,
     paidByName: r.paidByName,

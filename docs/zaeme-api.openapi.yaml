@@ -2264,11 +2264,19 @@ components:
           type: string
           description: >-
             Decimal string, frozen at write time: amountCents x fxRate = amountBaseCents.
-            "1" whenever currency is already baseCurrency. When somebody stated the
-            out-of-pocket total instead of a rate, this is the EFFECTIVE rate
-            derived from the pair — the mid-market rate plus whatever the bank
-            took — and amountBaseCents is the stated figure rather than a product
-            of this.
+            When somebody stated the out-of-pocket total instead of a rate, this is
+            the EFFECTIVE rate derived from the pair — the mid-market rate plus
+            whatever the bank took — and amountBaseCents is the stated figure rather
+            than a product of this.
+
+            "1" means NOTHING WAS APPLIED, and it is the only reliable way to ask
+            whether this entry was converted. It is NOT 1 merely because currency
+            equals baseCurrency: a stated figure survives a trip moving to the
+            currency its own receipt is in, so such a row reads currency EUR,
+            baseCurrency EUR, fxRate 1.0366972477, with amountCents and
+            amountBaseCents nine francs apart and every balance built from the
+            second. A client that branches on currency === baseCurrency to decide
+            "no conversion happened" renders the wrong money.
         fxRateSource:
           type: string
           enum: [fetched, manual]
@@ -2279,6 +2287,20 @@ components:
             carries that figure across rather than re-deriving it from the receipt.
             "fetched" means the instance derived it: a lookup, an identity
             conversion, or a recompute after the trip's currency changed.
+        statedAmountCents:
+          type: [integer, 'null']
+          description: >-
+            What the payer SAID they were out of pocket, in statedCurrency, exactly
+            as stated. Null on a fetched row. amountBaseCents is re-derived by every
+            change of the trip's currency; this is not, so when the two differ the
+            settled figure is a chained conversion of what somebody typed rather
+            than the figure itself. Show both, or "checked against a statement"
+            attributes arithmetic to a person.
+        statedCurrency:
+          type: [string, 'null']
+          description: >-
+            The currency statedAmountCents was stated in — the trip's currency at
+            the time. Null on a fetched row.
         splitMode:
           type: string
           enum: [even, exact, percentage, weight]

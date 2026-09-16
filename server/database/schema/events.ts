@@ -651,8 +651,19 @@ export const expense = pgTable('events_expense', {
    * generated client reads — and what it names has moved from the instance to
    * the trip.
    *
-   * `fx_rate` is numeric, not a float — it is multiplied by money. It is 1
-   * whenever `currency` is already the event's, which is the ordinary case.
+   * `fx_rate` is numeric, not a float — it is multiplied by money. It is 1 for
+   * an expense this instance never converted — recorded in the event's own
+   * currency, which is the ordinary case — and stays 1 through a currency
+   * change that lands back on that currency.
+   *
+   * IT IS NOT 1 MERELY BECAUSE `currency` EQUALS `base_currency`, and that
+   * sentence used to be written here as if it were. A row whose payer stated
+   * what their bank took keeps that figure through a currency change (#59), so
+   * a trip that moves to the currency the receipt is in leaves the row saying
+   * `currency: EUR, base_currency: EUR, fx_rate: 1.0366972477` — the rate
+   * between what the merchant charged and what the payer was actually out of
+   * pocket. Anything deciding "was this converted" must read `fx_rate`, never
+   * the two currency codes (`shared/utils/conversion.ts`).
    */
   baseCurrency: text('base_currency').notNull(),
   fxRate: numeric('fx_rate', { precision: 20, scale: 10 }).notNull(),
@@ -684,6 +695,30 @@ export const expense = pgTable('events_expense', {
    * says what one unit of `currency` cost.
    */
   amountBaseCents: integer('amount_base_cents').notNull(),
+  /**
+   * WHAT THE PAYER SAID, AS THEY SAID IT (#59 review) — kept beside the derived
+   * figure rather than instead of it.
+   *
+   * `amount_base_cents` is re-derived every time the trip's currency changes,
+   * so without these two columns the number somebody typed off a bank statement
+   * is destroyed by the first recomputation and every one after it compounds
+   * the drift, while `fx_rate_source` goes on claiming the row was checked. One
+   * CHF→EUR→CHF round trip at real (non-inverse) rates moves a CHF 234.00 hotel
+   * to CHF 235.18: a figure nobody typed, labelled as one somebody did.
+   *
+   * They are a RECORD, not an input. Nothing reads them yet — the recompute
+   * still chains from `amount_base_cents` exactly as it did — and they exist
+   * because the alternative is unreconstructable: a column you wish you had
+   * kept cannot be added retrospectively once real trips have money in them.
+   * Whether a recomputation should snap a manual row back to this figure when
+   * the trip moves to `stated_currency`, or re-derive it and say so, is the
+   * owner's to decide; this keeps both doors open.
+   *
+   * NULL together, and only on a `fetched` row: there is nothing a person
+   * stated about an expense this instance converted by itself.
+   */
+  statedAmountCents: integer('stated_amount_cents'),
+  statedCurrency: text('stated_currency'),
   /**
    * How the total was divided (#26): evenly, by exact per-person amounts, by
    * percentage, or by weight ("Ana counts double").

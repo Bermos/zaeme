@@ -971,6 +971,10 @@ contains "what the payer actually paid is what is recorded" "$HOTEL" '"amountBas
 contains "...with the receipt itself untouched"            "$HOTEL" '"amountCents":24525,"currency":"EUR"'
 contains "...at the EFFECTIVE rate that pair implies"      "$HOTEL" '"fxRate":"0.9541284404"'
 contains "...recorded as a figure somebody checked"        "$HOTEL" '"fxRateSource":"manual"'
+# AND KEPT AS STATED, beside the derived figure rather than instead of it. The
+# settled amount is re-derived by every currency change; this one is not, and it
+# is the only place the number somebody typed off a bank statement survives.
+contains "...with what was stated kept as it was stated"  "$HOTEL" '"statedAmountCents":23400,"statedCurrency":"CHF"'
 contains "...and the shares apportioned from what was PAID" "$HOTEL" '"amountCents":13100,"amountBaseCents":12499'
 contains "...down to the smallest of them"                 "$HOTEL" '"amountCents":2255,"amountBaseCents":2152'
 equals "...in an entry that balances"            "$(ledger_imbalance "$HOTEL")" "0"
@@ -992,6 +996,10 @@ contains "...converted once and frozen"          "$TAXI" '"amountBaseCents":9931
 GROC=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/expenses" \
   -d '{"title":"Groceries","amountCents":4500,"paidByName":"C","paidByEmail":"c@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"}]}')
 contains "an expense in the trip's own currency is derived, not stated" "$GROC" '"fxRate":"1","fxRateSource":"fetched"'
+contains "...so there is nothing stated about it"         "$GROC" '"fxRateSource":"fetched","statedAmountCents":null,"statedCurrency":null'
+# A typed RATE is a statement about money too — the person asserted this receipt
+# cost them this much, and multiplying it out is arithmetic, not a lookup.
+contains "a typed rate is kept as a stated figure as well" "$TAXI" '"statedAmountCents":9931,"statedCurrency":"CHF"'
 
 CUB=$(body "${AUTH[@]}" "$API/events/$CUSLUG/budget")
 contains "the trip totals in ITS currency"       "$CUB" '"currency":"CHF","approximate":true,"totalCents":37831'
@@ -1029,6 +1037,16 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   contains "a stated figure survives even into its own receipt's currency" "$CUB2" '"amountCents":24525,"currency":"EUR","amountBaseCents":25425'
   contains "...and is still marked as one somebody checked" "$CUB2" '"amountBaseCents":25425,"baseCurrency":"EUR","fxRate":"1.0366972477","fxRateSource":"manual"'
   contains "...with each existing debt re-expressed on its own" "$CUB2" '"amountCents":13100,"amountBaseCents":13581'
+  # THE REVIEW'S BLOCKING FINDING, executed. The settled figure moved from 23400
+  # CHF to 25425 EUR; what Ana actually told us is still 23400 CHF, so a reader
+  # can see that the row labelled "checked against a statement" is now carrying a
+  # chained conversion of that statement rather than the statement. Destroying it
+  # is the mutation this catches, and there is no recovering it afterwards.
+  contains "what the payer stated survives the recomputation" "$CUB2" '"statedAmountCents":23400,"statedCurrency":"CHF"'
+  # `currency` and `baseCurrency` are BOTH EUR on that row while the two amounts
+  # are nine francs apart, which is why nothing may decide "was this converted"
+  # from the two codes.
+  contains "...on a row whose two currency codes now agree" "$CUB2" '"currency":"EUR","amountBaseCents":25425,"baseCurrency":"EUR"'
   # THE RESIDUAL. Three debts converted one at a time do not come to the
   # converted bill; the difference is a line, not somebody's share.
   contains "the cents left over land on Rounding" "$CUB2" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":2,"creditCents":0'
@@ -1039,6 +1057,33 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   equals "...so the plan still closes to the cent" "$(plan_closes "$CUB2")" "closed"
   contains "the plan clears the smaller debt"    "$CUB2" '"toEmail":"a@e.com","amountCents":876'
   contains "...and the larger one"               "$CUB2" '"toEmail":"a@e.com","amountCents":3943'
+
+  # A BUDGET WHOSE EVERY CODE MATCHES AND WHOSE EVERY FIGURE IS CHAINED. Without
+  # its own trip this is unreachable: every other budget here holds a receipt in
+  # some other currency, so `approximate` would be true for the wrong reason and
+  # the old `currency !== baseCurrency` rule would have passed (#59 review).
+  #
+  # ONE PARTICIPANT, and that is the load-bearing part. Split two ways, the
+  # recompute leaves a cent on `Rounding` and `approximate` comes back true
+  # through its OTHER disjunct — so the check passes with the currency-code rule
+  # restored and proves nothing. With one share the residual is structurally
+  # zero, both `currency` and `baseCurrency` are EUR, and the rate is the only
+  # thing left that can answer the question. (Executed: this block was two-way
+  # first, and the mutation that puts the codes back went green on it.)
+  ALLEUR=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke all-eur $SUFFIX\",\"type\":\"trip\"}")
+  AESLUG=$(printf '%s' "$ALLEUR" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$AESLUG/expenses" \
+    -d '{"title":"Milan hotel","amountCents":24525,"currency":"EUR","targetAmountCents":23400,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"}]}' > /dev/null
+  body "${CUR_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$AESLUG/currency" -d '{"currency":"EUR","fxRate":"1.0865432109"}' > /dev/null
+  AEB=$(body "${AUTH[@]}" "$API/events/$AESLUG/budget")
+  # Every expense on it now reads currency EUR, baseCurrency EUR — and every
+  # figure under the total is a chained conversion of what somebody typed.
+  contains "a trip of EUR receipts settling in EUR"        "$AEB" '"currency":"EUR","amountBaseCents":25425,"baseCurrency":"EUR"'
+  contains "...still says its totals are approximate"      "$AEB" '"currency":"EUR","approximate":true,"totalCents":25425'
+  excludes "...and does not claim to be exact"             "$AEB" '"approximate":false'
+  # …and nothing landed on Rounding, so that `true` came from the RATE and from
+  # nothing else. Without this line the check above has two ways to pass.
+  contains "...with Rounding holding nothing to explain it" "$AEB" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
 
   # BOTH DIRECTIONS, MORE THAN ONCE. 0.9203456789 is this fixture's near-inverse
   # of the rate above, chosen so every figure lands back on itself — which is a
@@ -1074,6 +1119,11 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # that shape once). The event is published first because /api/me refuses a
   # draft, which is a different refusal and not the one under test here.
   body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/status" -d '{"status":"published"}' > /dev/null
+  # `expensesRecorded` on /admin/settings is `countRecordedExpenses()`, and it is
+  # the only figure that page prints. A version returning 0 would fail nothing,
+  # so the check is a DELTA the script chose rather than a value it read back:
+  # two expenses go in below, and the count has to move by two.
+  RECORDED_BEFORE=$(body "${CUR_OWNER[@]}" "$BASE/api/admin/settings" | sed -n 's/.*"expensesRecorded":\([0-9]*\).*/\1/p')
   MEPAID=$(body "${CUR_OWNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$CUSLUG/expenses" \
     -d '{"title":"Cable car","amountCents":6000,"currency":"EUR","targetAmountCents":5750,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
   contains "the participant surface takes what was actually paid" "$MEPAID" '"amountBaseCents":5750,"baseCurrency":"CHF","fxRate":"0.9583333333","fxRateSource":"manual"'
@@ -1081,6 +1131,8 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   HOSTPAID=$(body "${CUR_OWNER[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$CUSLUG/expenses" \
     -d '{"title":"Lift pass","amountCents":9000,"currency":"EUR","targetAmountCents":8600,"paidByName":"B","paidByEmail":"b@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
   contains "...and so does the host surface"       "$HOSTPAID" '"amountBaseCents":8600,"baseCurrency":"CHF","fxRate":"0.9555555556","fxRateSource":"manual"'
+  RECORDED_AFTER=$(body "${CUR_OWNER[@]}" "$BASE/api/admin/settings" | sed -n 's/.*"expensesRecorded":\([0-9]*\).*/\1/p')
+  equals "the instance expense count moves by what was added" "$((${RECORDED_AFTER:-0} - ${RECORDED_BEFORE:-0}))" "2"
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the OWNER's session to run these"
 fi

@@ -10,6 +10,9 @@ import {
   type LedgerLineView
 } from '../server/domain/expenses'
 import { type EntryLines, recomputeEntry } from '../server/domain/event-currency'
+import { rateApplied, wasConverted } from '../shared/utils/conversion'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 /**
  * Changing what a trip settles in (#59) — the arithmetic, without a database.
@@ -333,5 +336,83 @@ describe('the rate behind a figure somebody typed off a statement', () => {
     // promise the arithmetic cannot make.
     expect(convertCents(12000, deriveRate(12000, 11347))).toBe(11347)
     expect(convertCents(24525, deriveRate(24525, 22601))).toBe(22601)
+  })
+})
+
+describe('"was this converted?" is the rate, never the two currency codes', () => {
+  /*
+   * The row this exists for, and the reason the old predicate was wrong on
+   * exactly the money that matters: a payer stated what their bank took, the
+   * trip later moved to the currency the receipt is in, and the two codes now
+   * match while the two amounts are nine francs apart. Every balance on the
+   * trip is built from the second one.
+   */
+  const statedThenMoved = {
+    currency: 'EUR',
+    baseCurrency: 'EUR',
+    amountCents: 24525,
+    amountBaseCents: 25425,
+    fxRate: '1.0366972477'
+  }
+
+  it('sees a conversion the currency codes deny', () => {
+    expect(statedThenMoved.currency).toBe(statedThenMoved.baseCurrency)
+    expect(statedThenMoved.amountCents).not.toBe(statedThenMoved.amountBaseCents)
+    // The old rule, written out so the contrast is executed rather than claimed.
+    expect(statedThenMoved.currency !== statedThenMoved.baseCurrency).toBe(false)
+    expect(wasConverted(statedThenMoved)).toBe(true)
+  })
+
+  it('says nothing happened when nothing happened', () => {
+    expect(wasConverted({ fxRate: '1' })).toBe(false)
+    // `numeric(20, 10)` comes back from Postgres padded to its scale, and a
+    // caller reading the column rather than the trimmed budget view gets this.
+    expect(rateApplied('1.0000000000')).toBe(false)
+    expect(rateApplied('1.')).toBe(false)
+  })
+
+  it('is true for an ordinary foreign expense as well', () => {
+    expect(wasConverted({ fxRate: '0.9412' })).toBe(true)
+    expect(rateApplied('0.9999999999')).toBe(true)
+    expect(rateApplied('1.0000000001')).toBe(true)
+  })
+
+  it('treats nothing at all as nothing applied', () => {
+    expect(rateApplied(null)).toBe(false)
+    expect(rateApplied(undefined)).toBe(false)
+    expect(rateApplied('')).toBe(false)
+  })
+})
+
+describe('both sides of the rule read the same function', () => {
+  /*
+   * There are no component tests in this repo, and the smoke suite pins the API
+   * payload rather than what the card renders — so the card's half of this rule
+   * is reachable by nothing else. A grep is a weak check and is worth exactly
+   * this much: it catches the card going back to comparing currency codes,
+   * which is the regression that happened. Comments are stripped first, because
+   * a structural test that greps a whole file is otherwise satisfied by its own
+   * doc comment (#32 shipped two of those).
+   */
+  function codeOnly(source: string): string {
+    return source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .filter(l => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+      .join('\n')
+  }
+
+  const root = join(import.meta.dirname, '..')
+  const card = codeOnly(readFileSync(join(root, 'app', 'components', 'BudgetCard.vue'), 'utf8'))
+  const budget = codeOnly(readFileSync(join(root, 'server', 'domain', 'expenses.ts'), 'utf8'))
+
+  it('the card decides "foreign" from the shared rule', () => {
+    expect(card).toMatch(/function isForeign\(x: Expense\): boolean \{\s*return wasConverted\(x\)\s*\}/)
+    expect(card).not.toMatch(/x\.currency !== x\.baseCurrency/)
+  })
+
+  it('and the budget decides "approximate" from it too', () => {
+    expect(budget).toMatch(/approximate: expenses\.some\(wasConverted\)/)
+    expect(budget).not.toMatch(/e\.currency !== baseCurrency/)
   })
 })

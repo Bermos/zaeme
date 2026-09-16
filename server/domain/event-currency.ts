@@ -18,10 +18,21 @@ import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
 /**
  * CHANGING WHAT A TRIP SETTLES IN (#59).
  *
- * The recorded facts — `amountCents` and `currency` on every entry, the
- * as-spent amount on every line — are never touched. What moves is everything
- * DERIVED from them: each entry's converted total, each person's converted
- * share, and therefore every balance, the trip total and the settlement plan.
+ * The recorded facts are never touched: `amountCents` and `currency` on every
+ * entry, the as-spent amount on every line, and — since the #59 review —
+ * `stated_amount_cents`/`stated_currency`, which are what the payer said they
+ * were out of pocket and in what. What moves is everything DERIVED from them:
+ * each entry's converted total, each person's converted share, and therefore
+ * every balance, the trip total and the settlement plan.
+ *
+ * THAT THE STATED FIGURE IS KEPT IS NOT THE SAME AS IT BEING USED. Nothing here
+ * reads those two columns; `amount_base_cents` is chained exactly as it was.
+ * What they buy is that the chaining is REVERSIBLE and auditable: without them
+ * a CHF 234.00 hotel that goes CHF → EUR → CHF at real (non-inverse) rates
+ * comes back 235.18 and there is no record anywhere that 234.00 was ever the
+ * number, while the row goes on saying `manual`. Whether a recomputation should
+ * snap such a row back, or re-derive it and warn, is the owner's call; this
+ * file does the conservative thing and keeps the evidence.
  *
  * ONE RATE, FETCHED ONCE, APPLIED TO THE FROZEN FIGURES. Not a fresh lookup per
  * expense currency, which is the other thing this could have been. The reason
@@ -281,7 +292,17 @@ export async function setEventCurrency(
 
     for (const entry of entries) {
       const g = grouped.get(entry.id)
-      if (!g) continue
+      // An entry with no lines at all cannot be re-expressed, and SKIPPING it
+      // is the worst of the three options: the event's currency changes around
+      // it and the row is left labelled in a currency the trip no longer
+      // settles in, silently, forever. The transaction is open, so throwing
+      // rolls the whole change back and changes nothing.
+      if (!g) {
+        throw createError({
+          statusCode: 500,
+          message: `The entry "${entry.title}" has no ledger lines, so this trip cannot be re-expressed. Nothing was changed.`
+        })
+      }
       // `fetched` is half the condition, not a detail: see the file header. A
       // figure a person stated is carried across even into the currency its own
       // receipt is in, because the fee they paid is real and theirs to recover.
@@ -298,7 +319,9 @@ export async function setEventCurrency(
       // Nothing here can turn a `manual` row into a `fetched` one: the identity
       // case is only ever reached by a row that was already `fetched`, so the
       // label a person earned survives every change. It is carried through
-      // rather than recomputed so that reading it means what it says.
+      // rather than recomputed so that reading it means what it says — and
+      // `stated_amount_cents`/`stated_currency` are not in the `set` below at
+      // all, so the figure behind the label survives with it.
       const fxRateSource: FxRateSource = entry.fxRateSource
       if (fxRateSource === 'manual') manualRatesKept++
       roundingCents += lines

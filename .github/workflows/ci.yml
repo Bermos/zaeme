@@ -161,8 +161,8 @@ concurrency:
 # with the OPPOSITE advice to a one-character one — they shared a sentence, so
 # whoever pasted a paragraph was told to type at least two characters. 337 -> 378.
 #
-# #59 moved the currency from the instance to the trip: +61 checks, -5, so
-# 378 -> 434 (executed: 422 locally without object storage, whose poster block
+# #59 moved the currency from the instance to the trip: +71 checks, -5, so
+# 378 -> 444 (executed: 432 locally without object storage, whose poster block
 # is 12 checks skipping as one line — do the subtraction rather than reading the
 # local number as short of the floor). The five that went were #25's lock — a 409 refusing to change the
 # instance base while any expense disagreed with it, plus the four sentences the
@@ -181,11 +181,23 @@ concurrency:
 # the cent. `plan_closes` is a new node helper for that last one, because it is
 # arithmetic over the whole payload and a `contains` cannot do arithmetic.
 #
+# Nine of those came out of the review, and three are worth naming. A trip whose
+# every receipt is in the currency it settles in and whose every figure is a
+# chained conversion has to mint its OWN trip, because every other budget here
+# holds a receipt in some other currency — so the rule that reads the two
+# currency codes instead of the rate passes on all of them and fails only on
+# that one. `statedAmountCents` is asserted both at the write and AFTER a
+# currency change, which is the only executed proof that a recomputation does
+# not destroy the figure somebody typed off a bank statement. And
+# `expensesRecorded` is checked as a DELTA the script chose (+2) rather than a
+# value read back, because a `countRecordedExpenses` that always returned 0
+# would otherwise fail nothing while /admin/settings prints its answer.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '434'
+  MIN_SMOKE_CHECKS: '444'
 
 jobs:
   ci:

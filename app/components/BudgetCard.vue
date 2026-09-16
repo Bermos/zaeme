@@ -54,6 +54,9 @@ interface Expense {
   fxRate: string
   /** Where that rate came from: `manual` is a figure a person checked. */
   fxRateSource?: 'fetched' | 'manual'
+  /** What the payer said they were out of pocket, as they said it. */
+  statedAmountCents?: number | null
+  statedCurrency?: string | null
   /** How the total was divided: even, exact, percentage or weight. */
   splitMode: string
   paidByName: string
@@ -153,9 +156,24 @@ function money(cents: number, code: string): string {
   }
 }
 
-/** Whether this expense was spent in something other than what we settle in. */
+/**
+ * Whether this expense went through a conversion — which is what decides
+ * whether the card shows the settled figure beside the receipt and the rate
+ * line under it.
+ *
+ * THE RATE, NOT THE TWO CURRENCY CODES. `x.currency !== x.baseCurrency` is what
+ * this was, and it is false on exactly the rows where the two figures differ
+ * most: a payer's stated out-of-pocket total survives a change of the trip's
+ * currency, so a EUR receipt on a trip that has moved to EUR reads
+ * `currency: EUR, baseCurrency: EUR, amountCents: 24525, amountBaseCents:
+ * 25425`. Under the old rule this printed "Ana paid €245.25", hid the €254.25
+ * every balance on the trip is built from, and hid the rate line that would
+ * have explained it — leaving a reader with numbers that do not add up and
+ * nothing to click (#59 review). `shared/utils/conversion.ts` is the one rule,
+ * shared with `loadBudget`'s `approximate`.
+ */
 function isForeign(x: Expense): boolean {
-  return x.currency !== x.baseCurrency
+  return wasConverted(x)
 }
 
 const canWrite = computed(() => !!props.viewer && !props.lockedReason)
@@ -678,7 +696,12 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
                 v-if="isForeign(x)"
                 class="text-muted text-xs"
               >
-                converted at {{ x.fxRate }} when it was recorded{{ x.fxRateSource === 'manual' ? ' · checked against a statement' : '' }}
+                converted at {{ x.fxRate }} when it was recorded{{ x.fxRateSource === 'manual' ? ' · checked against a statement' : '' }}<template
+                  v-if="x.statedAmountCents && x.statedCurrency
+                    && (x.statedAmountCents !== x.amountBaseCents || x.statedCurrency !== x.baseCurrency)"
+                >
+                  · stated as {{ money(x.statedAmountCents, x.statedCurrency) }}, re-expressed since
+                </template>
               </p>
               <p
                 v-if="x.addedByName && x.addedByEmail !== x.paidByEmail"

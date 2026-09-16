@@ -38,15 +38,24 @@
  * release moved the currency off the instance and onto the event, filling
  * `events_event.currency` per trip; every balance on a trip is already frozen
  * against the currency its expenses carry, so a backfill that reached for a
- * constant, or for the instance setting rather than the trip's own rows, would
- * silently rename the units under a column of sums. Nothing else in this job
- * can see that: the ledger still balances, the totals still add up, and every
- * number is simply labelled something it is not. So both halves are pinned —
- * the budget's `currency` and each entry's `baseCurrency` — against what the
- * PREVIOUS release said they were.
+ * constant would silently rename the units under a column of sums. Nothing else
+ * in this job can see that: the ledger still balances, the totals still add up,
+ * and every number is simply labelled something it is not.
+ *
+ * WHAT THIS CANNOT TELL APART, said out loud so nobody reads more into a green
+ * run than is there. #59's backfill takes an event's currency from its own
+ * expenses' `base_currency`, falling back to the instance setting. Those two
+ * sources DISAGREE only on a database where some trip's expenses were converted
+ * into something the instance setting is not — and that state is unreachable
+ * through the previous release's API, which writes `base_currency` from the
+ * instance setting on every expense and answers 409 to any change that would
+ * make them diverge. So a backfill that read the setting instead of the rows
+ * passes this job on every database it can build. Only the constant is caught,
+ * and only through the events that have NO expenses, which is why they are
+ * snapshotted below rather than skipped.
  *
  * Proving the arithmetic of a particular backfill beyond that is that
- * migration's own job.
+ * migration's own job, on a database built by hand.
  *
  * THIS FILE SPEAKS TWO RELEASES' `/api/v1` AT ONCE, and that is a maintenance
  * obligation rather than an accident. `canaryExpenses` below has to be accepted
@@ -91,15 +100,14 @@ const HEADERS = {
  * than estimated, because the canary is the one event `snapshot` guarantees:
  *
  *   1   the budget still loads
- *  16   two expenses x eight (survived, amount as spent, the currency it
- *       settles in, its rate is not claimed to have been checked, carries its
- *       lines, sums to zero, every line has an account, still filed under its
- *       category)
+ *  14   two expenses x seven (survived, amount as spent, its rate is not
+ *       claimed to have been checked, carries its lines, sums to zero, every
+ *       line has an account, still filed under its category)
  *   1   the trip still settles in what it settled in
  *   2   everybody who had a balance still has one; the balances still close
  *   4   the write block: readable, recorded, filed under Food, total moved
  *  ---
- *  24
+ *  22
  *
  * `snapshot` refuses to write a file unless the canary came back with both of
  * those expenses AND a category on each, so every one of the 19 is reachable —
@@ -110,7 +118,7 @@ const HEADERS = {
  * this deliberately does not depend on how many of those there are: that file
  * is free to change what it leaves behind.
  */
-const MIN_ASSERTIONS = 24
+const MIN_ASSERTIONS = 22
 
 let pass = 0
 let fail = 0
@@ -227,8 +235,12 @@ async function snapshot(file) {
     if (!slug) continue
     const budget = await api('GET', `/events/${slug}/budget`)
     if (budget.status !== 200) continue
+    // An event with NO expenses used to be skipped here, which left the half of
+    // #59's backfill that fills from the instance setting checked by nothing —
+    // and that is the only half this job can check at all. They are cheap (one
+    // budget read each) and they carry the assertion that matters most: the
+    // currency they came out with.
     const expenses = Array.isArray(budget.json?.expenses) ? budget.json.expenses : []
-    if (!expenses.length) continue
     events.push({
       slug,
       currency: budget.json.currency ?? null,
@@ -327,21 +339,18 @@ async function verify(file) {
         `was ${was.amountCents} ${was.currency}, now ${now.amountCents} ${now.currency}`
       )
 
-      // #59's backfill, at the row level. `amountBaseCents` is allowed to move
-      // (a recompute is what that release is for); the LABEL on it is not,
-      // because the frozen figure beside it was converted at that currency's
-      // rate and cannot be re-read as another.
-      assert(
-        `${before.slug}/${was.title}: the currency it settles in is untouched`,
-        was.baseCurrency === null || now.baseCurrency === was.baseCurrency,
-        `was converted into ${was.baseCurrency}, now says ${now.baseCurrency}`
-      )
-
-      // The other half of that backfill: a column that has to be filled for
-      // every existing row and has no accurate value to fill it with. `fetched`
-      // is the conservative one — "nobody told us this was checked against a
-      // statement" — and a row that came back `manual` would be this migration
-      // inventing a claim about verification that never happened.
+      // THERE WAS AN ASSERTION HERE that each entry's `baseCurrency` was
+      // untouched. It could not fail: #59's migration writes nothing to that
+      // column, so it restated a tautology and still counted towards the floor
+      // below — the same shape as the `totalCents` check removed further down.
+      // The claim it was trying to make lives at the event level, where the
+      // backfill actually writes, and is asserted after this loop.
+      //
+      // A column that has to be filled for every existing row and has no
+      // accurate value to fill it with: `fetched` is the conservative one —
+      // "nobody told us this was checked against a statement" — and a row that
+      // came back `manual` would be this migration inventing a claim about
+      // verification that never happened.
       assert(
         `${before.slug}/${was.title}: its rate is not claimed to have been checked`,
         now.fxRateSource === undefined || now.fxRateSource === 'fetched',
@@ -394,10 +403,12 @@ async function verify(file) {
     // version of it is in the write block at the bottom of this function, where
     // the total has to move by an amount THIS script chose — which is what went
     // red when the chart of accounts was not seeded.
-    // The trip's own currency. It is `null` in a snapshot taken before #59 only
-    // if that release did not report one at all, which it did — the budget has
-    // carried a `currency` since #25 — so this is a live check against every
-    // release this job can straddle.
+    // The trip's own currency, which is where #59's backfill writes. It is
+    // `null` in a snapshot only if the previous release reported none at all,
+    // which it did not — the budget has carried a `currency` since #25 — so
+    // this is a live check against every release this job can straddle. It is
+    // the assertion a backfill that reached for a constant fails, and it covers
+    // the events with no expenses as well now.
     assert(
       `${before.slug}: the trip still settles in what it settled in`,
       before.currency === null || after.currency === before.currency,

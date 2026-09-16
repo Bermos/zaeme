@@ -17,6 +17,7 @@ import {
 } from './accounts'
 import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
 import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '../../shared/utils/split-weight'
+import { wasConverted } from '../../shared/utils/conversion'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
@@ -224,6 +225,17 @@ export interface ExpenseView {
    * currency changed.
    */
   fxRateSource: FxRateSource
+  /**
+   * What the payer SAID they were out of pocket, and the currency they said it
+   * in — `null` on a `fetched` row (#59 review).
+   *
+   * `amountBaseCents` is re-derived by every currency change; this is not. It
+   * is the only place the typed figure survives, and it is here so a reader can
+   * see the difference rather than being told a chained conversion was checked
+   * against a statement.
+   */
+  statedAmountCents: number | null
+  statedCurrency: string | null
   /** How the total was divided (#26). A record of intent; nothing re-derives from it. */
   splitMode: SplitMode
   paidByName: string
@@ -956,6 +968,8 @@ export async function loadBudget(eventId: string): Promise<{
       baseCurrency: r.baseCurrency,
       fxRate: trimDecimal(r.fxRate),
       fxRateSource: r.fxRateSource,
+      statedAmountCents: r.statedAmountCents,
+      statedCurrency: r.statedCurrency,
       splitMode: r.splitMode,
       paidByName: r.paidByName,
       paidByEmail: r.paidByEmail,
@@ -990,7 +1004,15 @@ export async function loadBudget(eventId: string): Promise<{
     // Computed from the rows rather than from a flag somebody has to set: an
     // entry recorded in the trip's own currency at rate 1 is exact, and a
     // budget made only of those says nothing about approximation.
-    approximate: expenses.some(e => e.currency !== baseCurrency)
+    //
+    // THE RATE, NOT THE TWO CURRENCY CODES. `currency !== baseCurrency` is what
+    // this said first, and it is false on exactly the most approximate budget
+    // there is: a trip of EUR receipts moved to EUR, where every figure is a
+    // chained conversion of what the payers stated, every code matches, and the
+    // residual is zero so no `Rounding` line exists either. Both disjuncts were
+    // false and the screen said nothing (#59 review). See
+    // `shared/utils/conversion.ts`, which the card reads too.
+    approximate: expenses.some(wasConverted)
       || accounts.some(a => a.kind === 'rounding' && a.lineCount > 0)
   }
 }
@@ -1075,6 +1097,14 @@ async function resolveConversion(input: AddExpenseInput, eventCurrency: string):
   fxRate: string
   fxRateSource: FxRateSource
   amountBaseCents: number
+  /**
+   * What the person said, as they said it — the figure and the currency it was
+   * stated in (#59 review). `null` on a `fetched` row, where nobody said
+   * anything, and kept beside the derived amount rather than instead of it so a
+   * recomputation cannot destroy it.
+   */
+  statedAmountCents: number | null
+  statedCurrency: string | null
 }> {
   const baseCurrency = eventCurrency
   const currency = normaliseCurrency(input.currency ?? baseCurrency)
@@ -1115,7 +1145,15 @@ async function resolveConversion(input: AddExpenseInput, eventCurrency: string):
         message: `This was spent in ${baseCurrency}, which is what this trip settles in — what was paid is the amount itself.`
       })
     }
-    return { currency, baseCurrency, fxRate: '1', fxRateSource: 'fetched', amountBaseCents: input.amountCents }
+    return {
+      currency,
+      baseCurrency,
+      fxRate: '1',
+      fxRateSource: 'fetched',
+      amountBaseCents: input.amountCents,
+      statedAmountCents: null,
+      statedCurrency: null
+    }
   }
 
   if (statedTarget !== null) {
@@ -1124,17 +1162,27 @@ async function resolveConversion(input: AddExpenseInput, eventCurrency: string):
       baseCurrency,
       fxRate: deriveRate(input.amountCents, statedTarget),
       fxRateSource: 'manual',
-      amountBaseCents: statedTarget
+      amountBaseCents: statedTarget,
+      statedAmountCents: statedTarget,
+      statedCurrency: baseCurrency
     }
   }
 
   if (statedRate !== null) {
+    // A typed RATE is a statement about money too: the person asserted that
+    // this receipt cost them this much, and multiplying it out is arithmetic,
+    // not a lookup. So the product is recorded as stated — the two manual forms
+    // are kept the same way because the question a later reader asks of either
+    // is the same one.
+    const stated = convertCents(input.amountCents, statedRate)
     return {
       currency,
       baseCurrency,
       fxRate: statedRate,
       fxRateSource: 'manual',
-      amountBaseCents: convertCents(input.amountCents, statedRate)
+      amountBaseCents: stated,
+      statedAmountCents: stated,
+      statedCurrency: baseCurrency
     }
   }
 
@@ -1150,7 +1198,9 @@ async function resolveConversion(input: AddExpenseInput, eventCurrency: string):
     baseCurrency,
     fxRate: quote.rate,
     fxRateSource: 'fetched',
-    amountBaseCents: convertCents(input.amountCents, quote.rate)
+    amountBaseCents: convertCents(input.amountCents, quote.rate),
+    statedAmountCents: null,
+    statedCurrency: null
   }
 }
 
@@ -1179,7 +1229,15 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
     .where(eq(tables.event.id, eventId))
     .limit(1)
   if (!ev) throw createError({ statusCode: 404, message: 'Event not found' })
-  const { currency, baseCurrency, fxRate, fxRateSource, amountBaseCents } = await resolveConversion(input, ev.currency)
+  const {
+    currency,
+    baseCurrency,
+    fxRate,
+    fxRateSource,
+    amountBaseCents,
+    statedAmountCents,
+    statedCurrency
+  } = await resolveConversion(input, ev.currency)
   const expenseId = createId()
   const db = useDb()
 
@@ -1247,6 +1305,8 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
       fxRate,
       fxRateSource,
       amountBaseCents,
+      statedAmountCents,
+      statedCurrency,
       splitMode,
       paidByName: input.paidByName,
       paidByEmail: input.paidByEmail.toLowerCase(),

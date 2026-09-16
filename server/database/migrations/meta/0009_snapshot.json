@@ -1,5 +1,5 @@
 {
-  "id": "8061f6be-5433-4bfa-acfb-3408e5634e0e",
+  "id": "03fc6663-2d0c-4950-ac66-ef5728db6338",
   "prevId": "00968e0a-c11b-4075-9f8a-3b17aa9fd243",
   "version": "7",
   "dialect": "postgresql",
@@ -945,6 +945,18 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "stated_amount_cents": {
+          "name": "stated_amount_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stated_currency": {
+          "name": "stated_currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "split_mode": {
           "name": "split_mode",
