@@ -52,6 +52,8 @@ interface Expense {
   amountBaseCents: number
   baseCurrency: string
   fxRate: string
+  /** Where that rate came from: `manual` is a figure a person checked. */
+  fxRateSource?: 'fetched' | 'manual'
   /** How the total was divided: even, exact, percentage or weight. */
   splitMode: string
   paidByName: string
@@ -69,10 +71,12 @@ interface Budget {
   settlements: Array<{ fromName: string, fromEmail: string, toName: string, toEmail: string, amountCents: number }>
   /** The event's chart of accounts, with what has been posted to each (#61). */
   accounts?: Account[]
-  /** The sum of DEBITS into category accounts, in base cents. */
+  /** The sum of DEBITS into category accounts, in the trip's currency. */
   totalCents: number
-  /** The INSTANCE BASE CURRENCY: what every figure outside `expenses` is in. */
+  /** THE TRIP'S CURRENCY (#59): what every figure outside `expenses` is in. */
   currency: string
+  /** Whether anything here went through a conversion, so the totals are close. */
+  approximate?: boolean
 }
 interface Participant { name: string, email: string }
 
@@ -108,6 +112,12 @@ const props = defineProps<{
   signInTo?: string | null
   /** Planners may remove any expense, not only their own. */
   canRemoveAny?: boolean
+  /**
+   * PATCH target for changing what this trip settles in (#59). Omitted on every
+   * surface that may not — the invite page and the participant page — so the
+   * control is absent rather than present and 403ing.
+   */
+  currencyUrl?: string | null
 }>()
 const emit = defineEmits<{ updated: [budget: Budget] }>()
 
@@ -280,9 +290,35 @@ const fxAsOf = ref<string | null>(null)
 const fxPending = ref(false)
 const fxUnavailable = ref(false)
 
+/**
+ * WHICH FIGURE THIS EXPENSE IS RECORDED FROM (#59).
+ *
+ * `rate` multiplies the receipt by a rate — today's, prefilled, or one typed
+ * over it. `paid` takes what the bank actually took off the payer, which is a
+ * different number: `price × rate × fee` is what left their account and
+ * therefore what the group owes them. You would not tell a friend the VAT on
+ * dinner was a them problem.
+ *
+ * Both are on screen, side by side, because the second is the NORMAL path for
+ * anyone who reads their card statement — not an advanced option behind a
+ * disclosure. Only one is ever sent; the server refuses both together.
+ */
+const fxMode = ref<'rate' | 'paid'>('rate')
+const paidAmount = ref('')
+const paidCents = computed(() => {
+  const n = Number.parseFloat(paidAmount.value.replace(',', '.'))
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null
+})
+
 watch(() => props.budget.currency, (base) => {
   if (!spentCurrency.value) spentCurrency.value = base
 }, { immediate: true })
+
+/** The effective rate behind a stated total, for the line under the field. */
+const impliedRate = computed(() => {
+  if (!paidCents.value || !amountCents.value) return null
+  return (paidCents.value / amountCents.value).toFixed(4)
+})
 
 const foreign = computed(() => {
   const code = spentCurrency.value.trim().toUpperCase()
@@ -290,8 +326,9 @@ const foreign = computed(() => {
 })
 
 const convertedCents = computed(() => {
-  const rate = Number.parseFloat(fxRate.value)
   if (!foreign.value) return amountCents.value
+  if (fxMode.value === 'paid') return paidCents.value
+  const rate = Number.parseFloat(fxRate.value)
   if (!Number.isFinite(rate) || rate <= 0) return null
   return Math.round(amountCents.value * rate)
 })
@@ -311,7 +348,12 @@ async function quoteRate() {
   }
   fxPending.value = true
   try {
-    const q = await $fetch<{ rate: string | null, asOf: string | null }>('/api/me/fx/rate', { query: { from: code } })
+    // `to` is the TRIP's currency, which is what this expense will be converted
+    // into (#59). Without it the quote would be into the instance default and
+    // the prefill would be wrong on every trip that settles in anything else.
+    const q = await $fetch<{ rate: string | null, asOf: string | null }>('/api/me/fx/rate', {
+      query: { from: code, to: props.budget.currency }
+    })
     if (q.rate) {
       fxRate.value = q.rate
       fxAsOf.value = q.asOf
@@ -326,7 +368,7 @@ async function quoteRate() {
 }
 
 // A complete code is the trigger; nothing is fetched while somebody is still
-// typing one, and nothing is fetched at all for the base currency.
+// typing one, and nothing is fetched at all for the trip’s own currency.
 watch(spentCurrency, (code) => {
   if (/^[A-Za-z]{3}$/.test(code.trim())) quoteRate()
 })
@@ -480,9 +522,15 @@ async function addExpense() {
           : {}),
         amountCents: amountCents.value,
         currency: spentCurrency.value.trim().toUpperCase() || props.budget.currency,
-        // Only when there is something to convert, and only when a rate was
-        // actually settled on: an empty field means "fetch one", not "use 0".
-        ...(foreign.value && fxRate.value.trim() ? { fxRate: fxRate.value.trim() } : {}),
+        // Only when there is something to convert, and exactly ONE of the two:
+        // an empty rate field means "fetch one", not "use 0", and the server
+        // refuses a rate and a stated total together because they can disagree.
+        ...(foreign.value && fxMode.value === 'rate' && fxRate.value.trim()
+          ? { fxRate: fxRate.value.trim() }
+          : {}),
+        ...(foreign.value && fxMode.value === 'paid' && paidCents.value
+          ? { targetAmountCents: paidCents.value }
+          : {}),
         paidByName: payer.value.name,
         paidByEmail: payer.value.email,
         splitMode: splitMode.value,
@@ -498,6 +546,8 @@ async function addExpense() {
     fxRate.value = ''
     fxAsOf.value = null
     fxUnavailable.value = false
+    fxMode.value = 'rate'
+    paidAmount.value = ''
     adding.value = false
     emit('updated', res.budget)
     toast.add({ title: 'Expense recorded', color: 'success' })
@@ -505,6 +555,63 @@ async function addExpense() {
     toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not record that', color: 'error' })
   } finally {
     saving.value = false
+  }
+}
+
+/* ---- changing what this trip settles in (#59) ---- */
+
+/**
+ * LOUD, and deliberately so. Every amount on the trip is re-expressed at
+ * today's rate, which is not something to do by accident, so the panel is
+ * opened on purpose, states plainly what will happen, and reports what it did
+ * afterwards rather than leaving somebody to diff the numbers.
+ *
+ * There is NO LOCK-OUT once people have started settling up. A settlement is an
+ * entry like any other and re-derives with the rest; doing this halfway through
+ * is annoying and gets fixed by peer pressure, not by a refusal.
+ */
+const changingCurrency = ref(false)
+const newCurrency = ref('')
+const changeRate = ref('')
+const changingSaving = ref(false)
+
+/** What the last change did, so the card can say it rather than imply it. */
+const lastChange = ref<{
+  from: string
+  to: string
+  fxRate: string
+  entriesRecomputed: number
+  manualRatesKept: number
+  roundingCents: number
+} | null>(null)
+
+const changeReady = computed(() => {
+  const code = newCurrency.value.trim().toUpperCase()
+  return /^[A-Z]{3}$/.test(code) && code !== props.budget.currency
+})
+
+async function changeCurrency() {
+  if (!props.currencyUrl || !changeReady.value) return
+  changingSaving.value = true
+  try {
+    const res = await $fetch<{ change: NonNullable<typeof lastChange.value>, budget: Budget }>(props.currencyUrl, {
+      method: 'PATCH',
+      body: {
+        currency: newCurrency.value.trim().toUpperCase(),
+        ...(changeRate.value.trim() ? { fxRate: changeRate.value.trim() } : {})
+      }
+    })
+    lastChange.value = res.change
+    changingCurrency.value = false
+    newCurrency.value = ''
+    changeRate.value = ''
+    spentCurrency.value = res.budget.currency
+    emit('updated', res.budget)
+    toast.add({ title: `This trip now settles in ${res.change.to}`, color: 'success' })
+  } catch (e) {
+    toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not change the currency', color: 'error' })
+  } finally {
+    changingSaving.value = false
   }
 }
 
@@ -571,7 +678,7 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
                 v-if="isForeign(x)"
                 class="text-muted text-xs"
               >
-                converted at {{ x.fxRate }} when it was recorded
+                converted at {{ x.fxRate }} when it was recorded{{ x.fxRateSource === 'manual' ? ' · checked against a statement' : '' }}
               </p>
               <p
                 v-if="x.addedByName && x.addedByEmail !== x.paidByEmail"
@@ -622,6 +729,94 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
             <span class="tabular-nums text-muted">{{ francs(a.debitCents) }}</span>
           </div>
         </div>
+
+        <!-- What this trip settles in, and the way to change it (#59). It sits
+             beside the totals because that is what it denominates, and it is a
+             panel somebody opens rather than a field they tab into. -->
+        <div
+          v-if="currencyUrl"
+          class="flex flex-col gap-2"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="text-sm text-muted">
+              This trip settles in <span class="font-medium text-default">{{ budget.currency }}</span>.
+            </p>
+            <UButton
+              size="xs"
+              variant="ghost"
+              @click="changingCurrency = !changingCurrency"
+            >
+              {{ changingCurrency ? 'Never mind' : 'Change currency' }}
+            </UButton>
+          </div>
+
+          <div
+            v-if="changingCurrency"
+            class="flex flex-col gap-3 rounded-lg border border-default p-3"
+          >
+            <UAlert
+              color="warning"
+              variant="subtle"
+              title="Every amount on this trip will be recomputed"
+              :description="`All ${budget.expenses.length} entr${budget.expenses.length === 1 ? 'y' : 'ies'}, every balance and the whole settlement plan will be re-expressed at today's rate. Rates somebody typed off a bank statement are carried across rather than looked up again. What was actually spent, and in what currency, is never touched.`"
+            />
+            <div class="flex flex-wrap items-end gap-2">
+              <UFormField
+                label="Settle in"
+                size="sm"
+              >
+                <UInput
+                  v-model="newCurrency"
+                  placeholder="EUR"
+                  maxlength="3"
+                  class="w-20 uppercase"
+                />
+              </UFormField>
+              <UFormField
+                :label="`Rate ${budget.currency} → ${newCurrency.trim().toUpperCase() || '…'}`"
+                size="sm"
+                help="Optional — today's is fetched if you leave it empty."
+              >
+                <UInput
+                  v-model="changeRate"
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  placeholder="1.0730"
+                  class="w-32"
+                />
+              </UFormField>
+              <UButton
+                color="warning"
+                size="sm"
+                :loading="changingSaving"
+                :disabled="!changeReady"
+                @click="changeCurrency"
+              >
+                Recompute everything
+              </UButton>
+            </div>
+          </div>
+
+          <p
+            v-if="lastChange"
+            class="text-xs text-muted"
+          >
+            Moved from {{ lastChange.from }} to {{ lastChange.to }} at {{ lastChange.fxRate }}:
+            {{ lastChange.entriesRecomputed }} entr{{ lastChange.entriesRecomputed === 1 ? 'y' : 'ies' }} recomputed,
+            {{ lastChange.manualRatesKept }} with a rate somebody had checked, carried across unchanged.
+          </p>
+        </div>
+
+        <!-- Said once, as a statement of fact rather than a warning: the way a
+             card receipt says "rate at time of purchase" (#59). It shows only
+             when something here was actually converted. -->
+        <p
+          v-if="budget.approximate"
+          class="text-xs text-muted"
+        >
+          Converted at the rate recorded with each entry, so these totals are close rather than exact.
+        </p>
 
         <!-- The conversion residual, where it can be seen and explained rather
              than quietly landing on somebody's balance. -->
@@ -730,33 +925,75 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           />
         </div>
 
-        <!-- Spent abroad: the rate is asked for, shown, and editable. The form
-             never blocks on the fetch — an unavailable rate just means typing
-             one in. -->
-        <UFormField
+        <!-- Spent abroad. TWO ways to say what it cost, both on screen (#59):
+             a rate (today's, prefilled and editable) or the amount the bank
+             actually took, which is what the group splits when the bank added a
+             fee. The form never blocks on the fetch — an unavailable rate just
+             means typing one in, or saying what was paid. -->
+        <div
           v-if="foreign"
-          :label="`Rate ${spentCurrency.toUpperCase()} → ${budget.currency}`"
-          size="sm"
-          :help="fxUnavailable
-            ? 'No rate could be fetched just now — enter one and it will be recorded with it.'
-            : fxAsOf ? `ECB reference rate, ${fxAsOf}. Frozen onto this expense.` : 'Frozen onto this expense.'"
+          class="flex flex-col gap-2"
         >
-          <div class="flex items-center gap-2">
-            <UInput
-              v-model="fxRate"
-              type="number"
-              step="0.0001"
-              min="0"
-              placeholder="0.9412"
-              class="w-32"
-              :loading="fxPending"
-            />
-            <span
-              v-if="convertedCents !== null && amountCents > 0"
-              class="text-sm text-muted tabular-nums"
-            >= {{ money(convertedCents, budget.currency) }}</span>
+          <div class="flex flex-wrap items-center gap-2">
+            <UButton
+              size="xs"
+              :variant="fxMode === 'rate' ? 'solid' : 'outline'"
+              @click="fxMode = 'rate'"
+            >
+              Convert at a rate
+            </UButton>
+            <UButton
+              size="xs"
+              :variant="fxMode === 'paid' ? 'solid' : 'outline'"
+              @click="fxMode = 'paid'"
+            >
+              I know what I was charged
+            </UButton>
           </div>
-        </UFormField>
+
+          <UFormField
+            v-if="fxMode === 'rate'"
+            :label="`Rate ${spentCurrency.toUpperCase()} → ${budget.currency}`"
+            size="sm"
+            :help="fxUnavailable
+              ? 'No rate could be fetched just now — enter one and it will be recorded with it.'
+              : fxAsOf ? `ECB reference rate, ${fxAsOf}. A suggestion — your statement wins.` : 'Frozen onto this expense.'"
+          >
+            <div class="flex items-center gap-2">
+              <UInput
+                v-model="fxRate"
+                type="number"
+                step="0.0001"
+                min="0"
+                placeholder="0.9412"
+                class="w-32"
+                :loading="fxPending"
+              />
+              <span
+                v-if="convertedCents !== null && amountCents > 0"
+                class="text-sm text-muted tabular-nums"
+              >= {{ money(convertedCents, budget.currency) }}</span>
+            </div>
+          </UFormField>
+
+          <UFormField
+            v-else
+            :label="`What left your account, in ${budget.currency}`"
+            size="sm"
+            :help="impliedRate
+              ? `That works out at ${impliedRate} — the rate plus whatever your bank took. It is what the group splits.`
+              : 'The total your bank actually took, fee and all. That is what the group owes you.'"
+          >
+            <UInput
+              v-model="paidAmount"
+              type="number"
+              step="0.01"
+              min="0"
+              placeholder="113.47"
+              class="w-32"
+            />
+          </UFormField>
+        </div>
         <!-- Categories are opt-in (#61). Without one an expense still posts
              somewhere real — the event's Uncategorised account — so a group
              that does not care is never asked. -->
@@ -895,7 +1132,10 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
             type="submit"
             size="sm"
             :loading="saving"
-            :disabled="!title || !amount || !selected.length || !payerEmail || (foreign && !fxRate) || !splitReady"
+            :disabled="!title || !amount || !selected.length || !payerEmail
+              || (foreign && fxMode === 'rate' && !fxRate)
+              || (foreign && fxMode === 'paid' && !paidCents)
+              || !splitReady"
           >
             Record it
           </UButton>

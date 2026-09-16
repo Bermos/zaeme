@@ -1,23 +1,23 @@
-import { baseCurrencyHold, loadInstanceSettings } from '#server/domain/index'
+import { countRecordedExpenses, loadInstanceSettings } from '#server/domain/index'
 import { requireOwner } from '#server/utils/admin'
 
 /**
  * The instance's own settings. Today that is one question — what currency does
- * this group settle up in — and, beside it, exactly what is holding the answer
- * in place.
+ * a NEW trip start in — and nothing is holding the answer in place any more.
  *
- * The hold matters more than the setting. Once an expense exists, the base is
- * frozen (`setInstanceBaseCurrency`), and zäme has no admin-side way to remove
- * an expense: the escape is to open the trips that hold them as a planner. So
- * this returns those trips by name rather than a count, and the page says so
- * while the setting is still free rather than after it is not.
+ * It used to return a `hold`: the list of trips whose expenses froze the
+ * instance base, because #25 refused to change it while any existed. Currency
+ * belongs to the event since #59, so this setting labels no money that already
+ * exists and changing it re-states nothing; the warning UI built to soften that
+ * refusal went with the refusal.
+ *
+ * `expensesRecorded` stays as plain context — "this instance has money in it" —
+ * and no longer implies anything is locked.
  */
 export default defineEventHandler(async (e) => {
   await requireOwner(e)
-  const hold = await baseCurrencyHold()
   return {
     settings: await loadInstanceSettings(),
-    expensesRecorded: hold.total,
-    hold
+    expensesRecorded: await countRecordedExpenses()
   }
 })

@@ -5,6 +5,7 @@ import { tables, useDb } from './db'
 import { guestUser } from '../database/schema/auth'
 import { assertPlaceOnEvent, assertPlanner, loadEventBySlug } from './permissions'
 import { generateUniqueSlug } from './slugify'
+import { instanceBaseCurrency } from './instance-settings'
 
 /**
  * The events domain logic — the read/write operations over the `events_*`
@@ -225,6 +226,11 @@ export async function createEvent(userId: string, input: CreateEventInput): Prom
   const type = input.type ?? 'hosted'
   const id = createId()
   const slug = await generateUniqueSlug(input.title)
+  // The event's own currency, taken from the instance setting ONCE, here (#59).
+  // After this the setting has nothing to do with this trip: moving it later
+  // moves no money, and moving this trip's is a different screen with a
+  // confirmation and a recompute behind it.
+  const currency = await instanceBaseCurrency()
   const db = useDb()
 
   await db.transaction(async (tx) => {
@@ -245,7 +251,8 @@ export async function createEvent(userId: string, input: CreateEventInput): Prom
       // Concert events are public by default (zaeme).
       isPublic: type === 'concert',
       parentId: input.parentId ?? null,
-      cadence: input.cadence ?? null
+      cadence: input.cadence ?? null,
+      currency
     })
     await tx.insert(tables.eventPlanner).values({ id: createId(), eventId: id, userId, role: 'owner' })
   })

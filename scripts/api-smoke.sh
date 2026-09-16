@@ -148,6 +148,34 @@ ledger_imbalance() {
     })'
 }
 
+# `plan_closes <budget-json>` — whether the settlement plan clears the budget
+# EXACTLY: every member balance nets to zero across the ledger, and the plan
+# hands over precisely what the creditors are owed, to the cent. `closed` is the
+# only passing answer; anything else says what was wrong.
+#
+# A `contains` cannot do this — it is arithmetic over the whole payload, and the
+# criterion it exists for (#59: "the plan sums to zero exactly even when
+# conversion leaves a residual") is precisely the case where a per-figure needle
+# would still match while the totals had drifted apart.
+plan_closes() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const balances = budget.balances ?? []
+      const plan = budget.settlements ?? []
+      if (!balances.length) return process.stdout.write("no-balances")
+      const nets = balances.reduce((a, x) => a + x.netCents, 0)
+      if (nets !== 0) return process.stdout.write("balances-sum-" + nets)
+      const owed = balances.reduce((a, x) => a + (x.netCents > 0 ? x.netCents : 0), 0)
+      const moved = plan.reduce((a, p) => a + p.amountCents, 0)
+      if (moved !== owed) return process.stdout.write("plan-" + moved + "-of-" + owed)
+      process.stdout.write("closed")
+    })'
+}
+
 # `entry_lines <body> <title>` — how many lines the named entry has.
 entry_lines() {
   printf '%s' "$1" | node -e '
@@ -428,21 +456,18 @@ else
 fi
 
 echo
-echo "== the base currency is the OWNER's setting, and it is a VALUE (#25, D6) =="
-# This block runs BEFORE any expense in the suite, on purpose. The change is
-# refused once an expense is recorded against a different base, so a settings
-# check placed after the fixtures can only ever prove the refusal — and a
-# `setInstanceBaseCurrency` that discarded its input and wrote the default
-# would pass every other check in this file.
+echo "== the default currency for new trips is the OWNER's setting, and it is a VALUE (#25 D6, #59) =="
+# It has to be a VALUE and not a boolean: a `setInstanceBaseCurrency` that
+# discarded its input and wrote the default would pass a `"configured":true`
+# check and every other check in this file (#57 shipped exactly that).
 #
-# A re-run against a database the last run left behind would be blocked by its
-# own fixtures, so the block CLEARS the instance of expenses it can reach first.
-# On a fresh database (which is what CI hands it) that loop does nothing.
-for CLEAN_SLUG in $(body "${AUTH[@]}" "$API/events" | grep -o '"slug":"[^"]*"' | sed 's/^"slug":"//;s/"$//'); do
-  for CLEAN_ID in $(body "${AUTH[@]}" "$API/events/$CLEAN_SLUG/budget" | grep -o '"id":"[^"]*"' | sed 's/^"id":"//;s/"$//'); do
-    curl -s -o /dev/null "${AUTH[@]}" -X DELETE "$API/events/$CLEAN_SLUG/expenses/$CLEAN_ID"
-  done
-done
+# THERE USED TO BE A DESTRUCTIVE LOOP HERE, deleting every expense the service
+# token could reach, because #25 refused this change while any expense disagreed
+# with the requested base and a re-run would otherwise be blocked by its own
+# fixtures. Currency belongs to the trip since #59, so there is nothing to
+# unblock — and a suite that emptied the instance's budgets before looking at
+# them was also the reason anything inspecting rows from a previous run had to
+# come first in this file. It does not any more.
 
 check "the instance settings need a session"     401 "$BASE/api/admin/settings"
 check "...and a service token is not one"        401 "${AUTH[@]}" "$BASE/api/admin/settings"
@@ -620,7 +645,7 @@ contains "a third currency converts on its own rate"     "$TAXI" '"amountCents":
 contains "...to its own base figure"                     "$TAXI" '"amountBaseCents":4950'
 
 FXB=$(body "${AUTH[@]}" "$API/events/$FSLUG/budget")
-contains "the budget is labelled with the INSTANCE base" "$FXB" '"currency":"CHF","totalCents":44362'
+contains "the budget is labelled with the TRIP's currency" "$FXB" '"currency":"CHF","approximate":true,"totalCents":44362'
 contains "A is owed the difference, in base cents"       "$FXB" '"a@e.com","paidCents":30000,"owedCents":14788,"netCents":15212'
 contains "B is down what they fronted less their share"  "$FXB" '"b@e.com","paidCents":4950,"owedCents":14787,"netCents":-9837'
 contains "C likewise, on a different currency again"     "$FXB" '"c@e.com","paidCents":9412,"owedCents":14787,"netCents":-5375'
@@ -630,7 +655,7 @@ contains "...and the larger one"                         "$FXB" '"toEmail":"a@e.
 DINNER_ID=$(printf '%s' "$DINNER" | grep -o '"id":"[^"]*"' | head -1 | sed 's/^"id":"//;s/"$//')
 check "removing the foreign expense"             200 "${AUTH[@]}" -X DELETE "$API/events/$FSLUG/expenses/$DINNER_ID"
 FXB2=$(body "${AUTH[@]}" "$API/events/$FSLUG/budget")
-contains "...takes exactly its base cents with it"       "$FXB2" '"currency":"CHF","totalCents":34950'
+contains "...takes exactly its base cents with it"       "$FXB2" '"currency":"CHF","approximate":true,"totalCents":34950'
 contains "...leaving the balances still reconciled"      "$FXB2" '"a@e.com","paidCents":30000,"owedCents":11650,"netCents":18350'
 contains "...with no residue from the conversion"        "$FXB2" '"b@e.com","paidCents":4950,"owedCents":11650,"netCents":-6700'
 contains "...for anybody"                                "$FXB2" '"c@e.com","paidCents":0,"owedCents":11650,"netCents":-11650'
@@ -677,23 +702,32 @@ contains "...and the budget is STILL labelled in base"   "$FIRSTB" '"currency":"
 contains "...totalling the converted cents, not the spent ones" "$FIRSTB" '"totalCents":9412'
 
 echo
-echo "== ...and is FROZEN once expenses are converted into it (#25) =="
+echo "== ...and it is a DEFAULT, not a lock (#59) =="
+# What stood here was the other half of #25: a 409 refusing to change the
+# instance base while any expense was recorded against a different one. Since
+# zäme has no admin-side expense surface, that made the setting permanent on any
+# instance with money in it — the exact one-way door #59 removes. The checks are
+# therefore inverted: the change SUCCEEDS with expenses recorded, and what has
+# to be proved instead is that it reaches forwards only.
 if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
-  LOCK_OWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
-  # The rule that keeps every balance summable: expenses freeze the base they
-  # were converted into, so the instance base cannot drift away from them. By
-  # now the fixtures above have recorded some, so the change that succeeded at
-  # the top of this run is refused here — which is the whole of the lock.
-  check "changing it under recorded expenses"    409 "${LOCK_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
-  contains "...and says which expenses hold it"          "$(body "${LOCK_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}')" 'already recorded against a different base currency'
-  contains "...and where to go and remove them"         "$(body "${LOCK_OWNER[@]}" "$BASE/api/admin/settings")" '"hold":{"bases":['
-  contains "...naming the trips by slug"                "$(body "${LOCK_OWNER[@]}" "$BASE/api/admin/settings")" "\"slug\":\"$FSLUG\""
-  contains "...and the base is still what it was"       "$(body "${LOCK_OWNER[@]}" "$BASE/api/admin/settings")" '"baseCurrency":"CHF"'
+  DEF_OWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  # By now the fixtures above have recorded expenses in three currencies. Under
+  # #25 this was a 409.
+  check "changing the default with expenses recorded" 200 "${DEF_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"EUR"}'
+  contains "...moves the default to the value asked for"  "$(body "${DEF_OWNER[@]}" "$BASE/api/admin/settings")" '"baseCurrency":"EUR"'
+  DEFTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke default $SUFFIX\",\"type\":\"trip\"}")
+  DEFSLUG=$(printf '%s' "$DEFTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  contains "a trip minted after it settles in the NEW default" "$(body "${AUTH[@]}" "$API/events/$DEFSLUG/budget")" '"currency":"EUR"'
+  # THE check of the pair. A budget that still read the instance setting rather
+  # than its own event's column would answer EUR here, for a trip whose expenses
+  # are all frozen against CHF — which is #25's bug wearing #59's hat.
+  contains "...while the trip minted before it has not moved" "$(body "${AUTH[@]}" "$API/events/$FSLUG/budget")" '"currency":"CHF"'
+  check "...and the default goes back again"         200 "${DEF_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/admin/settings" -d '{"baseCurrency":"CHF"}'
+  contains "...without dragging the EUR trip back with it" "$(body "${AUTH[@]}" "$API/events/$DEFSLUG/budget")" '"currency":"EUR"'
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the OWNER's session to run these"
 fi
 
-echo
 echo "== a total can be split by percentage, by weight or by exact amounts (#26) =="
 # The shares are materialised at write time whichever mode was asked for, so a
 # balance stays a plain sum and nothing downstream knows there is more than one
@@ -798,7 +832,7 @@ FXW=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$WSLUG/expenses" \
 contains "a weighted foreign split sums in what was SPENT" "$FXW" '"amountCents":5000,"amountBaseCents":4183'
 contains "...and in the base it settles for"               "$FXW" '"amountCents":2500,"amountBaseCents":2092'
 FXWB=$(body "${AUTH[@]}" "$API/events/$WSLUG/budget")
-contains "...to the last cent of the converted total"      "$FXWB" '"currency":"CHF","totalCents":8367'
+contains "...to the last cent of the converted total"      "$FXWB" '"currency":"CHF","approximate":true,"totalCents":8367'
 contains "...with the balances reconciled in base cents"   "$FXWB" '"a@e.com","paidCents":8367,"owedCents":4183,"netCents":4184'
 
 echo
@@ -895,6 +929,162 @@ equals "a same-currency split writes no extra line either" "$(entry_lines "$(bod
 contains "...and Rounding is still empty"                 "$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")" '"name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
 
 echo
+echo "== currency belongs to the TRIP, and what is split is what the payer paid (#59) =="
+# Every figure below was worked out by hand in exact decimal and is written here
+# as a literal, against a real Postgres. The fixture is LOPSIDED on purpose:
+# three equal shares at any rate either all round the same way or all do not, so
+# a residual could never appear and half of this block would prove nothing.
+#
+#   hotel      EUR 245.25, exact 131.00 / 91.70 / 22.55. Ana's bank took
+#              CHF 234.00 — the mid-market ~229 plus its cut — so that is what
+#              the group owes her, at an effective 0.9541284404, apportioned
+#              12499 / 8749 / 2152
+#   taxi       GBP  88.40 at a stated 1.1234, weights 3/2/1 -> spent 4420 / 2947
+#              / 1473, base 9931 and 4965 / 3311 / 1655
+#   groceries  CHF  45.00 even three ways: rate 1, nothing fetched, 1500 each
+#
+#   trip total 23400 + 9931 + 4500 = 37831 CHF
+#   A paid 23400 owes 18964 -> +4436   B paid 9931 owes 13560 -> -3629
+#   C paid  4500 owes  5307 ->  -807
+#
+# Then CHF -> EUR at 1.0865432109, which is where the Rounding account finally
+# earns its keep:
+#
+#   hotel      23400 -> 25425, shares 13581 / 9506 / 2338 summing to 25425
+#   taxi        9931 -> 10790, shares  5395 / 3598 / 1798 summing to 10791
+#   groceries   4500 ->  4889, shares  1630 x3            summing to  4890
+#              -> one cent each on the last two, two in total, and NOT on anyone
+#
+#   trip total 25425 + 10790 + 4889 = 41104 EUR
+#   A paid 25425 owes 20606 -> +4819   B paid 10791 owes 14734 -> -3943
+#   C paid  4890 owes  5766 ->  -876
+CURTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" -d "{\"title\":\"Smoke currency $SUFFIX\",\"type\":\"trip\"}")
+CUSLUG=$(printf '%s' "$CURTRIP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+contains "a new trip takes the instance default as ITS currency" "$(body "${AUTH[@]}" "$API/events/$CUSLUG/budget")" '"currency":"CHF"'
+
+# THE RULE: the amount to split is what the payer was actually out of pocket.
+# EUR 245.25 at the mid-market rate is about CHF 229 — the bank charged 234.00,
+# and that difference is part of what came out of Ana's account.
+HOTEL=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/expenses" \
+  -d '{"title":"Alpine hotel","amountCents":24525,"currency":"EUR","targetAmountCents":23400,"splitMode":"exact","paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com","amountCents":13100},{"name":"B","email":"b@e.com","amountCents":9170},{"name":"C","email":"c@e.com","amountCents":2255}]}')
+contains "what the payer actually paid is what is recorded" "$HOTEL" '"amountBaseCents":23400'
+contains "...with the receipt itself untouched"            "$HOTEL" '"amountCents":24525,"currency":"EUR"'
+contains "...at the EFFECTIVE rate that pair implies"      "$HOTEL" '"fxRate":"0.9541284404"'
+contains "...recorded as a figure somebody checked"        "$HOTEL" '"fxRateSource":"manual"'
+contains "...and the shares apportioned from what was PAID" "$HOTEL" '"amountCents":13100,"amountBaseCents":12499'
+contains "...down to the smallest of them"                 "$HOTEL" '"amountCents":2255,"amountBaseCents":2152'
+equals "...in an entry that balances"            "$(ledger_imbalance "$HOTEL")" "0"
+
+# The two overrides cannot both be given: they can disagree, and there is no
+# honest way to pick one.
+BOTH='{"title":"Contradiction","amountCents":1000,"currency":"EUR","fxRate":"0.94","targetAmountCents":900,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"}]}'
+check "a rate AND a stated total together"       422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/expenses" -d "$BOTH"
+contains "...is refused rather than quietly resolved" "$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/expenses" -d "$BOTH")" 'not both'
+# Nothing was converted, so there is nothing to override.
+SAME='{"title":"Nonsense","amountCents":1000,"targetAmountCents":900,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"}]}'
+check "a stated total on an expense in the trip's own currency" 422 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/expenses" -d "$SAME"
+contains "...says so rather than recording an unexplainable number" "$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/expenses" -d "$SAME")" 'which is what this trip settles in'
+
+TAXI=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/expenses" \
+  -d '{"title":"Airport taxi","amountCents":8840,"currency":"GBP","fxRate":"1.1234","splitMode":"weight","paidByName":"B","paidByEmail":"b@e.com","participants":[{"name":"A","email":"a@e.com","weight":"3"},{"name":"B","email":"b@e.com","weight":"2"},{"name":"C","email":"c@e.com","weight":"1"}]}')
+contains "a typed rate is a manual figure too"   "$TAXI" '"fxRate":"1.1234","fxRateSource":"manual"'
+contains "...converted once and frozen"          "$TAXI" '"amountBaseCents":9931'
+GROC=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/expenses" \
+  -d '{"title":"Groceries","amountCents":4500,"paidByName":"C","paidByEmail":"c@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"},{"name":"C","email":"c@e.com"}]}')
+contains "an expense in the trip's own currency is derived, not stated" "$GROC" '"fxRate":"1","fxRateSource":"fetched"'
+
+CUB=$(body "${AUTH[@]}" "$API/events/$CUSLUG/budget")
+contains "the trip totals in ITS currency"       "$CUB" '"currency":"CHF","approximate":true,"totalCents":37831'
+contains "A is owed what they fronted less their share" "$CUB" '"a@e.com","paidCents":23400,"owedCents":18964,"netCents":4436'
+contains "...B is down theirs"                   "$CUB" '"b@e.com","paidCents":9931,"owedCents":13560,"netCents":-3629'
+contains "...and C theirs"                       "$CUB" '"c@e.com","paidCents":4500,"owedCents":5307,"netCents":-807'
+contains "nothing has been posted to Rounding yet" "$CUB" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
+equals "every entry balances before the change"  "$(ledger_imbalance "$CUB")" "0"
+equals "...and the plan closes exactly"          "$(plan_closes "$CUB")" "closed"
+
+# Changing it. `/api/host`, a session, and owner/co_planner — never the service
+# token, and never an account with no standing on the trip.
+check "the service token cannot change a trip's currency" 401 "${AUTH[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"EUR"}'
+if [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  check "...nor can an account with no standing on it" 403 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"EUR"}'
+else
+  echo "  skip  set ZAEME_TEST_GUEST_COOKIE to a NON-planner session to run this"
+fi
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  CUR_OWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  check "a code that is not three letters"       400 "${CUR_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"EU"}'
+  CHANGED=$(body "${CUR_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"EUR","fxRate":"1.0865432109"}')
+  contains "the planner moves the trip to EUR"   "$CHANGED" '"from":"CHF","to":"EUR"'
+  contains "...re-expressing every entry on it"  "$CHANGED" '"entriesRecomputed":3'
+  contains "...and saying how many figures somebody had checked" "$CHANGED" '"manualRatesKept":2'
+
+  CUB2=$(body "${AUTH[@]}" "$API/events/$CUSLUG/budget")
+  contains "the trip now settles in EUR"         "$CUB2" '"currency":"EUR","approximate":true,"totalCents":41104'
+  # THE CONSEQUENCE OF THE RULE, and the reason a stated figure is not snapped
+  # back to its own receipt: Ana's hotel bill was EUR 245.25 and the trip now
+  # settles in EUR, but she is owed 254.25 — the CHF 234.00 her bank took,
+  # re-expressed. Handing her 245.25 would be telling her the fee was her
+  # problem.
+  contains "a stated figure survives even into its own receipt's currency" "$CUB2" '"amountCents":24525,"currency":"EUR","amountBaseCents":25425'
+  contains "...and is still marked as one somebody checked" "$CUB2" '"amountBaseCents":25425,"baseCurrency":"EUR","fxRate":"1.0366972477","fxRateSource":"manual"'
+  contains "...with each existing debt re-expressed on its own" "$CUB2" '"amountCents":13100,"amountBaseCents":13581'
+  # THE RESIDUAL. Three debts converted one at a time do not come to the
+  # converted bill; the difference is a line, not somebody's share.
+  contains "the cents left over land on Rounding" "$CUB2" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":2,"creditCents":0'
+  equals "...and every entry still balances"     "$(ledger_imbalance "$CUB2")" "0"
+  contains "A is owed the recomputed difference" "$CUB2" '"a@e.com","paidCents":25425,"owedCents":20606,"netCents":4819'
+  contains "...B owes theirs"                    "$CUB2" '"b@e.com","paidCents":10791,"owedCents":14734,"netCents":-3943'
+  contains "...and C theirs"                     "$CUB2" '"c@e.com","paidCents":4890,"owedCents":5766,"netCents":-876'
+  equals "...so the plan still closes to the cent" "$(plan_closes "$CUB2")" "closed"
+  contains "the plan clears the smaller debt"    "$CUB2" '"toEmail":"a@e.com","amountCents":876'
+  contains "...and the larger one"               "$CUB2" '"toEmail":"a@e.com","amountCents":3943'
+
+  # BOTH DIRECTIONS, MORE THAN ONCE. 0.9203456789 is this fixture's near-inverse
+  # of the rate above, chosen so every figure lands back on itself — which is a
+  # property of these numbers and not a promise the arithmetic makes. What it
+  # proves is that the residual is RECOMPUTED rather than accumulated: an
+  # implementation that carried the old rounding line forward would leave two
+  # cents on Rounding here instead of none.
+  BACK=$(body "${CUR_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"CHF","fxRate":"0.9203456789"}')
+  contains "and it moves back again"             "$BACK" '"from":"EUR","to":"CHF"'
+  CUB3=$(body "${AUTH[@]}" "$API/events/$CUSLUG/budget")
+  contains "...landing on the figures it started from" "$CUB3" '"currency":"CHF","approximate":true,"totalCents":37831'
+  # The other half of the identity rule: this one was fetched, its receipt is in
+  # the currency the trip is back to, so it converts at 1 and its shares are the
+  # receipt exactly rather than anything rounded through EUR and back.
+  contains "...with the CHF groceries converting at 1 again" "$CUB3" '"amountCents":4500,"currency":"CHF","amountBaseCents":4500,"baseCurrency":"CHF","fxRate":"1"'
+  contains "...and Rounding emptied rather than accumulated" "$CUB3" '"kind":"rounding","name":"Rounding","email":null,"isSystem":true,"debitCents":0,"creditCents":0'
+  contains "...and every balance back where it was" "$CUB3" '"a@e.com","paidCents":23400,"owedCents":18964,"netCents":4436'
+  equals "...still balancing"                    "$(ledger_imbalance "$CUB3")" "0"
+  equals "...and still closing"                  "$(plan_closes "$CUB3")" "closed"
+  check "changing it to what it already is"      200 "${CUR_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"CHF"}'
+  contains "...is a no-op that recomputes nothing" "$(body "${CUR_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"CHF"}')" '"entriesRecomputed":0'
+  # A currency nobody publishes a rate for, with no rate given: refused, and it
+  # names the way through rather than recomputing at a rate nobody chose.
+  check "an unquotable currency with no rate"    422 "${CUR_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"XXX"}'
+  contains "...asks for the rate by hand"        "$(body "${CUR_OWNER[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$CUSLUG/currency" -d '{"currency":"XXX"}')" 'Enter the rate yourself'
+  contains "...and the trip is untouched by the refusal" "$(body "${AUTH[@]}" "$API/events/$CUSLUG/budget")" '"currency":"CHF","approximate":true,"totalCents":37831'
+
+  # THE SURFACES A PERSON ACTUALLY WRITES ON. Everything above went through
+  # /api/v1, which is Enterprise's. A friend records an expense through /api/me
+  # (the invite page) and a planner through /api/host — three separate zod
+  # schemas for one write, and narrowing either human one to drop
+  # `targetAmountCents` would leave every check above green (#26 shipped exactly
+  # that shape once). The event is published first because /api/me refuses a
+  # draft, which is a different refusal and not the one under test here.
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$CUSLUG/status" -d '{"status":"published"}' > /dev/null
+  MEPAID=$(body "${CUR_OWNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$CUSLUG/expenses" \
+    -d '{"title":"Cable car","amountCents":6000,"currency":"EUR","targetAmountCents":5750,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
+  contains "the participant surface takes what was actually paid" "$MEPAID" '"amountBaseCents":5750,"baseCurrency":"CHF","fxRate":"0.9583333333","fxRateSource":"manual"'
+  equals "...in an entry that balances"            "$(ledger_imbalance "$MEPAID")" "0"
+  HOSTPAID=$(body "${CUR_OWNER[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$CUSLUG/expenses" \
+    -d '{"title":"Lift pass","amountCents":9000,"currency":"EUR","targetAmountCents":8600,"paidByName":"B","paidByEmail":"b@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
+  contains "...and so does the host surface"       "$HOSTPAID" '"amountBaseCents":8600,"baseCurrency":"CHF","fxRate":"0.9555555556","fxRateSource":"manual"'
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the OWNER's session to run these"
+fi
+
 echo "== the chart of accounts, through the surfaces the product writes (#61) =="
 # The ledger has to work where PEOPLE write, which is /api/me from the invite
 # page and /api/host from the host page — never /api/v1, which is Enterprise's.

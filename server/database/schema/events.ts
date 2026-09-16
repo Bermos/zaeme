@@ -46,10 +46,10 @@ import { bigint, boolean, check, foreignKey, index, integer, numeric, pgTable, t
  *    budget, kept as a DOUBLE-ENTRY LEDGER (#61): accounts per member, per
  *    category and one for rounding; `events_expense` is a journal entry and
  *    `events_expense_share` its lines, which sum to zero. Integer cents; no
- *    float money. Each entry carries the base currency and the FX rate it was
- *    recorded at.
- *  - `events_instance_setting` — the one-row instance configuration (the base
- *    currency the whole instance settles up in).
+ *    float money. Each entry carries the currency of the EVENT it is on and the
+ *    FX rate it was recorded at (#59).
+ *  - `events_instance_setting` — the one-row instance configuration (the
+ *    currency a NEW event starts in; every event carries its own since #59).
  *  - `events_message` — the per-event group chat.
  *  - `events_event_planner` + `events_planner_invite` — co-organizers.
  *  - `events_ical_token` — the per-attendee calendar-feed credential.
@@ -76,6 +76,25 @@ export const event = pgTable('events_event', {
   parentId: text('parent_id'),
   /** Human cadence note for a series container, e.g. "every second Friday". */
   cadence: text('cadence'),
+  /**
+   * WHAT THIS EVENT SETTLES UP IN (#59). Every balance, every settlement and
+   * the trip total on this event are denominated in it, and every expense is
+   * converted into it once and frozen there.
+   *
+   * It belongs to the EVENT, not to the instance and not to the viewer. A ski
+   * week in Chamonix settles in EUR whatever the friends' home currency is, and
+   * the group that went there last month is not the group going to Ticino next
+   * month. `events_instance_setting.base_currency` is where a NEW event's
+   * currency comes from — a default at creation and nothing afterwards, which
+   * is why changing that setting no longer has to be refused (#25 froze it
+   * because every balance on the instance hung off it).
+   *
+   * NOT NULL with no default, for the same reason the conversion columns on
+   * `events_expense` have none: all three creation paths set it, and an insert
+   * that forgets it should abort rather than claim CHF on a trip nobody said
+   * was CHF.
+   */
+  currency: text('currency').notNull(),
   /**
    * The id this event is a PROJECTION of, in the system that owns the record of
    * truth — today only Enterprise's `music_concert.id`, arriving through
@@ -596,21 +615,24 @@ export const account = pgTable('events_account', {
  * member accounts is a transfer between two friends. The structure says which,
  * so nothing has to remember to set a flag.
  *
- * TWO AMOUNTS, ALWAYS (#25). `amount_cents`/`currency` is what was handed over;
- * `amount_base_cents`/`base_currency` is what it settles for, converted at
- * `fx_rate` when it was recorded and frozen there. Balances, settlements and
- * totals are computed from the base figures and from nothing else.
+ * TWO AMOUNTS, ALWAYS (#25, repointed by #59). `amount_cents`/`currency` is
+ * what was handed over; `amount_base_cents`/`base_currency` is what it settles
+ * for in THE EVENT'S CURRENCY, converted at `fx_rate` when it was recorded and
+ * frozen there. Balances, settlements and totals are computed from those
+ * figures and from nothing else. `base_currency` was the INSTANCE's until #59
+ * moved the question to where it belongs: a trip settles in one currency, and
+ * two trips need not agree.
  *
  * This comment used to say `currency` was "informative — balances are only
  * computed within one currency". The first half was true and the second was
  * not: nothing enforced it, and `computeBalances` summed cents straight across
  * currencies. A schema comment claiming a constraint is not a constraint.
  *
- * NO DEFAULTS on the three conversion columns, on purpose. An insert that
- * forgets all three aborts; one that sets `amount_base_cents` and forgets the
- * other two would, with defaults, silently stamp CHF-at-1 on a EUR instance —
- * and then freeze the instance base there via the guard in
- * `server/domain/instance-settings.ts`.
+ * NO DEFAULTS on the four conversion columns, on purpose. An insert that
+ * forgets them all aborts; one that sets `amount_base_cents` and forgets the
+ * rest would, with defaults, silently stamp CHF-at-1 on a EUR trip — and a
+ * budget that states one currency over a column of sums in another is the bug
+ * #25 exists to have fixed.
  */
 export const expense = pgTable('events_expense', {
   id: text('id').primaryKey(),
@@ -621,20 +643,45 @@ export const expense = pgTable('events_expense', {
   /** What was actually handed over — EUR for a dinner in Milan. */
   currency: text('currency').notNull().default('CHF'),
   /**
-   * The instance base currency at the moment this was recorded, and the rate
-   * that converted it (#25). Both are a SNAPSHOT: an expense entered in June
-   * stays converted at June's rate forever, because a balance that moves when
-   * the market does is not a balance anybody can settle.
+   * THE EVENT'S CURRENCY at the moment this was recorded, and the rate that
+   * converted the receipt into it (#25, repointed by #59). Both are a SNAPSHOT:
+   * an expense entered in June stays converted at June's rate forever, because
+   * a balance that moves when the market does is not a balance anybody can
+   * settle. The column is still called `base_currency` — the name Enterprise's
+   * generated client reads — and what it names has moved from the instance to
+   * the trip.
    *
    * `fx_rate` is numeric, not a float — it is multiplied by money. It is 1
-   * whenever `currency` is already the base, which is the ordinary case.
+   * whenever `currency` is already the event's, which is the ordinary case.
    */
   baseCurrency: text('base_currency').notNull(),
   fxRate: numeric('fx_rate', { precision: 20, scale: 10 }).notNull(),
   /**
-   * The total in BASE cents — the only figure balances and settlements are ever
-   * computed from. Materialised here rather than derived at read time so the
-   * arithmetic is a plain sum and history cannot drift.
+   * WHERE THAT RATE CAME FROM (#59). `fetched` means this instance derived it —
+   * a lookup, an identity conversion, or a recomputation this instance did when
+   * the trip's currency changed. `manual` means a PERSON stated it, either by
+   * typing the rate or by typing what their bank actually took off them, and it
+   * is the figure that was checked against a statement.
+   *
+   * The distinction is the whole of "the fetched rate is a suggestion, not a
+   * source of truth": a later reader can tell which rows somebody verified, and
+   * a recomputation never re-derives a `manual` row's figure from the receipt.
+   * It converts what the person said, which keeps the bank's fee in the split —
+   * you would not tell a friend the VAT on dinner was your problem.
+   */
+  fxRateSource: text('fx_rate_source', { enum: ['fetched', 'manual'] }).notNull(),
+  /**
+   * The total in the EVENT'S currency — the only figure balances and
+   * settlements are ever computed from. Materialised here rather than derived
+   * at read time so the arithmetic is a plain sum and history cannot drift.
+   *
+   * It is `amount_cents × fx_rate` rounded half up EXCEPT where somebody typed
+   * it in directly (`fx_rate_source = 'manual'` with a stated target), which is
+   * the "what the payer actually paid" case: a bank charging price × rate × fee
+   * hands over a figure no single rate reproduces, and that figure — not the
+   * mid-market conversion of the receipt — is what the group splits. `fx_rate`
+   * then carries the EFFECTIVE rate, derived from the pair, so the row still
+   * says what one unit of `currency` cost.
    */
   amountBaseCents: integer('amount_base_cents').notNull(),
   /**
@@ -741,12 +788,17 @@ export const expenseShare = pgTable('events_expense_share', {
    * SIGNED, in base cents — the figure every balance, total and settlement is
    * built from.
    *
-   * Each member's debit is THEIR OWN share converted at the entry's frozen
-   * rate, so what a person owes is explicable on its own ("your €40 at 0.9412
-   * is CHF 37.65") rather than being the figure that made the column tidy. The
-   * cents that rounding leaves over between the converted total and the sum of
-   * the converted shares post to the event's `rounding` account, where they are
-   * visible, instead of being absorbed by whoever happened to sort last.
+   * On the WRITE path the member debits are apportioned as a group against the
+   * converted total (`apportionCents`), so they sum to it exactly and the entry
+   * has no residual: converting each share on its own would invent a cent of
+   * liability rather than discover one (#61).
+   *
+   * On the RECOMPUTE path (#59) they are converted ONE AT A TIME, because by
+   * then each is an existing debt somebody may already have settled against and
+   * re-apportioning would silently move money between people. Converting eleven
+   * numbers at one rate does not give the same answer as converting their sum,
+   * and the cents that leaves over post to the event's `rounding` account,
+   * where they are visible, instead of being absorbed by whoever sorts last.
    */
   amountBaseCents: integer('amount_base_cents').notNull(),
   /**
@@ -809,9 +861,13 @@ export const expenseShare = pgTable('events_expense_share', {
 export const instanceSetting = pgTable('events_instance_setting', {
   id: text('id').primaryKey(),
   /**
-   * The currency this instance settles up in — "expectation is to have the same
-   * currency in the friends group" (D6). Every expense is converted into it at
-   * write time and every balance is expressed in it.
+   * THE DEFAULT a new event's `currency` is created with (#25 D6, narrowed by
+   * #59) — "expectation is to have the same currency in the friends group".
+   *
+   * It is a default and nothing else now. Every balance hangs off the EVENT's
+   * currency, so changing this setting moves no money and is refused by
+   * nothing; it decides what the next trip starts in, and a trip already
+   * underway keeps what it has until somebody changes it there.
    */
   baseCurrency: text('base_currency').notNull().default('CHF'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())

@@ -178,9 +178,18 @@ export function contribution(row: object) {
  * `components.schemas.Expense` — one JOURNAL ENTRY (#61).
  *
  * Two amounts, always: `amountCents` in the currency the money was actually
- * spent in, and `amountBaseCents` in the instance base currency, frozen at the
- * `fxRate` this row was recorded at (#25). Only the base figures are ever
- * summed; the as-spent ones are for showing "€120.00 (CHF 112.40)".
+ * spent in, and `amountBaseCents` in THE EVENT'S currency (#59 — it was the
+ * instance's until then, and the field keeps its name because Enterprise
+ * generates a client from it), frozen at the `fxRate` this row was recorded at.
+ * Only the base figures are ever summed; the as-spent ones are for showing
+ * "€120.00 (CHF 112.40)".
+ *
+ * `fxRateSource` says where that rate came from. `manual` means a PERSON stated
+ * it — the rate, or what their bank actually took off them — so it is the row
+ * somebody checked against a statement, and a recomputation carries that figure
+ * across rather than re-deriving it from the receipt. `fetched` means this
+ * instance derived it: a lookup, an identity conversion, or a recompute after
+ * the trip's currency changed.
  *
  * `splitMode`, and the `weight` on each share, say how the total was divided
  * (#26). Both are a record of intent — the shares are materialised, so a client
@@ -208,6 +217,7 @@ export function expense(row: object) {
     amountBaseCents: r.amountBaseCents,
     baseCurrency: r.baseCurrency,
     fxRate: r.fxRate,
+    fxRateSource: r.fxRateSource,
     splitMode: r.splitMode,
     note: r.note ?? null,
     paidByName: r.paidByName,
@@ -228,9 +238,16 @@ export function expense(row: object) {
 /**
  * `components.schemas.Budget` — integer cents throughout, no floats.
  *
- * `currency` is the INSTANCE BASE CURRENCY, and `totalCents`, every balance and
- * every settlement are in it. It was the first expense row's currency until
- * #25, which made it a label with no relationship to the numbers beside it.
+ * `currency` is THE EVENT'S CURRENCY, and `totalCents`, every balance and every
+ * settlement are in it. It was the first expense row's currency until #25 made
+ * it the instance's, and #59 moved it to the trip — which is where the answer
+ * differs, and where somebody can change it.
+ *
+ * `approximate` is true when anything here went through a conversion, or when a
+ * currency change left cents on `Rounding`. It is a statement of fact for the
+ * screen to render once, the way a card receipt says "rate at time of
+ * purchase": converted at the rate recorded with each entry, so the totals are
+ * close rather than exact.
  *
  * `accounts` is the event's chart of accounts with what has been posted to each
  * (#61): members carry a balance, categories carry what was spent on them in
@@ -243,6 +260,7 @@ export function budget(row: object) {
   const r = asRow(row)
   return {
     currency: r.currency,
+    approximate: r.approximate ?? false,
     totalCents: r.totalCents ?? 0,
     expenses: ((r.expenses ?? []) as Row[]).map(expense),
     balances: r.balances ?? [],

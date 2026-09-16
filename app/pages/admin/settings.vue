@@ -1,30 +1,27 @@
 <script setup lang="ts">
 /**
- * The instance's own settings (#25, D6). One question today: what currency does
- * this group settle up in?
+ * The instance's own settings (#25 D6, narrowed by #59). One question today:
+ * what currency does a NEW trip start in?
  *
- * The page's real job is the warning, not the input. Every expense converts
- * into this currency once and freezes there, so the moment the first expense is
- * recorded the answer stops being changeable — and zäme has no admin-side way
- * to remove an expense, which makes "frozen" mean frozen. A lock that announces
- * itself only once engaged is the worst of both, so the warning is loudest
- * while the setting is still free, and once it is not the page names the exact
- * trips holding it rather than handing over a count.
+ * The page used to be mostly a warning, and then mostly a lock: every balance
+ * on the instance hung off this one value, so the first recorded expense froze
+ * it — permanently, since zäme has no admin-side way to remove an expense. That
+ * whole apparatus is gone. Currency belongs to the event now, so this setting
+ * labels nothing that already exists, changing it moves no money, and a trip
+ * that wants to settle in something else says so on its own page, where the
+ * confirmation and the recompute live.
+ *
+ * What is left is a default and a sentence saying it is only a default, which
+ * is the honest size of the thing.
  */
 definePageMeta({ layout: 'admin', middleware: 'owner-only' })
 useSeoMeta({ title: 'Settings' })
 
 interface Settings { baseCurrency: string, configured: boolean, updatedAt: string | null }
-interface Hold {
-  bases: Array<{ baseCurrency: string, expenses: number }>
-  events: Array<{ slug: string, title: string, baseCurrency: string, expenses: number }>
-  total: number
-}
 
 const { data, pending, refresh } = await useFetch<{
   settings: Settings
   expensesRecorded: number
-  hold: Hold
 }>('/api/admin/settings')
 
 const draft = ref('')
@@ -38,17 +35,14 @@ watch(data, (d) => {
 const code = computed(() => draft.value.trim().toUpperCase())
 const valid = computed(() => /^[A-Z]{3}$/.test(code.value))
 const changed = computed(() => !!data.value && code.value !== data.value.settings.baseCurrency)
-/** Expenses already recorded are what freezes the answer. */
-const locked = computed(() => !!data.value && data.value.expensesRecorded > 0)
 
 async function save() {
   if (!valid.value || !changed.value) return
-  if (!confirm(`Settle this instance up in ${code.value}?\n\nEvery expense recorded from now on converts into ${code.value} and freezes there. Once the first one exists, this can no longer be changed from here.`)) return
   saving.value = true
   try {
     await $fetch('/api/admin/settings', { method: 'PATCH', body: { baseCurrency: code.value } })
     await refresh()
-    toast.add({ title: `This instance now settles up in ${code.value}`, color: 'success' })
+    toast.add({ title: `New trips will start in ${code.value}`, color: 'success' })
   } catch (e) {
     toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not save that', color: 'error' })
   } finally {
@@ -67,26 +61,15 @@ async function save() {
     </p>
 
     <template v-else-if="data">
-      <!-- The whole point of the page, and it is deliberately FIRST and loud
-           while the setting is still free to change. -->
-      <UAlert
-        v-if="!locked"
-        color="warning"
-        variant="subtle"
-        icon="i-lucide-alert-triangle"
-        title="Set this before anyone records an expense"
-        description="Every expense converts into the base currency once, at the rate on the day it was recorded, and keeps that conversion forever. From the first expense onwards this setting is frozen: zäme will not re-denominate money people may already have settled, and there is no admin screen that deletes an expense — undoing it would mean opening each trip as one of its planners and removing them by hand. Right now it costs nothing to change. Later it costs that."
-      />
-
       <UCard>
         <template #header>
           <div>
             <p class="font-semibold">
-              Base currency
+              Default currency for new trips
             </p>
             <p class="text-sm text-muted">
-              What this instance settles up in. Expenses in anything else are converted
-              once, at the rate on the day they were recorded, and never re-converted.
+              What a trip starts out settling in. Each trip carries its own from then on,
+              and can be changed on its own page.
             </p>
           </div>
         </template>
@@ -103,47 +86,24 @@ async function save() {
               maxlength="3"
               placeholder="CHF"
               class="w-28 uppercase"
-              :disabled="locked"
             />
           </UFormField>
 
-          <UAlert
-            v-if="locked"
-            color="neutral"
-            variant="subtle"
-            icon="i-lucide-lock"
-            :title="`Frozen at ${data.settings.baseCurrency}`"
-            :description="`${data.expensesRecorded} expense${data.expensesRecorded === 1 ? '' : 's'} have already been converted into it. Changing the base now would re-label balances that were converted at the old one, so it is refused. To change it anyway, every expense below has to go first — each from its own trip, as one of that trip's planners.`"
-          />
-
-          <div
-            v-if="locked && data.hold.events.length"
-            class="flex flex-col gap-1 text-sm"
-          >
-            <p class="font-medium">
-              Where the expenses are
-            </p>
-            <div
-              v-for="ev in data.hold.events"
-              :key="`${ev.slug}-${ev.baseCurrency}`"
-              class="flex items-center justify-between gap-2 py-1 border-b border-default last:border-b-0"
-            >
-              <ULink
-                :to="`/host/${ev.slug}`"
-                class="truncate"
-              >
-                {{ ev.title }}
-              </ULink>
-              <span class="text-muted tabular-nums whitespace-nowrap">
-                {{ ev.expenses }} × {{ ev.baseCurrency }}
-              </span>
-            </div>
-          </div>
+          <!-- Not a lock and not a warning: the one thing somebody changing
+               this needs to know is that it does not reach backwards. -->
+          <p class="text-sm text-muted">
+            Changing this moves no money. Trips already under way keep the currency they
+            were created with — including the
+            {{ data.expensesRecorded }} expense{{ data.expensesRecorded === 1 ? '' : 's' }}
+            recorded on this instance so far. To move one, open that trip and change its
+            currency there: every amount on it is recomputed at today's rate, and the
+            trip says so before it does it.
+          </p>
 
           <div>
             <UButton
               :loading="saving"
-              :disabled="!valid || !changed || locked"
+              :disabled="!valid || !changed"
               @click="save"
             >
               Save

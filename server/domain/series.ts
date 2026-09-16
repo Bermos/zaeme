@@ -175,7 +175,11 @@ export async function scheduleOccurrence(
       location: input.location ?? series.location,
       venueStation: series.venueStation,
       isPublic: false,
-      parentId: series.id
+      parentId: series.id,
+      // The series' own currency, not the instance setting: an occurrence of a
+      // standing group inherits what that group settles in, and the setting may
+      // have moved since the series was created (#59).
+      currency: series.currency
     })
     // The series' whole planning team carries over to each showing.
     await tx.insert(tables.eventPlanner).values(planners.map(p => ({
