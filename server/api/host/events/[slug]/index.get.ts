@@ -11,6 +11,7 @@ import {
   loadPoll
 } from '../../../../domain/index'
 import { requireGuestUser } from '../../../../utils/auth'
+import { signBudgetReceipts } from '../../../../utils/media-sign'
 
 /** Everything the manage page needs, in one aggregate (planner only). */
 export default defineEventHandler(async (e) => {
@@ -42,7 +43,7 @@ export default defineEventHandler(async (e) => {
     summary: rsvps.summary,
     contributions,
     timeline,
-    budget,
+    budget: await signBudgetReceipts(budget),
     geography,
     members,
     occurrences

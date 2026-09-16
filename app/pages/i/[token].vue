@@ -336,6 +336,7 @@ const errorMessage = computed(() => {
         :show-amounts="complete || !!account"
         :locked-reason="budgetLockedReason"
         :sign-in-to="budgetSignInTo"
+        :receipt-upload-base="account ? `/api/me/events/${page.event.slug}/media` : null"
         @updated="onBudgetUpdated"
       />
 

@@ -88,13 +88,14 @@ export async function registerMediaUpload(eventId: string, input: RegisterMediaI
 
 /**
  * Two-step upload, step 2: mark the object `ready`. A guest may only confirm
- * their own upload (`requireUploadedByRsvpId`).
+ * their own upload (`requireUploadedByRsvpId`), and so may a signed-in
+ * participant (`requireUploadedByUserId`).
  */
 export async function confirmMediaUpload(
   eventId: string,
   mediaId: string,
   input: { caption?: string | null, takenAt?: string | Date | null } = {},
-  opts: { requireUploadedByRsvpId?: string } = {}
+  opts: { requireUploadedByRsvpId?: string, requireUploadedByUserId?: string } = {}
 ) {
   const db = useDb()
   const [row] = await db
@@ -104,6 +105,11 @@ export async function confirmMediaUpload(
     .limit(1)
   if (!row) throw createError({ statusCode: 404, message: 'Upload not found' })
   if (opts.requireUploadedByRsvpId && row.uploadedByRsvpId !== opts.requireUploadedByRsvpId) {
+    throw createError({ statusCode: 403, message: 'Forbidden' })
+  }
+  // The account half of the same rule (#29): a participant confirms the row
+  // THEY registered, not whatever pending id they can name.
+  if (opts.requireUploadedByUserId && row.uploadedByUserId !== opts.requireUploadedByUserId) {
     throw createError({ statusCode: 403, message: 'Forbidden' })
   }
 
@@ -128,6 +134,8 @@ export interface MediaItemView {
   caption: string | null
   takenAt: Date | null
   assignedRsvpId: string | null
+  /** The expense this item is the receipt for, or `null` (#29). */
+  expenseId: string | null
   createdAt: Date
 }
 
@@ -141,6 +149,7 @@ function toView(r: typeof tables.media.$inferSelect): MediaItemView {
     caption: r.caption,
     takenAt: r.takenAt,
     assignedRsvpId: r.assignedRsvpId,
+    expenseId: r.expenseId,
     createdAt: r.createdAt
   }
 }
@@ -229,6 +238,138 @@ export async function deleteMedia(userId: string, slug: string, mediaId: string)
     .returning({ storageKey: tables.media.storageKey })
   if (!deleted) throw createError({ statusCode: 404, message: 'Media not found' })
   return deleted
+}
+
+/* -------------------------- the receipt pin (#29) -------------------------- */
+
+/**
+ * WHAT MAY BE A RECEIPT, and the rule is about who can already see the bytes
+ * rather than about what a receipt looks like.
+ *
+ * A pinned receipt travels in the budget, and the budget is readable by anybody
+ * holding the invite link (`GET /api/invites/{token}/budget`, unchanged since
+ * #48). `photo` and `document` are exactly the two classes
+ * `listMediaForViewer` already hands that same population unconditionally, so
+ * pinning one widens NOTHING: every reader of the pin could already fetch the
+ * object from the gallery.
+ *
+ * `ticket` is excluded for that reason and no other. A ticket is per-person —
+ * visible to the attendee it is assigned to and to planners — and pinning one
+ * to an expense would publish it to the whole trip through a side door, which
+ * is a change to who may read what and therefore not this issue's to make.
+ * `video` is excluded because a receipt is a still or a paper; it would be
+ * harmless (the gallery shows videos to everyone) and it is simply not the
+ * thing.
+ */
+export const RECEIPT_TYPES: readonly MediaType[] = ['photo', 'document']
+
+/**
+ * Pin a photo or a shared paper to an expense as its receipt.
+ *
+ * The CALLER decides whether this account may write this trip's money — the
+ * gate is the expense gate (`server/domain/expenses.ts`), because pinning a
+ * receipt is an expense write and #48 decided who may make one. What this
+ * function owns is the pin itself: that both rows are on the event named, that
+ * the object is one this event's readers may already see, and that an expense
+ * ends up with at most one.
+ *
+ * REPLACING IS ONE STATEMENT, so it is one transaction: the previous receipt is
+ * un-pinned and the new one pinned together, and a failure halfway through
+ * leaves the expense with the receipt it had rather than with none.
+ *
+ * IT TOUCHES NO COLUMN ON `events_expense`. Not `fx_rate_source`, not
+ * `stated_amount_cents`, not `updated_at`. Those record that a PERSON stated a
+ * figure and checked it (#59, #71); a photograph is evidence a reader can look
+ * at, not a claim the instance may make on the uploader's behalf.
+ */
+export async function pinReceipt(eventId: string, expenseId: string, mediaId: string): Promise<MediaItemView> {
+  const db = useDb()
+
+  const [target] = await db
+    .select({ id: tables.expense.id })
+    .from(tables.expense)
+    .where(and(eq(tables.expense.id, expenseId), eq(tables.expense.eventId, eventId)))
+    .limit(1)
+  if (!target) throw createError({ statusCode: 404, message: 'Expense not found' })
+
+  const [item] = await db
+    .select()
+    .from(tables.media)
+    .where(and(eq(tables.media.id, mediaId), eq(tables.media.eventId, eventId)))
+    .limit(1)
+  // Same 404 for "no such id" and "somebody else's event": a media id from
+  // another trip is not a thing this caller is entitled to learn about.
+  if (!item) throw createError({ statusCode: 404, message: 'Photo not found' })
+  if (item.status !== 'ready') {
+    throw createError({ statusCode: 409, message: 'That upload has not finished yet' })
+  }
+  if (!RECEIPT_TYPES.includes(item.type as MediaType)) {
+    throw createError({
+      statusCode: 422,
+      message: 'A receipt is a photo or a shared document — a ticket belongs to one person and stays theirs'
+    })
+  }
+
+  return db.transaction(async (tx) => {
+    await tx
+      .update(tables.media)
+      .set({ expenseId: null })
+      .where(and(eq(tables.media.eventId, eventId), eq(tables.media.expenseId, expenseId)))
+    const [pinned] = await tx
+      .update(tables.media)
+      .set({ expenseId })
+      .where(and(eq(tables.media.id, item.id), eq(tables.media.eventId, eventId)))
+      .returning()
+    return toView(pinned!)
+  })
+}
+
+/**
+ * Un-pin whatever this expense's receipt is. The photo stays in the gallery —
+ * this is the pin coming off, never a delete, and there is exactly one way to
+ * remove the bytes (`DELETE /api/host/events/{slug}/media/{id}`, planner only).
+ *
+ * Idempotent, and answers what it did rather than 404ing on an expense that has
+ * no receipt: "there is no receipt" is the state the caller asked for.
+ */
+export async function unpinReceipt(eventId: string, expenseId: string): Promise<{ removed: boolean }> {
+  const cleared = await useDb()
+    .update(tables.media)
+    .set({ expenseId: null })
+    .where(and(eq(tables.media.eventId, eventId), eq(tables.media.expenseId, expenseId)))
+    .returning({ id: tables.media.id })
+  return { removed: cleared.length > 0 }
+}
+
+/**
+ * The receipts of a whole budget, by expense id — ONE query for the lot.
+ *
+ * Read by `loadBudget` (`server/domain/expenses.ts`), which is the read half
+ * the issue asks for. It is a batch on purpose: a budget renders every expense,
+ * and a per-expense lookup here would be the N+1 that `server/domain/admin.ts`
+ * has a note about at the top of it.
+ *
+ * `status = 'ready'` because a pending row is an upload that may never land,
+ * and a thumbnail pointing at an object that does not exist is worse than no
+ * thumbnail. Nothing can pin one anyway (`pinReceipt` refuses), so this is the
+ * belt to that braces.
+ */
+export async function listReceiptsByExpense(eventId: string, expenseIds: string[]): Promise<Map<string, MediaItemView>> {
+  const out = new Map<string, MediaItemView>()
+  if (expenseIds.length === 0) return out
+  const rows = await useDb()
+    .select()
+    .from(tables.media)
+    .where(and(
+      eq(tables.media.eventId, eventId),
+      eq(tables.media.status, 'ready'),
+      inArray(tables.media.expenseId, expenseIds)
+    ))
+  for (const r of rows) {
+    // `expenseId` is non-null by the `inArray` above; the guard is for the type.
+    if (r.expenseId) out.set(r.expenseId, toView(r))
+  }
+  return out
 }
 
 /** Resolve an invite-holder's RSVP id by email — the guest upload attribution. */

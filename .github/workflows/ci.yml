@@ -230,11 +230,32 @@ concurrency:
 # statement. Both passed every check written against this script's own bodies.
 # 444 -> 521.
 #
+# THE RECEIPT (#29) adds 57, and a file upload is its own species: a 200 says a
+# request was accepted and nothing at all about a photograph. So the bytes are
+# fetched back through the signed URL and HASHED against what went up, the
+# content type is read off the response rather than assumed from the request,
+# and the two readers who must get nothing are asked — the machine surface,
+# which carries no receipt object and no signed URL at all, and a token that is
+# not a token. The pin's own rule is asserted without a literal: the money an
+# entry states about itself is captured before the pin and compared to ITSELF
+# after it, on a `manual` row (where a relabel would lose the checked figure)
+# and on a `fetched` one (where it would invent one). A constant there would be
+# true only while the fixture made it so. Nine of the 57 need no bucket — every
+# credential gate runs before the media lookup — and the other 48 skip as ONE
+# line without `S3_*`, exactly like the twelve poster checks at the bottom of
+# that file. This job fails on any `skip` at all, so neither can go quiet.
+#
+# Two of the 57 are there because they caught something nothing else could. The
+# guest page resolve is one line and the budget is nested inside what it
+# answers, so it served every receipt as a bare storage key with no URL while
+# the budget refresh beside it signed them correctly — and SSR renders the guest
+# page off that route. 521 -> 578.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '521'
+  MIN_SMOKE_CHECKS: '578'
 
 jobs:
   ci:

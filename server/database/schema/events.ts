@@ -424,6 +424,27 @@ export const media = pgTable('events_media', {
   uploadedByRsvpId: text('uploaded_by_rsvp_id').references(() => rsvp.id, { onDelete: 'set null' }),
   assignedRsvpId: text('assigned_rsvp_id').references(() => rsvp.id, { onDelete: 'set null' }),
   timelineItemId: text('timeline_item_id').references(() => timelineItem.id, { onDelete: 'set null' }),
+  /**
+   * THE RECEIPT PIN (#29): the expense this photo or paper is evidence for.
+   *
+   * Exactly the shape of `timeline_item_id` above, and for the same reason. The
+   * photo belongs to the GALLERY; the pin is a second thing said about it, so
+   * `set null` on delete — an expense that goes away un-pins its receipt and
+   * leaves the photo where somebody uploaded it. The reverse direction is not a
+   * foreign key at all: deleting the media row (planner only, which also
+   * deletes the stored object) simply removes the row, and the expense reads
+   * back with no receipt.
+   *
+   * IT SAYS NOTHING ABOUT THE MONEY. A pin does not touch `fx_rate_source` or
+   * the stated pair on `events_expense` — those record that a PERSON stated a
+   * figure, and attaching a photo is not a person stating anything (#71).
+   *
+   * Not unique, though at most one row per expense carries it: `pinReceipt`
+   * clears the previous pin in the same transaction, and a unique index here
+   * would be a constraint the storage layer has to route around on a replace
+   * rather than a rule anybody needs.
+   */
+  expenseId: text('expense_id').references(() => expense.id, { onDelete: 'set null' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
 }, table => [
@@ -432,7 +453,8 @@ export const media = pgTable('events_media', {
   index('events_media_status_idx').on(table.status),
   index('events_media_taken_at_idx').on(table.takenAt),
   index('events_media_assigned_rsvp_idx').on(table.assignedRsvpId),
-  index('events_media_timeline_item_idx').on(table.timelineItemId)
+  index('events_media_timeline_item_idx').on(table.timelineItemId),
+  index('events_media_expense_idx').on(table.expenseId)
 ])
 
 export const icalToken = pgTable('events_ical_token', {

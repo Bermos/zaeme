@@ -260,6 +260,88 @@ entry_weights() {
     })' "$2"
 }
 
+# THE RECEIPT HELPERS (#29). A receipt is a nested object on an entry, and the
+# two questions worth asking about one are not answerable with `sed`: what the
+# signed URL is (so the bytes can be fetched back and hashed), and whether the
+# MONEY on that entry moved when the photo was pinned.
+
+# `receipt_of <body> <title> <field>` — one field of the named entry's receipt,
+# or a word saying which thing was missing. `none` and `no-such-entry` are
+# different answers on purpose: "the pin did not take" and "the expense is not
+# there" must not both read as an empty string.
+receipt_of() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const e = (budget.expenses ?? [budget]).find(x => x.title === process.argv[1])
+      if (!e) return process.stdout.write("no-such-entry")
+      if (!e.receipt) return process.stdout.write("none")
+      const v = e.receipt[process.argv[2]]
+      process.stdout.write(v === undefined || v === null ? "unset" : String(v))
+    })' "$2" "$3"
+}
+
+# `money_of <body> <title>` — every figure and label the entry states about its
+# own money, as one string.
+#
+# It exists so "pinning a receipt relabels nothing" can be asserted WITHOUT
+# writing the expected values down. A literal there would be a constant standing
+# in for "unchanged" — true only while the fixture happens to make it so, and
+# silently satisfied by an implementation that rewrote a row to the same
+# defaults. Comparing this against the SAME function run on the response from
+# before the pin is the only form of the assertion that cannot pass by accident.
+money_of() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const budget = b.budget ?? b
+      const e = (budget.expenses ?? [budget]).find(x => x.title === process.argv[1])
+      if (!e) return process.stdout.write("no-such-entry")
+      process.stdout.write([
+        e.amountCents, e.currency, e.amountBaseCents, e.baseCurrency,
+        e.fxRate, e.fxRateSource, e.statedAmountCents, e.statedCurrency,
+        (e.shares ?? []).map(sh => sh.amountCents).join("/")
+      ].join(" "))
+    })' "$2"
+}
+
+# `media_field <body> <mediaId> <field>` — one field of one item in a
+# `/api/v1` listMedia array, for reading `expenseId` back off the machine
+# surface.
+media_field() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let items
+      try { items = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const list = Array.isArray(items) ? items : (items.media ?? items.gallery ?? [])
+      const m = list.find(x => x.id === process.argv[1])
+      if (!m) return process.stdout.write("no-such-item")
+      const v = m[process.argv[2]]
+      process.stdout.write(v === undefined || v === null ? "null" : String(v))
+    })' "$2" "$3"
+}
+
+# `json_field <body> <dotted-path>` — a scalar out of a small response, for the
+# two-step upload's `mediaId` and presigned URL. `sed` cannot be trusted with
+# the second: it is a URL full of `&`, `=` and `/`.
+json_field() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      let v = b
+      for (const key of process.argv[1].split(".")) v = v?.[key]
+      process.stdout.write(v === undefined || v === null ? "" : String(v))
+    })' "$2"
+}
+
 # `account_id <body> <name>` — the id of the named account, from a budget or an
 # `{accounts:…}` body.
 account_id() {
@@ -1686,6 +1768,234 @@ else
   echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
 fi
 
+echo
+echo "== the receipt on an expense (Bermos/zaeme#29) =="
+# "What was that 84 francs?" — and the answer is a photo somebody already took.
+#
+# A FILE UPLOAD HAS ITS OWN SPECIES OF LIE, and a 200 is the whole of it. What
+# is asserted below is what is actually STORED and what is actually SERVED: the
+# bytes fetched back through the signed URL are hashed and compared to the
+# bytes that went up, and the content type they come back with is read off the
+# response rather than assumed from the request. Nothing here trusts a status
+# code to mean a photograph exists.
+#
+# AND WHAT THE PIN MUST NOT DO. A receipt is the strongest evidence a budget can
+# carry, which makes it exactly the thing that must not quietly relabel a row:
+# `fxRateSource: 'manual'` means a PERSON stated a figure and checked it against
+# a statement (#59, #71), and a photograph is not a person saying anything. So
+# the money on the entry is captured BEFORE the pin and compared to itself
+# afterwards — there is no literal to write down, because a literal here would
+# be a constant standing in for "unchanged" and would pass just as happily
+# against an implementation that rewrote the row to the same defaults.
+#
+# Both directions are covered: a `manual` EUR entry with a stated pair (where a
+# relabel would DOWNGRADE it and lose the figure) and a `fetched` CHF one (where
+# a relabel would UPGRADE it into a claim nobody made).
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  ROWNER=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  RGUEST=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
+
+  # Its own trip: everything above leaves events in states this block would have
+  # to work around, and an invite token only resolves on a live one.
+  RSLUG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke receipt $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$RSLUG/status" -d '{"status":"published"}' > /dev/null
+  RTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$RSLUG/invites" -d '{"label":"Receipt smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  RMEEXP="$BASE/api/me/events/$RSLUG/expenses"
+  RMEDIA="$BASE/api/me/events/$RSLUG/media"
+  echo "  trip: $RSLUG"
+
+  # EUR 84.00 that cost the payer CHF 80.00 — `manual`, with the stated pair
+  # recorded. Lopsided on purpose: none of these figures is a default, so a row
+  # rewritten to defaults is visibly a different string.
+  RDIN=$(body "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEEXP" \
+    -d '{"title":"Dinner","amountCents":8400,"currency":"EUR","targetAmountCents":8000,"paidByName":"A","paidByEmail":"a@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
+  RDIN_ID=$(expense_id "$RDIN" "Dinner")
+  contains "an entry somebody checked against a statement" "$RDIN" '"fxRateSource":"manual"'
+  RTRAM=$(body "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEEXP" \
+    -d '{"title":"Tram tickets","amountCents":1230,"paidByName":"B","paidByEmail":"b@e.com","participants":[{"name":"A","email":"a@e.com"},{"name":"B","email":"b@e.com"}]}')
+  RTRAM_ID=$(expense_id "$RTRAM" "Tram tickets")
+
+  # --- who may pin. Needs no object storage: every gate runs before the lookup.
+  check "an anonymous pin is refused"              401 "${JSON[@]}" -X PUT "$RMEEXP/$RDIN_ID/receipt" -d '{"mediaId":"nope"}'
+  check "...and so is an anonymous UNpin"          401 -X DELETE "$RMEEXP/$RDIN_ID/receipt"
+  check "a service token is not an account here"   401 "${AUTH[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RDIN_ID/receipt" -d '{"mediaId":"nope"}'
+  check "an account with no standing on the trip"  403 "${RGUEST[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RDIN_ID/receipt" -d '{"mediaId":"nope"}'
+  check "...cannot take one off either"            403 "${RGUEST[@]}" -X DELETE "$RMEEXP/$RDIN_ID/receipt"
+  check "the invite link never gained a pin route" 404 "${JSON[@]}" -X PUT "$BASE/api/invites/$RTOK/expenses/$RDIN_ID/receipt" -d '{"mediaId":"nope"}'
+  check "an anonymous participant upload is refused" 401 "${JSON[@]}" -X POST "$RMEDIA/presign" -d '{"type":"photo","fileName":"r.png","mimeType":"image/png","sizeBytes":10}'
+  check "...and a non-participant's is 403"        403 "${RGUEST[@]}" "${JSON[@]}" -X POST "$RMEDIA/presign" -d '{"type":"photo","fileName":"r.png","mimeType":"image/png","sizeBytes":10}'
+
+  # --- the bytes. These need a bucket, and skip as ONE line without one,
+  #     exactly like the poster checks at the bottom of this file. CI always has
+  #     `adobe/s3mock`, and the job fails on any `skip` at all.
+  if [ -n "${S3_BUCKET:-}${R2_BUCKET:-}" ]; then
+    RIMG=$(mktemp); printf '\x89PNG\r\n\x1a\n' > "$RIMG"; head -c 700 /dev/urandom >> "$RIMG"
+    RSHA=$(sha256sum "$RIMG" | cut -d' ' -f1)
+    RSIZE=$(wc -c < "$RIMG" | tr -d ' ')
+
+    # THE BODY `BudgetCard.vue` COMPOSES, field for field — `type: 'photo'` and
+    # the three facts about the file, and nothing else. The smoke script writes
+    # its own bodies everywhere else in this file, which is precisely how the
+    # form shipped a shape the server never saw twice (#27, #71).
+    RPRE=$(body "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/presign" \
+      -d "{\"type\":\"photo\",\"fileName\":\"receipt.png\",\"mimeType\":\"image/png\",\"sizeBytes\":$RSIZE}")
+    RMID=$(json_field "$RPRE" mediaId)
+    RPUT=$(json_field "$RPRE" upload.url)
+    contains "a participant may register a gallery photo" "$RPRE" '"mediaId"'
+    contains "...with an upload URL that is SIGNED"       "$RPUT" 'X-Amz-Signature='
+    contains "...and one that EXPIRES"                    "$RPUT" 'X-Amz-Expires=900'
+
+    # Pinning a `pending` row is refused: an upload that never lands must not
+    # leave an expense pointing at bytes that are not there.
+    check "a pin before the upload is confirmed"     409 "${ROWNER[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RDIN_ID/receipt" -d "{\"mediaId\":\"$RMID\"}"
+
+    check "the browser PUTs the bytes itself"        200 -X PUT -H 'content-type: image/png' --data-binary "@$RIMG" "$RPUT"
+    check "...which a non-participant cannot confirm" 403 "${RGUEST[@]}" "${JSON[@]}" -X POST "$RMEDIA/confirm" -d "{\"mediaId\":\"$RMID\"}"
+    check "confirming the upload marks it ready"     200 "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/confirm" -d "{\"mediaId\":\"$RMID\"}"
+
+    RPIN=$(body "${ROWNER[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RDIN_ID/receipt" -d "{\"mediaId\":\"$RMID\"}")
+    equals "the expense now carries that photo"      "$(receipt_of "$RPIN" Dinner id)" "$RMID"
+    RURL=$(receipt_of "$RPIN" Dinner url)
+    contains "...behind a signed, expiring URL"      "$RURL" 'X-Amz-Signature='
+    contains "...that is not stored anywhere"        "$RURL" 'X-Amz-Expires=3600'
+
+    # WHAT IS ACTUALLY STORED AND WHAT IS ACTUALLY SERVED. A 200 on the upload
+    # says a request was accepted; only the digest says the right bytes came
+    # back, and only the response header says they come back as a picture rather
+    # than as a download of unknown type. (s3mock does not verify the signature
+    # it is handed, so the two checks above are about the URL's SHAPE; this pair
+    # is about the object.)
+    equals "the bytes served are the bytes uploaded" "$(curl -s "$RURL" | sha256sum | cut -d' ' -f1)" "$RSHA"
+    contains "...served as the type they went up as" "$(curl -sI "$RURL" | tr 'A-Z' 'a-z')" 'content-type: image/png'
+
+    # THE ASSERTION THIS BLOCK EXISTS FOR. No literal: the money the entry states
+    # about itself, before the pin and after it, compared to itself.
+    equals "pinning a receipt moves no money and relabels nothing" \
+      "$(money_of "$RPIN" Dinner)" "$(money_of "$RDIN" Dinner)"
+    contains "...and the checked figure is still there to compare" "$RPIN" '"fxRateSource":"manual","statedAmountCents":8000,"statedCurrency":"CHF"'
+
+    # The other direction: a `fetched` row must not be UPGRADED into a claim.
+    RPRE2=$(body "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/presign" \
+      -d "{\"type\":\"photo\",\"fileName\":\"tram.png\",\"mimeType\":\"image/png\",\"sizeBytes\":$RSIZE}")
+    RMID2=$(json_field "$RPRE2" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: image/png' --data-binary "@$RIMG" "$(json_field "$RPRE2" upload.url)"
+    body "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/confirm" -d "{\"mediaId\":\"$RMID2\"}" > /dev/null
+    RPIN2=$(body "${ROWNER[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RTRAM_ID/receipt" -d "{\"mediaId\":\"$RMID2\"}")
+    equals "...nor does it upgrade an unchecked one"  "$(money_of "$RPIN2" 'Tram tickets')" "$(money_of "$RTRAM" 'Tram tickets')"
+    contains "...which still says nobody checked it"  "$RPIN2" '"fxRateSource":"fetched","statedAmountCents":null,"statedCurrency":null'
+
+    # WHO MAY READ IT. The budget over the invite link carries the thumbnail,
+    # because the population holding that link could already fetch the same
+    # object from `GET /api/invites/{token}/media` — pinning widens nothing.
+    RIBUD=$(body "$BASE/api/invites/$RTOK/budget")
+    equals "the invite link sees the same receipt"   "$(receipt_of "$RIBUD" Dinner id)" "$RMID"
+    contains "...also behind a signed URL, not a key" "$(receipt_of "$RIBUD" Dinner url)" 'X-Amz-Signature='
+    check "a token that is not a token sees nothing" 404 "$BASE/api/invites/not-a-real-token-at-all/budget"
+    # AND THE PAGE RESOLVE, which is the one that was actually wrong. `GET
+    # /api/invites/{token}` is one line — `return getInvitePage(token)` — and the
+    # budget is nested three levels down inside what it answers, so it carried
+    # every receipt as a bare storage key with no URL at all while the budget
+    # refresh beside it signed them correctly. SSR renders the guest page off
+    # THIS route, so that was every thumbnail on the screen somebody opens.
+    RIPAGE=$(body "$BASE/api/invites/$RTOK")
+    equals "the guest page resolve carries it too"  "$(receipt_of "$RIPAGE" Dinner id)" "$RMID"
+    contains "...signed there as well, not a key"   "$(receipt_of "$RIPAGE" Dinner url)" 'X-Amz-Signature='
+
+    # …and the MACHINE surface does not. No download URL crosses that boundary,
+    # which `listMedia` has always said; a budget is not an exception to it.
+    RV1BUD=$(body "${AUTH[@]}" "$API/events/$RSLUG/budget")
+    contains "the machine budget still has the entry" "$RV1BUD" '"title":"Dinner"'
+    excludes "...and no receipt object on it"         "$RV1BUD" '"receipt"'
+    excludes "...and no signed URL anywhere in it"    "$RV1BUD" 'X-Amz-Signature'
+    # What DOES cross, and it is an id: listMedia says which expense an item is
+    # the receipt for.
+    RV1MED=$(body "${AUTH[@]}" "$API/events/$RSLUG/media")
+    equals "listMedia names the expense it belongs to" "$(media_field "$RV1MED" "$RMID" expenseId)" "$RDIN_ID"
+    excludes "...still with no URL for the bytes"      "$RV1MED" '"url"'
+
+    # REPLACING. One expense, one receipt: pinning a second un-pins the first,
+    # and the first stays in the gallery.
+    RPRE3=$(body "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/presign" \
+      -d "{\"type\":\"photo\",\"fileName\":\"better.png\",\"mimeType\":\"image/png\",\"sizeBytes\":$RSIZE}")
+    RMID3=$(json_field "$RPRE3" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: image/png' --data-binary "@$RIMG" "$(json_field "$RPRE3" upload.url)"
+    body "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/confirm" -d "{\"mediaId\":\"$RMID3\"}" > /dev/null
+    RREP=$(body "${ROWNER[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RDIN_ID/receipt" -d "{\"mediaId\":\"$RMID3\"}")
+    equals "a second pin replaces the first"         "$(receipt_of "$RREP" Dinner id)" "$RMID3"
+    RV1MED2=$(body "${AUTH[@]}" "$API/events/$RSLUG/media")
+    equals "...un-pinning the one it replaced"       "$(media_field "$RV1MED2" "$RMID" expenseId)" "null"
+    equals "...which is still in the gallery"        "$(media_field "$RV1MED2" "$RMID" id)" "$RMID"
+    equals "...and the money STILL has not moved"    "$(money_of "$RREP" Dinner)" "$(money_of "$RDIN" Dinner)"
+
+    # WHAT MAY BE A RECEIPT. A ticket belongs to one attendee; the budget is read
+    # by the whole event, so pinning one would publish it through a side door.
+    RTPRE=$(body "${ROWNER[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$RSLUG/media/presign" \
+      -d '{"type":"ticket","fileName":"seat.pdf","mimeType":"application/pdf","sizeBytes":64}')
+    RTID=$(json_field "$RTPRE" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: application/pdf' --data-binary 'not-really-a-pdf-but-64-bytes-long-enough-for-this-smoke-check!' \
+      "$(json_field "$RTPRE" upload.url)"
+    body "${ROWNER[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$RSLUG/media/confirm" -d "{\"mediaId\":\"$RTID\"}" > /dev/null
+    check "a ticket may not be a receipt"            422 "${ROWNER[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RTRAM_ID/receipt" -d "{\"mediaId\":\"$RTID\"}"
+    contains "...and says why, in words"             "$(body "${ROWNER[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RTRAM_ID/receipt" -d "{\"mediaId\":\"$RTID\"}")" 'belongs to one person'
+    # A REAL id from a REAL other trip, not a made-up string. The two are the
+    # same 404 today and would stop being the same the moment somebody dropped
+    # the `eventId` half of the lookup — at which point a made-up id would still
+    # 404 and this check would still pass while a friend's photograph could be
+    # pinned to a stranger's dinner. The owner plans both trips, so the gate
+    # lets this request through and only the scoping refuses it.
+    RSLUG2=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+      -d "{\"title\":\"Smoke receipt other $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+    body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$RSLUG2/status" -d '{"status":"published"}' > /dev/null
+    ROPRE=$(body "${ROWNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$RSLUG2/media/presign" \
+      -d "{\"type\":\"photo\",\"fileName\":\"elsewhere.png\",\"mimeType\":\"image/png\",\"sizeBytes\":$RSIZE}")
+    ROMID=$(json_field "$ROPRE" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: image/png' --data-binary "@$RIMG" "$(json_field "$ROPRE" upload.url)"
+    body "${ROWNER[@]}" "${JSON[@]}" -X POST "$BASE/api/me/events/$RSLUG2/media/confirm" -d "{\"mediaId\":\"$ROMID\"}" > /dev/null
+    check "a real photo from ANOTHER trip is not found" 404 "${ROWNER[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RDIN_ID/receipt" -d "{\"mediaId\":\"$ROMID\"}"
+    check "...and the same in reverse"                  404 "${ROWNER[@]}" "${JSON[@]}" -X PUT "$BASE/api/me/events/$RSLUG2/expenses/$RDIN_ID/receipt" -d "{\"mediaId\":\"$ROMID\"}"
+
+    # THE SIZE AND TYPE LIMITS, at them. `image/*` up to 25 MB.
+    check "a photo over the 25 MB limit"             413 "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/presign" \
+      -d '{"type":"photo","fileName":"huge.png","mimeType":"image/png","sizeBytes":26214401}'
+    check "...and one that is not an image at all"   422 "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/presign" \
+      -d '{"type":"photo","fileName":"r.pdf","mimeType":"application/pdf","sizeBytes":1024}'
+    check "the papers stay host-managed here"        400 "${ROWNER[@]}" "${JSON[@]}" -X POST "$RMEDIA/presign" \
+      -d '{"type":"document","fileName":"r.pdf","mimeType":"application/pdf","sizeBytes":1024}'
+
+    # DELETING THE PHOTO leaves the expense intact — the row goes, the entry does
+    # not, and the receipt simply reads as absent.
+    check "a planner deletes the pinned photo"       200 "${ROWNER[@]}" -X DELETE "$BASE/api/host/events/$RSLUG/media/$RMID3"
+    RGONE=$(body "$BASE/api/invites/$RTOK/budget")
+    contains "the expense survives it"               "$RGONE" '"title":"Dinner"'
+    equals "...with no receipt on it"                "$(receipt_of "$RGONE" Dinner id)" "none"
+    equals "...and its money untouched"              "$(money_of "$RGONE" Dinner)" "$(money_of "$RDIN" Dinner)"
+
+    # DELETING THE EXPENSE leaves the photo in the gallery — `on delete set null`
+    # un-pins it rather than taking it with it.
+    check "the expense with the OTHER receipt goes"  200 "${ROWNER[@]}" -X DELETE "$RMEEXP/$RTRAM_ID"
+    RV1MED3=$(body "${AUTH[@]}" "$API/events/$RSLUG/media")
+    equals "its photo is still in the gallery"       "$(media_field "$RV1MED3" "$RMID2" id)" "$RMID2"
+    equals "...un-pinned rather than deleted"        "$(media_field "$RV1MED3" "$RMID2" expenseId)" "null"
+
+    # UN-PINNING BY HAND says the same thing, and is idempotent: "there is no
+    # receipt" is the state the caller asked for.
+    RUP=$(body "${ROWNER[@]}" "${JSON[@]}" -X PUT "$RMEEXP/$RDIN_ID/receipt" -d "{\"mediaId\":\"$RMID\"}")
+    equals "a photo can be pinned again afterwards"  "$(receipt_of "$RUP" Dinner id)" "$RMID"
+    RUNP=$(body "${ROWNER[@]}" -X DELETE "$RMEEXP/$RDIN_ID/receipt")
+    equals "...and taken off again"                  "$(receipt_of "$RUNP" Dinner id)" "none"
+    check "...twice, without complaining"            200 "${ROWNER[@]}" -X DELETE "$RMEEXP/$RDIN_ID/receipt"
+    RSTILL=$(body "${AUTH[@]}" "$API/events/$RSLUG/media")
+    equals "the photo is STILL in the gallery"       "$(media_field "$RSTILL" "$RMID" id)" "$RMID"
+
+    rm -f "$RIMG"
+  else
+    echo "  skip  set S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT to run the receipt bytes"
+  fi
+else
+  echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
+fi
 echo
 echo "== places, and the legs between them (Bermos/zaeme#30) =="
 # An itinerary was a sorted list of strings until now: one free-text location

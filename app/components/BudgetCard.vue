@@ -78,6 +78,15 @@ interface Expense {
   shares: Share[]
   /** Every posting of this entry, credits included. Sums to zero. */
   lines?: Line[]
+  /**
+   * The photo or paper pinned to this entry as its receipt (#29), or null.
+   *
+   * `url` is SIGNED AND EXPIRES — it is minted per response by
+   * `signBudgetReceipts` and is never stored — so the card keys on it rather
+   * than caching it, and an instance with no object storage answers a receipt
+   * without one and gets no thumbnail instead of a broken image.
+   */
+  receipt?: { id: string, fileName: string, mimeType: string, url?: string } | null
 }
 interface Budget {
   expenses: Expense[]
@@ -132,6 +141,19 @@ const props = defineProps<{
    * control is absent rather than present and 403ing.
    */
   currencyUrl?: string | null
+  /**
+   * Where a receipt photo is uploaded from (#29): POST
+   * `${receiptUploadBase}/presign`, PUT the bytes at the URL that comes back,
+   * then POST `${receiptUploadBase}/confirm`. The PIN is a different request
+   * on a different base (`${expensesBase}/{id}/receipt`), because uploading a
+   * photo and saying it is the receipt for that 84 francs are two different
+   * permissions — the first is a guest capability, the second is an expense
+   * write.
+   *
+   * Absent means the shortcut is not offered and an already-pinned receipt is
+   * still shown, which is the read-only surface's shape.
+   */
+  receiptUploadBase?: string | null
 }>()
 const emit = defineEmits<{ updated: [budget: Budget] }>()
 
@@ -931,6 +953,121 @@ async function changeCurrency() {
   }
 }
 
+/* ---- the receipt (#29) ---- */
+
+/**
+ * "What was that 84 francs?" — and the answer is a photo somebody already took.
+ *
+ * THIS IS NOT PART OF THE FORM, and that is the whole design. Attaching a
+ * receipt is its own request, fired on its own click, against its own endpoint;
+ * it never joins the body `saveExpense` composes and it never opens the edit
+ * form. Two reasons, and the second is the one that cost money:
+ *
+ *  - a receipt is available on an expense nobody is correcting, which is most
+ *    of them;
+ *  - the body that form sends carries exactly the fields somebody TOUCHED
+ *    (#27, #71), and folding a file picker into it would put a field in there
+ *    that nobody typed. `fxRateSource: 'manual'` means a person stated a figure
+ *    and checked it; a photograph is evidence a reader can look at. Pinning one
+ *    relabels nothing, restates nothing, and the request below carries one
+ *    field.
+ */
+const receiptBusy = ref<string | null>(null)
+const receiptInput = ref<HTMLInputElement>()
+/** Which expense the file picker was opened for. */
+const receiptFor = ref<string | null>(null)
+
+/** The shortcut needs somewhere to upload TO as well as the write standing. */
+const canAttachReceipt = computed(() => canWrite.value && !!props.receiptUploadBase)
+
+function pickReceipt(x: Expense) {
+  if (!canAttachReceipt.value) return
+  receiptFor.value = x.id
+  receiptInput.value?.click()
+}
+
+/**
+ * Upload the photo, then pin it — in that order, and the pin only if the
+ * confirm succeeded. A `pending` row is an upload that may never land, and the
+ * server refuses to pin one; doing it this way round means a browser that dies
+ * halfway leaves a gallery row nobody points at rather than an expense pointing
+ * at bytes that are not there.
+ *
+ * The size and type limits are the server's and are not restated here: an
+ * `image/*` up to 25 MB, refused 422 and 413 respectively, and the message
+ * comes back to the toast. A second copy of the numbers in this file would be
+ * a second rule to keep in step.
+ */
+async function onReceiptFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  const expenseId = receiptFor.value
+  const base = props.receiptUploadBase
+  if (!file || !expenseId || !base) return
+  receiptBusy.value = expenseId
+  try {
+    const { mediaId, upload } = await $fetch<{
+      mediaId: string
+      upload: { url: string, headers?: Record<string, string> }
+    }>(`${base}/presign`, {
+      method: 'POST',
+      body: {
+        type: 'photo',
+        fileName: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        sizeBytes: file.size
+      }
+    })
+    const putRes = await fetch(upload.url, {
+      method: 'PUT',
+      headers: { 'content-type': file.type || 'application/octet-stream', ...(upload.headers ?? {}) },
+      body: file
+    })
+    if (!putRes.ok) throw new Error(`upload failed (${putRes.status})`)
+    await $fetch(`${base}/confirm`, { method: 'POST', body: { mediaId } })
+
+    // The pin, on the EXPENSE surface, carrying one field and no opinion about
+    // the money.
+    const res = await $fetch<{ budget: Budget }>(`${props.expensesBase}/${expenseId}/receipt`, {
+      method: 'PUT',
+      body: { mediaId }
+    })
+    emit('updated', res.budget)
+    toast.add({ title: 'Receipt attached', color: 'success' })
+  } catch (e) {
+    toast.add({
+      title: (e as { data?: { message?: string } }).data?.message ?? 'Could not attach that receipt',
+      color: 'error'
+    })
+  } finally {
+    receiptBusy.value = null
+    receiptFor.value = null
+    input.value = ''
+  }
+}
+
+/**
+ * Take the receipt off. THE PHOTO STAYS IN THE GALLERY — this un-pins and
+ * nothing more, which is why the label says "remove" of the receipt and not of
+ * the photo. Deleting the bytes is the planner's, from the gallery.
+ */
+async function detachReceipt(x: Expense) {
+  if (!canWrite.value) return
+  receiptBusy.value = x.id
+  try {
+    const res = await $fetch<{ budget: Budget }>(`${props.expensesBase}/${x.id}/receipt`, { method: 'DELETE' })
+    emit('updated', res.budget)
+    toast.add({ title: 'Receipt removed — the photo stays in the gallery', color: 'success' })
+  } catch (e) {
+    toast.add({
+      title: (e as { data?: { message?: string } }).data?.message ?? 'Could not remove that receipt',
+      color: 'error'
+    })
+  } finally {
+    receiptBusy.value = null
+  }
+}
+
 async function removeExpense(id: string) {
   try {
     const res = await $fetch<{ budget?: Budget }>(`${props.expensesBase}/${id}`, { method: 'DELETE' })
@@ -1007,6 +1144,41 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
               >
                 added by {{ x.addedByName }}
               </p>
+              <!-- The receipt (#29). A thumbnail when the URL is there — it is
+                   signed and expires, so a response without one (an instance
+                   with no object storage) simply has no picture rather than a
+                   broken image. The photo lives in the gallery; removing the
+                   receipt takes the pin off and leaves it there. -->
+              <div
+                v-if="x.receipt"
+                class="flex items-center gap-2 mt-1"
+              >
+                <a
+                  v-if="x.receipt.url"
+                  :href="x.receipt.url"
+                  target="_blank"
+                  rel="noopener"
+                  :title="x.receipt.fileName"
+                >
+                  <img
+                    :src="x.receipt.url"
+                    :alt="`Receipt for ${x.title}`"
+                    class="h-12 w-12 rounded object-cover border border-default"
+                  >
+                </a>
+                <span class="text-muted text-xs">🧾 receipt</span>
+                <UButton
+                  v-if="canWrite"
+                  size="xs"
+                  color="neutral"
+                  variant="ghost"
+                  :loading="receiptBusy === x.id"
+                  :aria-label="`Remove the receipt from ${x.title}`"
+                  @click="detachReceipt(x)"
+                >
+                  remove
+                </UButton>
+              </div>
             </div>
             <div class="flex items-center gap-1">
               <!-- The base figure, because it is the one the balances below are
@@ -1025,6 +1197,21 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
                 @click="startEdit(x)"
               >
                 ✎
+              </UButton>
+              <!-- Photograph it and pin it, in one action. Only where there
+                   is somewhere to upload to, and only for somebody who may
+                   write this trip's money — the upload is a guest capability
+                   but the PIN is an expense write (#29, #48). -->
+              <UButton
+                v-if="canAttachReceipt && !x.receipt"
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :loading="receiptBusy === x.id"
+                :aria-label="`Attach a receipt to ${x.title}`"
+                @click="pickReceipt(x)"
+              >
+                🧾
               </UButton>
               <UButton
                 v-if="canRemove(x)"
@@ -1514,5 +1701,14 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
         Add an expense
       </UButton>
     </div>
+
+    <!-- One picker for every row; `receiptFor` says which expense opened it. -->
+    <input
+      ref="receiptInput"
+      type="file"
+      class="hidden"
+      accept="image/*"
+      @change="onReceiptFile"
+    >
   </UCard>
 </template>

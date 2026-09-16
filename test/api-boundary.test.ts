@@ -405,6 +405,157 @@ describe('the account surface is a session, and the invite link never becomes on
     expect(card).not.toMatch(/function splitEvenlyCents/)
   })
 
+  it('attaching a receipt is an expense write, on both expense surfaces (#29)', () => {
+    // #29 draws its credential line through the middle of one action:
+    // UPLOADING a photo stays the invite link's (anyone on the event may add to
+    // the gallery, unchanged), PINNING one to an expense is money and needs the
+    // account. So the pin lives beside the other three expense verbs, on both
+    // surfaces that carry them, and nowhere near `/api/invites/**`.
+    for (const surface of [['me', 'AsParticipant'], ['host', 'AsPlanner']] as const) {
+      const put = join(API_ROOT, surface[0], 'events', '[slug]', 'expenses', '[id]', 'receipt.put.ts')
+      const del = join(API_ROOT, surface[0], 'events', '[slug]', 'expenses', '[id]', 'receipt.delete.ts')
+      expect(existsSync(put), put).toBe(true)
+      expect(existsSync(del), del).toBe(true)
+      for (const f of [put, del]) {
+        const src = readFileSync(f, 'utf8')
+        expect(src, f).toMatch(/requireGuestUser\(/)
+        expect(src, f).toMatch(new RegExp(`ReceiptAs${surface[1].slice(2)}`))
+      }
+    }
+    // …and the invite surface gained no receipt route at all, which the generic
+    // "no /api/invites handler reads a session" rule above cannot say: a pin
+    // route there would be a session check inside the capability URL.
+    expect(guestHandlers.filter(f => /receipt/i.test(rel(f))).map(rel)).toEqual([])
+  })
+
+  it('the pin carries ONE field and never rides in the edit form\'s body (#29)', () => {
+    // The rule #27 and #71 were both broken by, applied one issue later. The
+    // body `saveExpense` composes carries exactly the fields somebody TOUCHED,
+    // and a receipt is the strongest evidence there is — so if it travelled in
+    // that body, every correction of an expense would restate it, and the next
+    // person to add a field beside it would have a precedent for doing the
+    // same. It is a separate request on a separate endpoint, fired from its own
+    // click, and it sends `mediaId` and nothing else.
+    const card = readFileSync(join(ROOT, 'app', 'components', 'BudgetCard.vue'), 'utf8')
+
+    //
+    // PINNED ON THE ENDPOINT AND THE STATE, never on the word: `receipt` means
+    // two different things in this file — the paper somebody photographed, and
+    // the foreign-currency amount an expense was recorded FROM — and the second
+    // is discussed at length inside `saveExpense`. A grep for the word would
+    // fail on a comment and pass on a body field called `photo`.
+    const save = card.slice(card.indexOf('async function saveExpense()'), card.indexOf('/* ---- changing what this trip settles in'))
+    expect(save).not.toBe('')
+    expect(save).not.toMatch(/mediaId/)
+    expect(save).not.toMatch(/\/receipt`/)
+    expect(save).not.toMatch(/receiptUploadBase|receiptBusy|receiptFor/)
+
+    // The pin's own call site: PUT to the expense's receipt, body `{ mediaId }`.
+    expect(card).toMatch(/\$fetch<\{ budget: Budget \}>\(`\$\{props\.expensesBase\}\/\$\{expenseId\}\/receipt`, \{\s*\n?\s*method: 'PUT',\s*\n?\s*body: \{ mediaId \}/)
+    expect(card).toMatch(/`\$\{props\.expensesBase\}\/\$\{x\.id\}\/receipt`, \{ method: 'DELETE' \}/)
+
+    // The upload CONFIRMS before it pins. A `pending` row is an upload that may
+    // never land and the server refuses to pin one; the other order would point
+    // an expense at bytes that are not there.
+    const attach = card.slice(card.indexOf('async function onReceiptFile'), card.indexOf('async function detachReceipt'))
+    expect(attach.indexOf('/confirm')).toBeGreaterThan(-1)
+    expect(attach.indexOf('/receipt`')).toBeGreaterThan(attach.indexOf('/confirm'))
+  })
+
+  it('pinning a receipt relabels nothing about the money (#29, #71)', () => {
+    // `fxRateSource: 'manual'` and the stated pair mean a PERSON stated a
+    // figure and checked it against a statement. A photograph is evidence a
+    // reader can look at; the instance may not upgrade one into the other on
+    // the uploader's behalf. So the pin writes to `events_media` and to nothing
+    // else — not even `events_expense.updated_at`.
+    const media = readFileSync(join(ROOT, 'server', 'domain', 'media.ts'), 'utf8')
+    const pin = media.slice(media.indexOf('export async function pinReceipt'), media.indexOf('export async function unpinReceipt'))
+    expect(pin).not.toBe('')
+    expect(pin).not.toMatch(/fxRate|statedAmountCents|statedCurrency/)
+    // Every UPDATE in it is against the media table.
+    const updates = pin.match(/\.update\(tables\.(\w+)\)/g) ?? []
+    expect(updates.length).toBeGreaterThan(0)
+    expect([...new Set(updates)]).toEqual(['.update(tables.media)'])
+
+    // …and a ticket may not be one. A ticket is visible to the attendee it
+    // belongs to and to planners; a receipt travels in a budget the whole event
+    // can read, so pinning one would publish it through a side door.
+    expect(media).toMatch(/export const RECEIPT_TYPES: readonly MediaType\[\] = \['photo', 'document'\]/)
+  })
+
+  it('every human handler that answers with a budget signs its receipts (#29)', () => {
+    // `loadBudget` hands back a storage KEY; a media URL in this app is signed
+    // and expires, always. A thumbnail missing from one budget handler is a bug
+    // nobody notices for a release — so the rule is asserted over the route
+    // tree rather than remembered.
+    //
+    // THE SET IS WORKED OUT FROM THE DOMAIN, TRANSITIVELY, and that is not
+    // fussiness. The first version of this test read each handler's own source
+    // for the word `budget`, and it passed while `GET /api/invites/{token}`
+    // served every receipt on the guest page unsigned: that handler is one line
+    // (`return getInvitePage(token)`) and the budget is nested three levels down
+    // inside what it returns. A rule a handler can satisfy by not mentioning the
+    // thing it returns is not a rule. So: start at `loadBudget`, close over
+    // every exported domain function that calls something already in the set,
+    // and require any human-surface handler that calls one to sign.
+    const DOMAIN = join(ROOT, 'server', 'domain')
+    const bodies = new Map<string, string>()
+    for (const file of readdirSync(DOMAIN).filter(f => f.endsWith('.ts'))) {
+      const src = readFileSync(join(DOMAIN, file), 'utf8')
+      const marks: Array<[string, number]> = []
+      const re = /^export (?:async )?function (\w+)/gm
+      let m: RegExpExecArray | null
+      while ((m = re.exec(src)) !== null) marks.push([m[1]!, m.index])
+      marks.forEach(([name, at], i) => {
+        bodies.set(name, src.slice(at, i + 1 < marks.length ? marks[i + 1]![1] : src.length))
+      })
+    }
+    const producers = new Set(['loadBudget'])
+    for (let pass = 0; pass < 8; pass++) {
+      for (const [name, body] of bodies) {
+        if (producers.has(name)) continue
+        const reaches = [...producers].some(p => new RegExp(`\\b${p}\\(`).test(body))
+        if (reaches) producers.add(name)
+      }
+    }
+    // The closure found the indirect ones, which is the whole point of it.
+    expect([...producers]).toContain('getInvitePage')
+    expect([...producers]).toContain('guestLoadBudget')
+    expect([...producers]).toContain('attachReceiptAsParticipant')
+    // …and did not swallow the whole domain: a delete answers `{removed:true}`.
+    expect([...producers]).not.toContain('removeExpenseAsPlanner')
+
+    const answersWithABudget = [...guestHandlers, ...hostHandlers, ...accountHandlers].filter((f) => {
+      const src = readFileSync(f, 'utf8')
+      return [...producers].some(p => new RegExp(`\\b${p}\\s*\\(`).test(src))
+    })
+    // The floor is what exists now: a fourteenth is welcome, one going quietly
+    // unsigned is not.
+    expect(answersWithABudget.length).toBeGreaterThanOrEqual(13)
+    const unsigned = answersWithABudget.filter(f => !/signBudgetReceipts\(/.test(readFileSync(f, 'utf8')))
+    expect(unsigned.map(rel)).toEqual([])
+  })
+
+  it('no signed receipt URL crosses the machine boundary (#29)', () => {
+    // `server/api/v1/events/[slug]/media.get.ts` already says it: metadata
+    // only, the bytes live in zäme and are served to guests there. A budget is
+    // not an exception to that, so the /api/v1 projection drops the field
+    // whole rather than handing Enterprise a signed URL it has no use for and
+    // could log.
+    const shapes = readFileSync(join(ROOT, 'server', 'utils', 'v1-shapes.ts'), 'utf8')
+    const expenseStart = shapes.indexOf('export function expense(row: object)')
+    const expenseShape = shapes.slice(expenseStart, shapes.indexOf('\n}\n', expenseStart))
+    expect(expenseShape).not.toBe('')
+    expect(expenseShape).toMatch(/fxRateSource: r\.fxRateSource/)
+    expect(expenseShape).not.toMatch(/receipt/)
+    // The additive half that DOES cross: the media item says which expense it
+    // is the receipt for — an id, not a URL.
+    expect(shapes).toMatch(/expenseId: r\.expenseId \?\? null/)
+
+    const offenders = machineHandlers.filter(f => /media-sign|signBudgetReceipts|signMediaItems/.test(readFileSync(f, 'utf8')))
+    expect(offenders.map(rel)).toEqual([])
+  })
+
   it('records the account surface in the audit, like every other human one', () => {
     const middleware = readFileSync(join(ROOT, 'server', 'middleware', 'audit.ts'), 'utf8')
     expect(middleware).toMatch(/'\/api\/me\/'/)

@@ -689,6 +689,7 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
         :currency-url="`/api/host/events/${slug}/currency`"
         :participants="splitParticipants"
         :viewer="me"
+        :receipt-upload-base="`/api/host/events/${slug}/media`"
         show-amounts
         can-remove-any
         @updated="() => refresh()"

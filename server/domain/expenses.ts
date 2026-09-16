@@ -15,6 +15,14 @@ import {
   ROUNDING,
   UNCATEGORISED
 } from './accounts'
+import {
+  confirmMediaUpload,
+  listReceiptsByExpense,
+  type MediaItemView,
+  pinReceipt,
+  registerMediaUpload,
+  unpinReceipt
+} from './media'
 import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
 import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '../../shared/utils/split-weight'
 import { wasConverted } from '../../shared/utils/conversion'
@@ -342,6 +350,23 @@ export interface ExpenseView {
    * above. The residual line on `Rounding`, when there is one, is only here.
    */
   lines: LedgerLineView[]
+  /**
+   * THE RECEIPT (#29): the gallery photo or shared paper pinned to this entry,
+   * or `null`. "What was that 84 francs?" is the question every shared budget
+   * asks, and this is the answer somebody already photographed.
+   *
+   * A STORAGE KEY, NOT A URL. Media download URLs are signed and expire, like
+   * every other media read in this app, and the signing happens one layer out
+   * (`signBudgetReceipts` in `server/utils/media-sign.ts`) because the domain
+   * has no object store. A handler that returns a budget to a browser signs it;
+   * `/api/v1` deliberately does not, and its projection drops this field whole
+   * — no bytes cross that boundary, exactly as `listMedia` already says.
+   *
+   * It says NOTHING about the money. `fxRateSource` and the stated pair mean a
+   * person stated a figure and checked it; a photograph is evidence a reader
+   * can look at, and pinning one relabels nothing (#71).
+   */
+  receipt: MediaItemView | null
 }
 
 /** One posting: a signed amount into one account. Debit positive, credit negative. */
@@ -1095,6 +1120,10 @@ export async function loadBudget(eventId: string): Promise<{
   const accounts = await loadEventAccounts(eventId)
   const byAccountId = new Map(accounts.map(a => [a.id, a]))
 
+  // The receipts (#29), in ONE query for the whole budget rather than one per
+  // entry — a budget renders every expense it has.
+  const receipts = await listReceiptsByExpense(eventId, rows.map(r => r.expense.id))
+
   const allLines: LedgerLineView[] = lineRows.map((l) => {
     const acc = byAccountId.get(l.accountId)
     return {
@@ -1152,7 +1181,8 @@ export async function loadBudget(eventId: string): Promise<{
           amountBaseCents: l.amountBaseCents,
           weight: l.weight
         })),
-      lines
+      lines,
+      receipt: receipts.get(r.id) ?? null
     }
   })
 
@@ -1924,6 +1954,109 @@ export async function updateExpenseAsParticipant(
 ) {
   const { ev } = await assertMayWriteExpenses(slug, actor)
   return updateExpense(ev.id, expenseId, input)
+}
+
+/* ----------------------------- the receipt (#29) ---------------------------- */
+
+/**
+ * ATTACHING A RECEIPT IS AN EXPENSE WRITE, and that is the whole of why these
+ * four wrappers are in this file rather than in `server/domain/media.ts`.
+ *
+ * The issue draws the line across the middle of one action: UPLOADING a photo
+ * stays a guest capability — anyone holding the invite link may already add to
+ * the gallery and nothing here narrows that — while PINNING one to an expense
+ * is a statement about the money and needs the account gate #48 put on every
+ * other expense write. So the gate is `assertMayWriteExpenses`, the same
+ * function `addExpenseAsParticipant` and `updateExpenseAsParticipant` use, and
+ * `pinReceipt` (which owns the pin, and the rule about which media may be one)
+ * runs behind it.
+ *
+ * Wider than DELETING an expense, and exactly as wide as correcting one: any
+ * writer may pin a receipt to any entry on the trip. A receipt on the wrong
+ * expense is fixed by moving it; there is nothing here that cannot be undone.
+ *
+ * They answer the whole budget, like every other write on these surfaces, so
+ * the card re-renders from one response instead of refetching.
+ */
+export async function attachReceiptAsParticipant(
+  actor: ParticipantActor,
+  slug: string,
+  expenseId: string,
+  mediaId: string
+) {
+  const { ev } = await assertMayWriteExpenses(slug, actor)
+  await pinReceipt(ev.id, expenseId, mediaId)
+  return loadBudget(ev.id)
+}
+
+export async function detachReceiptAsParticipant(actor: ParticipantActor, slug: string, expenseId: string) {
+  const { ev } = await assertMayWriteExpenses(slug, actor)
+  await unpinReceipt(ev.id, expenseId)
+  return loadBudget(ev.id)
+}
+
+/**
+ * THE UPLOAD HALF OF THE SHORTCUT (#29): register a photo a signed-in
+ * participant is about to PUT to the object store, so the next call can pin it.
+ *
+ * It lives here, beside the pin, because its GATE is the pin's gate. The photo
+ * itself is an ordinary gallery photo — it lands where every other one does,
+ * everybody on the trip sees it, and deleting the expense later leaves it
+ * exactly where it was. What the account buys is nothing about the gallery: it
+ * is that the same action can go on to say this photograph is the receipt for
+ * that 84 francs, which is an expense write.
+ *
+ * NOTHING IS NARROWED BY IT. `/api/invites/{token}/media/presign` is untouched
+ * and anyone holding the link may still add to the gallery with no account at
+ * all; this is a second door for somebody who already has one, not a lock on
+ * the first.
+ *
+ * The MIME and size policy is `registerMediaUpload`'s, unchanged: `image/*` up
+ * to 25 MB, 422 and 413 respectively.
+ */
+export async function addReceiptPhotoAsParticipant(
+  actor: ParticipantActor,
+  slug: string,
+  input: { fileName: string, mimeType: string, sizeBytes: number }
+) {
+  const { ev } = await assertMayWriteExpenses(slug, actor)
+  return registerMediaUpload(ev.id, {
+    // Spelled out rather than spread: `photo` is the type, not a default an
+    // input could ever shadow.
+    type: 'photo',
+    fileName: input.fileName,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes
+  }, { userId: actor.id })
+}
+
+/**
+ * Step 2 of that upload: the bytes are in the bucket, mark the row `ready`.
+ * Only the row this account registered — a pending id is not a capability.
+ */
+export async function confirmReceiptPhotoAsParticipant(
+  actor: ParticipantActor,
+  slug: string,
+  mediaId: string,
+  input: { caption?: string | null, takenAt?: string | null }
+) {
+  const { ev } = await assertMayWriteExpenses(slug, actor)
+  return confirmMediaUpload(ev.id, mediaId, input, { requireUploadedByUserId: actor.id })
+}
+
+/** The same pair on the host surface, where a planner reads the same card. */
+export async function attachReceiptAsPlanner(userId: string, slug: string, expenseId: string, mediaId: string) {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+  await pinReceipt(ev.id, expenseId, mediaId)
+  return loadBudget(ev.id)
+}
+
+export async function detachReceiptAsPlanner(userId: string, slug: string, expenseId: string) {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+  await unpinReceipt(ev.id, expenseId)
+  return loadBudget(ev.id)
 }
 
 /** Remove an expense you recorded or paid; a planner of the event may remove any. */

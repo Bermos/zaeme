@@ -2329,6 +2329,15 @@ components:
           type: [string, 'null']
           description: For a ticket, the attendee it belongs to.
         timelineItemId: { type: [string, 'null'] }
+        expenseId:
+          type: [string, 'null']
+          description: >-
+            The trip expense this item is the receipt for (Bermos/zaeme#29), or
+            null. Additive and read-only here: the pin is made on zäme's own
+            human surfaces, where attaching a receipt is an expense write and
+            needs the account that records the money. It is NOT a claim that
+            anybody checked the figures — `Expense.fxRateSource` and the stated
+            pair still mean exactly what they meant before a photograph existed.
         createdAt: { type: string, format: date-time }
 
     PollOption:
