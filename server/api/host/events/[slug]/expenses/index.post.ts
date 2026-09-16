@@ -21,6 +21,16 @@ const bodySchema = z.object({
   // both the correction of a wrong one and the only way in on an instance with
   // no outbound network.
   fxRate: z.string().regex(/^\d{1,9}(\.\d{1,10})?$/).optional(),
+  /**
+   * WHAT THE PAYER WAS ACTUALLY OUT OF POCKET, in the trip's currency (#59) —
+   * the other override, and the one somebody reading a card statement reaches
+   * for. A bank charging `price × rate × fee` hands over a figure no
+   * mid-market rate reproduces, and that figure is what the group splits.
+   *
+   * Refused beside `fxRate`: the two can disagree and picking one silently is
+   * how a budget stops meaning anything.
+   */
+  targetAmountCents: z.number().int().positive().optional(),
   note: z.string().max(500).optional().nullable(),
   paidByName: z.string().min(1).max(200),
   paidByEmail: z.string().email(),

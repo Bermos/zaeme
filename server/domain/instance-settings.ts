@@ -1,20 +1,28 @@
-import { count, eq, ne, sql } from 'drizzle-orm'
+import { count, eq } from 'drizzle-orm'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
 import { isCurrencyCode, normaliseCurrency } from '../utils/fx'
 
 /**
- * The instance's own configuration — today exactly one setting, the BASE
- * CURRENCY the whole instance settles up in (#25, D6: "base currency settable
- * by instance owner, expectation is to have the same currency in the friends
- * group. Default for us is CHF").
+ * The instance's own configuration — today exactly one setting, the currency a
+ * NEW event starts in (#25, D6: "base currency settable by instance owner,
+ * expectation is to have the same currency in the friends group. Default for us
+ * is CHF").
+ *
+ * IT IS A DEFAULT AND NOTHING ELSE SINCE #59. Every balance hangs off
+ * `events_event.currency`, so this value is read once, at event creation, and
+ * never again: no total is denominated in it, no history is labelled by it, and
+ * changing it moves no money. That is what let the 409 go — #25 had to freeze
+ * this setting the moment an expense existed, because every balance on the
+ * instance was stated in it, and a frozen setting on an instance with no
+ * admin-side expense surface was effectively permanent.
  *
  * Why this is not in `admin.ts`: that module's contract, written at the top of
  * it, is that nothing there re-checks a permission because the only caller
- * allowed to ask is the instance owner. The base currency is read on EVERY
- * budget load, including the guest one behind an invite capability URL, so it
- * cannot live behind that sentence. The admin surface writes it; everybody
- * reads it.
+ * allowed to ask is the instance owner. The default is read by every event
+ * creation path, including ones a service token reaches, so it cannot live
+ * behind that sentence. The admin surface writes it; the creation paths read
+ * it.
  *
  * Deliberately uncached. It is one primary-key lookup, and a cache is how a
  * setting the owner just changed keeps answering with the old value for as long
@@ -42,41 +50,21 @@ export async function loadInstanceSettings(): Promise<InstanceSettings> {
   return { baseCurrency: row.baseCurrency, configured: true, updatedAt: row.updatedAt }
 }
 
-/** The currency every balance on this instance is expressed in. */
+/** The currency a new event is created in, unless something says otherwise. */
 export async function instanceBaseCurrency(): Promise<string> {
   return (await loadInstanceSettings()).baseCurrency
 }
 
 /**
- * The same read, inside somebody else's transaction. `addExpense` uses it to
- * confirm the base has not moved since it fetched a rate against it.
+ * Change the currency new events start in.
  *
- * Typed on the one method it needs rather than on the drizzle transaction type:
- * the concrete type is an internal generic that changes shape between minor
- * versions, and naming it here would make this module depend on that.
- */
-type Selectable = Pick<ReturnType<typeof useDb>, 'select'>
-
-export async function baseCurrencyWithin(tx: Selectable): Promise<string> {
-  const [row] = await tx.select().from(tables.instanceSetting).limit(1)
-  return row?.baseCurrency ?? DEFAULT_BASE_CURRENCY
-}
-
-/**
- * Change what the instance settles up in.
- *
- * REFUSED (409) while any expense is recorded against a different base, and
- * that refusal is the thing holding the whole feature together. Every expense
- * freezes `base_currency` and `amount_base_cents` at write time; a balance is
- * the plain sum of those. Let the instance base drift away from the one the
- * rows carry and the sum is adding CHF cents under a heading that says EUR —
- * which is the bug this issue exists to fix, wearing a different hat.
- *
- * The two alternatives were both worse: re-converting history at today's rate
- * moves balances people have already settled, and reporting a budget in the
- * currency of its own rows makes "the instance base currency" a thing no screen
- * can state. Deleting the expenses, or leaving the base alone, are both choices
- * the owner can make knowingly.
+ * NOT REFUSED BY ANYTHING (#59). #25 answered 409 here while any expense was
+ * recorded against a different base, because every balance on the instance was
+ * denominated by this one value and letting it drift would have re-labelled
+ * history — CHF cents summed under a heading that says EUR. Currency belongs to
+ * the event now, so this value labels nothing that already exists: trips
+ * underway keep what they have, and a trip that wants to move says so on its
+ * own page, where the confirmation and the recompute are.
  */
 export async function setInstanceBaseCurrency(input: string): Promise<InstanceSettings> {
   const baseCurrency = normaliseCurrency(input)
@@ -86,34 +74,14 @@ export async function setInstanceBaseCurrency(input: string): Promise<InstanceSe
 
   const db = useDb()
   return db.transaction(async (tx) => {
-    // Make the row exist, then hold it, so the count and the write are one
-    // decision rather than two a concurrent writer can slip between.
-    //
-    // RESIDUAL WINDOW, stated rather than hidden: an `addExpense` that started
-    // before this row existed has nothing to take a lock on, so on a brand-new
-    // instance a simultaneous first-expense-and-first-setting can still cross.
-    // `addExpense` re-reads the base inside its own transaction, which turns
-    // the common case into a 409 instead of a mis-stamped row; closing the rest
-    // needs the expense write to lock this row too, which would put a write on
-    // the read path of every budget. Named in #57 rather than taken.
+    // Insert-then-update rather than an upsert with a `set`: the row's id is
+    // the whole primary key, so a second owner racing this one lands on the
+    // same row and the later `update` wins, which is the ordinary last-write
+    // outcome for a setting one person edits on one screen.
     await tx
       .insert(tables.instanceSetting)
       .values({ id: INSTANCE_SETTING_ID, baseCurrency })
       .onConflictDoNothing()
-    await tx.execute(sql`select 1 from events_instance_setting where id = ${INSTANCE_SETTING_ID} for update`)
-
-    const [{ blocking } = { blocking: 0 }] = await tx
-      .select({ blocking: count() })
-      .from(tables.expense)
-      .where(ne(tables.expense.baseCurrency, baseCurrency))
-    if (blocking > 0) {
-      throw createError({
-        statusCode: 409,
-        message: `${blocking} expense${blocking === 1 ? ' is' : 's are'} already recorded against a different base currency. `
-          + 'Changing it now would re-label balances that were converted at the old one — remove those expenses first, or keep the current base.'
-      })
-    }
-
     await tx
       .update(tables.instanceSetting)
       .set({ baseCurrency })

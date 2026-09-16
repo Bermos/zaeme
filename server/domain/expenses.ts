@@ -2,7 +2,7 @@ import { and, asc, eq, inArray } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { tables, useDb } from './db'
-import { baseCurrencyWithin, instanceBaseCurrency } from './instance-settings'
+import { instanceBaseCurrency } from './instance-settings'
 import { guestUser } from '../database/schema/auth'
 import { assertEventOpenToGuests, assertParticipant, assertPlanner, loadEventBySlug, type ParticipantRole } from './permissions'
 import {
@@ -17,6 +17,7 @@ import {
 } from './accounts'
 import { fetchFxRate, isCurrencyCode, normaliseCurrency } from '../utils/fx'
 import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '../../shared/utils/split-weight'
+import { wasConverted } from '../../shared/utils/conversion'
 
 /**
  * The trip budget: expenses someone fronted, split across participants, and
@@ -24,13 +25,28 @@ import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '.
  * money); shares are materialised at write time so balances are a plain sum.
  * Identity is the same name+email pair RSVPs use.
  *
- * MIXED CURRENCIES (#25). An expense is recorded in the currency it was spent
- * in and converted ONCE, at write time, into the instance base currency
- * (`server/domain/instance-settings.ts`). Both the rate and the converted
- * amount are frozen onto the row, and every balance, settlement and total in
- * this file is computed from `amountBaseCents` alone. `currency` used to be
- * stored, typed and rendered while nothing summed with it — one €120 dinner on
- * a CHF trip was added as 12000 CHF cents, confidently and silently.
+ * MIXED CURRENCIES (#25, repointed by #59). An expense is recorded in the
+ * currency it was spent in and converted ONCE, at write time, into THE EVENT'S
+ * currency (`events_event.currency`). Both the rate and the converted amount
+ * are frozen onto the row, and every balance, settlement and total in this file
+ * is computed from `amountBaseCents` alone. `currency` used to be stored, typed
+ * and rendered while nothing summed with it — one €120 dinner on a CHF trip was
+ * added as 12000 CHF cents, confidently and silently.
+ *
+ * The currency belongs to the TRIP, not to the instance: a ski week in Chamonix
+ * settles in EUR whether or not the friends live in Switzerland, and the
+ * instance setting is now only what a new event STARTS with. The row columns
+ * keep the names `baseCurrency`/`amountBaseCents` — Enterprise generates a
+ * client from them, and renaming them would break another repository to say
+ * something the `currency` beside them already says.
+ *
+ * WHAT IS SPLIT IS WHAT THE PAYER ACTUALLY PAID (#59). A bank that charged
+ * `price × rate × fee` took that whole figure out of somebody's account, and
+ * that is what the group owes them — you would not tell a friend the VAT on
+ * dinner was a them problem. So the fetched rate is a SUGGESTION: the person
+ * who paid may state the rate, or state the out-of-pocket total outright, and
+ * either overrides the lookup. `fxRateSource` records which, so a later reader
+ * knows which rows were checked against a statement.
  *
  * SPLIT MODES (#26). An expense can be divided evenly, by exact per-person
  * amounts, by percentage, or by weight. All four are resolved to cents by
@@ -89,6 +105,22 @@ import { FULL_PERCENT, scaleWeight as scaleWeightOrNull, unscaleWeight } from '.
  */
 export type SplitMode = 'even' | 'exact' | 'percentage' | 'weight'
 
+/**
+ * Where an entry's conversion came from (#59).
+ *
+ * - `fetched` — this instance derived it: a rate looked up at write time, an
+ *   identity conversion (the receipt was already in the event's currency), or a
+ *   recomputation this instance did when the trip's currency changed.
+ * - `manual` — a PERSON stated it, by typing the rate or by typing what came
+ *   out of their account. It is the figure that was checked against a
+ *   statement, so nothing re-derives it from the receipt afterwards.
+ *
+ * Two values and not three: the question a later reader asks is "did somebody
+ * verify this against a statement", and typing the rate and typing the amount
+ * answer it the same way.
+ */
+export type FxRateSource = 'fetched' | 'manual'
+
 export interface ExpenseParticipantInput {
   name: string
   email: string
@@ -124,15 +156,28 @@ export interface AddExpenseInput {
   accountId?: string | null
   /** The total AS SPENT, in `currency`. */
   amountCents: number
-  /** What was handed over. Defaults to the instance base currency. */
+  /** What was handed over. Defaults to the EVENT's currency. */
   currency?: string
   /**
-   * The rate from `currency` into the instance base, supplied by hand. Omit it
-   * and the rate is fetched once at write time; supply it and NOTHING is
+   * The rate from `currency` into the event's currency, supplied by hand. Omit
+   * it and the rate is fetched once at write time; supply it and NOTHING is
    * fetched, which is both the override and the answer to an instance with no
    * outbound network.
    */
   fxRate?: string | number
+  /**
+   * WHAT THE PAYER WAS ACTUALLY OUT OF POCKET, in the event's currency (#59).
+   *
+   * The other override, and the one a person reading their card statement
+   * reaches for: a bank charging `price × rate × fee` hands over a number no
+   * single mid-market rate reproduces, and THAT is the number the group splits.
+   * Given it, nothing is fetched, `fxRate` is derived from the pair so the row
+   * still says what one unit cost, and `fxRateSource` records `manual`.
+   *
+   * Refused beside `fxRate`: the two can contradict each other and picking one
+   * silently is how a budget stops meaning anything.
+   */
+  targetAmountCents?: number
   note?: string | null
   paidByName: string
   paidByEmail: string
@@ -160,11 +205,37 @@ export interface ExpenseView {
   /** As spent, in `currency`. */
   amountCents: number
   currency: string
-  /** As settled: the frozen conversion of `amountCents` into `baseCurrency`. */
+  /**
+   * As settled: the frozen conversion of `amountCents` into `baseCurrency` —
+   * which is the EVENT's currency (#59), not the instance's.
+   */
   amountBaseCents: number
   baseCurrency: string
-  /** The rate this row was converted at, as a decimal string. `'1'` in base. */
+  /**
+   * The rate this row was converted at, as a decimal string. `'1'` when the
+   * receipt is already in the event's currency; the EFFECTIVE rate, derived
+   * from the pair, when somebody stated the out-of-pocket total instead.
+   */
   fxRate: string
+  /**
+   * Where that rate came from (#59). `manual` means a person stated it — the
+   * rate or the amount their bank actually took — and it is the row somebody
+   * checked against a statement. `fetched` means this instance derived it: a
+   * lookup, an identity conversion, or a recomputation after the trip's
+   * currency changed.
+   */
+  fxRateSource: FxRateSource
+  /**
+   * What the payer SAID they were out of pocket, and the currency they said it
+   * in — `null` on a `fetched` row (#59 review).
+   *
+   * `amountBaseCents` is re-derived by every currency change; this is not. It
+   * is the only place the typed figure survives, and it is here so a reader can
+   * see the difference rather than being told a chained conversion was checked
+   * against a statement.
+   */
+  statedAmountCents: number | null
+  statedCurrency: string | null
   /** How the total was divided (#26). A record of intent; nothing re-derives from it. */
   splitMode: SplitMode
   paidByName: string
@@ -315,6 +386,41 @@ export function convertCents(cents: number, rate: string): number {
 }
 
 /**
+ * The rate that takes `amountCents` to `targetCents`, as a decimal string at the
+ * scale the column holds — the EFFECTIVE rate behind a figure somebody typed
+ * off a bank statement (#59).
+ *
+ * `120.00 → 113.47` is `0.9455833333`, which is the mid-market rate plus the
+ * bank's cut, and saying so on the row is more useful than storing the
+ * mid-market rate beside a total it does not produce. It is a record, never an
+ * input: the stated target is what the group splits, and nothing multiplies by
+ * this to get back to it.
+ *
+ * Throws 422 on a pair whose ratio will not fit `numeric(20, 10)` — a hundred
+ * million to one, which is not a holiday.
+ */
+export function deriveRate(amountCents: number, targetCents: number): string {
+  if (amountCents <= 0) {
+    throw createError({ statusCode: 422, message: 'The amount must be a positive number of cents' })
+  }
+  const scale = 10n ** 10n
+  const numerator = BigInt(Math.round(targetCents)) * scale
+  const denominator = BigInt(amountCents)
+  const whole = numerator / denominator
+  const remainder = numerator % denominator
+  const scaled = remainder * 2n >= denominator ? whole + 1n : whole
+  const text = `${scaled / scale}.${`${scaled % scale}`.padStart(10, '0')}`
+  const trimmed = text.replace(/0+$/, '').replace(/\.$/, '')
+  if (!FX_RATE_PATTERN.test(trimmed) || trimmed === '0') {
+    throw createError({
+      statusCode: 422,
+      message: 'That amount and that total do not make a rate this can record. Check both figures.'
+    })
+  }
+  return trimmed
+}
+
+/**
  * Re-express `parts` (which sum to `total`) so they sum to `newTotal` EXACTLY,
  * by largest remainder: floor each proportional share, then hand the leftover
  * cents out one at a time to the largest fractional parts.
@@ -324,10 +430,10 @@ export function convertCents(cents: number, rate: string): number {
  * because the leftover cents are handed to the largest fractional parts rather
  * than to whoever happens to be last.
  *
- * It used to convert the shares into base cents as a group too. It does not any
- * more (#61): each share converts on its own, so what one person owes is
- * explicable without reference to the others, and the cents that leaves over go
- * to the event's `Rounding` account. See `buildEntryLines`.
+ * It is also how the base shares of one entry are produced on the write path:
+ * `apportionCents(shares, sumOfShares, convertedTotal)` sums to the converted
+ * total exactly, so nothing is left over. It is the SINGLE rounding path in
+ * this file and there is deliberately no second one.
  */
 export function apportionCents(parts: number[], total: number, newTotal: number): number[] {
   if (parts.length === 0) return []
@@ -543,63 +649,93 @@ function resolveProportional(
  * a creditor to quietly absorb it. `buildEntryLines` posts any such residual to
  * the event's `Rounding` account.
  *
- * ON THIS PATH IT NEVER HAS ANYTHING TO DO, and that is the correct outcome
- * rather than a criterion going unmet. The base shares are converted AS A GROUP
- * (`apportionCents`, #25), so they sum to the converted total exactly, and the
- * residual is structurally zero for every expense recorded through here. The
- * alternative — converting each share on its own and booking the difference —
- * does not surface a rounding artefact: it INVENTS a cent of liability and
- * files it under a name that makes it look discovered. Three people would
- * severally owe CHF 83.68 for a thing that cost 83.67, the payer would be
- * credited 83.68 for handing over 83.67, and `paidCents` would stop meaning
- * what they paid. The error is bounded by half a cent per person PER ENTRY and
- * accumulates across them.
+ * ON THE WRITE PATH IT NEVER HAS ANYTHING TO DO, and that is the correct
+ * outcome rather than a criterion going unmet. The base shares are converted AS
+ * A GROUP (`apportionCents`, #25), so they sum to the converted total exactly,
+ * and the residual is structurally zero for every expense recorded through
+ * here. Converting each share on its own INSTEAD would not surface a rounding
+ * artefact: it would invent a cent of liability and file it under a name that
+ * makes it look discovered. Three people would severally owe CHF 83.68 for a
+ * thing that cost 83.67, the payer would be credited 83.68 for handing over
+ * 83.67, and `paidCents` would stop meaning what they paid.
  *
- * The branch earns its keep where the drift is real and cannot be apportioned
- * away: #59 recomputes already-frozen per-person amounts when a trip's currency
- * changes, and those were rounded against a total that no longer exists.
+ * THE BRANCH EARNS ITS KEEP ON THE RECOMPUTE (#59,
+ * `server/domain/event-currency.ts`). There the per-person figures are not
+ * being derived from a total — they already exist, as debts people may have
+ * settled against — so each is re-expressed at the day's rate on its own and
+ * the total is re-expressed beside them. Converting eleven numbers at one rate
+ * does not give the same answer as converting their sum, and that difference is
+ * a real artefact of the change rather than liability conjured out of a split.
+ * It goes on `Rounding`, where somebody can read it.
  */
 export function buildEntryLines(input: {
   /** The entry total AS SPENT. */
   amountCents: number
-  /** The entry total in base cents: `convertCents(amountCents, fxRate)`. */
+  /** The entry total in base cents: what the payer was out of pocket. */
   amountBaseCents: number
   payerAccountId: string
-  categoryAccountId: string
+  /**
+   * Where the cost lands. `null` writes NO category line at all, which is what
+   * a transfer between two friends is: member to member, structurally not a
+   * cost, excluded from the trip total with no flag to forget (#28).
+   */
+  categoryAccountId: string | null
   roundingAccountId: string
-  shares: Array<{ accountId: string, amountCents: number, weight: string | null }>
+  /**
+   * The member debits. `amountBaseCents` on a share is the RECOMPUTE path
+   * handing in a figure it computed itself (below); omit it — which every write
+   * does — and the group apportionment runs.
+   */
+  shares: Array<{ accountId: string, amountCents: number, amountBaseCents?: number, weight: string | null }>
 }): LedgerLine[] {
+  const spentOut = input.shares.reduce((sum, s) => sum + s.amountCents, 0)
   // Converted AS A GROUP, so the base shares sum to the converted total exactly
   // whatever the split was (#25). Converting each on its own rounds each one
   // independently, and three roundings of 3333.33 do not add up — which is a
   // total nobody owes, not a residual worth booking.
-  const spentOut = input.shares.reduce((sum, s) => sum + s.amountCents, 0)
-  const shareBase = apportionCents(input.shares.map(s => s.amountCents), spentOut, input.amountBaseCents)
+  //
+  // UNLESS the caller already knows each share's figure. #59's recompute does:
+  // by then each debit is a debt somebody may have settled against, so it is
+  // re-expressed one at a time rather than re-apportioned, and the cents that
+  // leaves over is a real artefact with a home rather than money moved between
+  // people behind their backs.
+  const given = input.shares.every(s => s.amountBaseCents !== undefined)
+  const shareBase = given
+    ? input.shares.map(s => s.amountBaseCents!)
+    : apportionCents(input.shares.map(s => s.amountCents), spentOut, input.amountBaseCents)
   const owed = shareBase.reduce((sum, c) => sum + c, 0)
 
   const lines: LedgerLine[] = [
     // The payer is credited what the group owes them, which is the sum of the
     // debits below — that is what makes the member side of every entry net to
-    // zero, and the balances with it. On this path it is also exactly
-    // `amountBaseCents`, so `paidCents` still means what they paid.
-    { accountId: input.payerAccountId, amountCents: -input.amountCents, amountBaseCents: -owed, weight: null },
-    { accountId: input.categoryAccountId, amountCents: input.amountCents, amountBaseCents: input.amountBaseCents, weight: null },
-    // What was pushed back out, which is what the people below are debited —
-    // the same figure as the cost for anything `resolveShares` produced, and not
-    // assumed to be, so both columns close whatever this is handed.
-    { accountId: input.categoryAccountId, amountCents: -spentOut, amountBaseCents: -owed, weight: null },
-    ...input.shares.map((s, i) => ({
-      accountId: s.accountId,
-      amountCents: s.amountCents,
-      amountBaseCents: shareBase[i]!,
-      weight: s.weight
-    }))
+    // zero, and the balances with it, WHATEVER the residual turns out to be.
+    // That is why the residual can never stop a settlement plan closing.
+    { accountId: input.payerAccountId, amountCents: -input.amountCents, amountBaseCents: -owed, weight: null }
   ]
+  if (input.categoryAccountId) {
+    lines.push(
+      { accountId: input.categoryAccountId, amountCents: input.amountCents, amountBaseCents: input.amountBaseCents, weight: null },
+      // What was pushed back out, which is what the people below are debited —
+      // the same figure as the cost for anything `resolveShares` produced, and
+      // not assumed to be, so both columns close whatever this is handed.
+      { accountId: input.categoryAccountId, amountCents: -spentOut, amountBaseCents: -owed, weight: null }
+    )
+  }
+  lines.push(...input.shares.map((s, i) => ({
+    accountId: s.accountId,
+    amountCents: s.amountCents,
+    amountBaseCents: shareBase[i]!,
+    weight: s.weight
+  })))
 
-  // Zero for everything this path builds, and computed rather than assumed: the
-  // day a caller hands in shares that were rounded against a different total
-  // (#59), the entry still balances and the difference is where it can be seen.
-  const residual = owed - input.amountBaseCents
+  // Zero for everything the WRITE path builds, and computed rather than
+  // assumed. On the recompute it is the difference between what the payer was
+  // out of pocket and the sum of eleven debts converted one at a time, which
+  // is where the `Rounding` account finally earns its keep (#59).
+  //
+  // A transfer has no category line and therefore no gap to book: its own
+  // credit is by construction the sum of its debits.
+  const residual = input.categoryAccountId ? owed - input.amountBaseCents : 0
   if (residual !== 0) {
     lines.push({ accountId: input.roundingAccountId, amountCents: 0, amountBaseCents: residual, weight: null })
   }
@@ -723,10 +859,11 @@ function trimDecimal(stored: string): string {
  * The whole budget: every entry with its lines, the accounts they post to,
  * per-member balances and a settlement plan.
  *
- * `currency` is the INSTANCE BASE CURRENCY — the one thing every figure below
+ * `currency` is THE EVENT'S CURRENCY (#59) — the one thing every figure below
  * `expenses` is denominated in. It used to be `expenses[0]?.currency`, i.e.
  * whichever row came back first, which is how a budget could be labelled EUR
- * while the numbers under it were a sum of CHF and GBP cents.
+ * while the numbers under it were a sum of CHF and GBP cents; #25 made it the
+ * instance's, and #59 moved it to where the answer actually differs.
  *
  * Every figure here is now a sum over accounts (#61). The accounts are SEEDED
  * on the way through when this event has never had a budget looked at — events
@@ -739,13 +876,31 @@ export async function loadBudget(eventId: string): Promise<{
   settlements: SettlementView[]
   /** Every account on the event with what has been posted to it. */
   accounts: AccountView[]
-  /** The sum of DEBITS into category accounts, in base cents. */
+  /** The sum of DEBITS into category accounts, in the event's currency. */
   totalCents: number
-  /** The instance base currency: what `totalCents`, balances and settlements are in. */
+  /** The EVENT's currency: what `totalCents`, balances and settlements are in. */
   currency: string
+  /**
+   * Whether anything in this budget went through a conversion (#59) — a
+   * receipt in another currency, or a residual left on `Rounding` by a
+   * currency change.
+   *
+   * It is what lets the screen say, once and as a statement of fact, that the
+   * totals are close rather than exact: converted at the rate recorded with
+   * each entry, the way a card receipt says "rate at time of purchase". A
+   * budget spent entirely in the trip's own currency is exact, and says
+   * nothing.
+   */
+  approximate: boolean
 }> {
   const db = useDb()
-  const baseCurrency = await instanceBaseCurrency()
+  const [eventRow] = await db
+    .select({ currency: tables.event.currency })
+    .from(tables.event)
+    .where(eq(tables.event.id, eventId))
+    .limit(1)
+  if (!eventRow) throw createError({ statusCode: 404, message: 'Event not found' })
+  const baseCurrency = eventRow.currency
   const rows = await db
     .select({
       expense: tables.expense,
@@ -812,6 +967,9 @@ export async function loadBudget(eventId: string): Promise<{
       amountBaseCents: r.amountBaseCents,
       baseCurrency: r.baseCurrency,
       fxRate: trimDecimal(r.fxRate),
+      fxRateSource: r.fxRateSource,
+      statedAmountCents: r.statedAmountCents,
+      statedCurrency: r.statedCurrency,
       splitMode: r.splitMode,
       paidByName: r.paidByName,
       paidByEmail: r.paidByEmail,
@@ -841,26 +999,48 @@ export async function loadBudget(eventId: string): Promise<{
     settlements: suggestSettlements(balances),
     accounts,
     totalCents: computeTotalCents(allLines),
-    currency: baseCurrency
+    currency: baseCurrency,
+    // A conversion happened, or a currency change left cents on `Rounding`.
+    // Computed from the rows rather than from a flag somebody has to set: an
+    // entry recorded in the trip's own currency at rate 1 is exact, and a
+    // budget made only of those says nothing about approximation.
+    //
+    // THE RATE, NOT THE TWO CURRENCY CODES. `currency !== baseCurrency` is what
+    // this said first, and it is false on exactly the most approximate budget
+    // there is: a trip of EUR receipts moved to EUR, where every figure is a
+    // chained conversion of what the payers stated, every code matches, and the
+    // residual is zero so no `Rounding` line exists either. Both disjuncts were
+    // false and the screen said nothing (#59 review). See
+    // `shared/utils/conversion.ts`, which the card reads too.
+    approximate: expenses.some(wasConverted)
+      || accounts.some(a => a.kind === 'rounding' && a.lineCount > 0)
   }
 }
 
 /**
- * What the expense form shows before anything is saved: the instance base
- * currency, and today's rate into it if one can be had.
+ * What the expense form shows before anything is saved: today's rate into the
+ * currency it is about to be recorded in, if one can be had.
  *
- * `rate: null` is an ordinary answer — the currency is not on the ECB's list,
- * the instance has no outbound network, frankfurter is down. The form then asks
- * for the rate by hand, and the write accepts it. Nothing about recording an
- * expense waits on this call succeeding.
+ * `into` is the TRIP's currency (#59) and the form passes it, because that is
+ * what the expense will be converted into; it falls back to the instance
+ * default so a caller with no trip in hand still gets an answer.
+ *
+ * A SUGGESTION AND NOTHING MORE. `rate: null` is an ordinary answer — the
+ * currency is not on the ECB's list, the instance has no outbound network,
+ * frankfurter is down — and even a rate that does come back is only a
+ * pre-fill: the person who paid knows what they paid, and the write takes
+ * either their rate or their out-of-pocket total over this.
  */
-export async function quoteExpenseRate(currency: string): Promise<{
+export async function quoteExpenseRate(currency: string, into?: string): Promise<{
   currency: string
   baseCurrency: string
   rate: string | null
   asOf: string | null
 }> {
-  const baseCurrency = await instanceBaseCurrency()
+  const baseCurrency = normaliseCurrency(into || await instanceBaseCurrency())
+  if (!isCurrencyCode(baseCurrency)) {
+    throw createError({ statusCode: 422, message: 'A currency is a three-letter code, like CHF or EUR.' })
+  }
   const from = normaliseCurrency(currency || baseCurrency)
   if (!isCurrencyCode(from)) {
     throw createError({ statusCode: 422, message: 'A currency is a three-letter code, like CHF or EUR.' })
@@ -888,43 +1068,140 @@ export interface ParticipantActor {
 }
 
 /**
- * Settle the conversion for one expense: which base currency it is being
- * recorded against, at what rate, and what that makes it worth.
+ * Settle the conversion for one expense: which currency it is being recorded
+ * against, at what rate, what that makes it worth, and who said so.
+ *
+ * THREE WAYS IN, in the order they override each other (#59):
+ *
+ *   targetAmountCents   what the payer was actually out of pocket. Verbatim;
+ *                       the rate is derived from it for the record.
+ *   fxRate              the rate, typed. Nothing is fetched.
+ *   (neither)           frankfurter, once, with a 2.5s ceiling.
+ *
+ * The first two are the point rather than the edge case: the fetched rate is a
+ * mid-market number and a bank charges `price × rate × fee`, so the person
+ * reading their statement is the one holding the true figure. Both are recorded
+ * as `manual` and neither is ever silently replaced.
  *
  * The outbound fetch happens HERE — before the transaction opens, and only when
- * there is something to convert. An expense in the base currency never leaves
- * the process, which is the ordinary case on an instance whose friends all
- * spend the same money; an expense carrying its own `fxRate` never leaves the
- * process either, which is the manual override AND the answer for an instance
- * with no outbound network. Only the remaining case asks frankfurter, once,
- * with a 2.5s ceiling — and when that comes back empty the write is refused
- * with a message naming the field to fill in rather than being recorded at a
- * rate nobody chose.
+ * there is something to convert and nobody has said what it was. An expense in
+ * the trip's own currency never leaves the process, which is the ordinary case;
+ * neither does one carrying its own rate or total, which is also the whole
+ * answer for an instance with no outbound network. When a needed fetch comes
+ * back empty the write is refused with a message naming the fields to fill in
+ * rather than being recorded at a rate nobody chose.
  */
-async function resolveConversion(input: AddExpenseInput): Promise<{ currency: string, baseCurrency: string, fxRate: string, amountBaseCents: number }> {
-  const baseCurrency = await instanceBaseCurrency()
+async function resolveConversion(input: AddExpenseInput, eventCurrency: string): Promise<{
+  currency: string
+  baseCurrency: string
+  fxRate: string
+  fxRateSource: FxRateSource
+  amountBaseCents: number
+  /**
+   * What the person said, as they said it — the figure and the currency it was
+   * stated in (#59 review). `null` on a `fetched` row, where nobody said
+   * anything, and kept beside the derived amount rather than instead of it so a
+   * recomputation cannot destroy it.
+   */
+  statedAmountCents: number | null
+  statedCurrency: string | null
+}> {
+  const baseCurrency = eventCurrency
   const currency = normaliseCurrency(input.currency ?? baseCurrency)
   if (!isCurrencyCode(currency)) {
     throw createError({ statusCode: 422, message: 'A currency is a three-letter code, like CHF or EUR.' })
   }
 
-  let fxRate: string
-  if (currency === baseCurrency) {
-    fxRate = '1'
-  } else if (input.fxRate !== undefined && input.fxRate !== null && `${input.fxRate}`.trim() !== '') {
-    fxRate = `${input.fxRate}`.trim()
-  } else {
-    const quote = await fetchFxRate(currency, baseCurrency)
-    if (!quote) {
-      throw createError({
-        statusCode: 422,
-        message: `No ${currency} → ${baseCurrency} rate could be fetched just now. Enter the rate yourself and the expense will be recorded with it.`
-      })
-    }
-    fxRate = quote.rate
+  const statedRate = input.fxRate !== undefined && input.fxRate !== null && `${input.fxRate}`.trim() !== ''
+    ? `${input.fxRate}`.trim()
+    : null
+  const statedTarget = input.targetAmountCents ?? null
+  if (statedRate !== null && statedTarget !== null) {
+    throw createError({
+      statusCode: 422,
+      message: 'Give the rate you were charged OR what you actually paid, not both — they can disagree, and there is no honest way to pick one.'
+    })
+  }
+  if (statedTarget !== null && (!Number.isInteger(statedTarget) || statedTarget <= 0)) {
+    throw createError({ statusCode: 422, message: 'What you actually paid must be a positive number of cents' })
+  }
+  if (statedTarget !== null && statedTarget > MAX_CENTS) {
+    throw createError({ statusCode: 422, message: 'That is more money than one expense can hold' })
   }
 
-  return { currency, baseCurrency, fxRate, amountBaseCents: convertCents(input.amountCents, fxRate) }
+  // Nothing was converted, so there is nothing for anybody to override. Saying
+  // so beats accepting a rate of 1.4 on a CHF receipt of a CHF trip and
+  // recording a number the person will never be able to explain.
+  if (currency === baseCurrency) {
+    if (statedRate !== null && statedRate !== '1') {
+      throw createError({
+        statusCode: 422,
+        message: `This was spent in ${baseCurrency}, which is what this trip settles in — there is no rate to apply.`
+      })
+    }
+    if (statedTarget !== null && statedTarget !== input.amountCents) {
+      throw createError({
+        statusCode: 422,
+        message: `This was spent in ${baseCurrency}, which is what this trip settles in — what was paid is the amount itself.`
+      })
+    }
+    return {
+      currency,
+      baseCurrency,
+      fxRate: '1',
+      fxRateSource: 'fetched',
+      amountBaseCents: input.amountCents,
+      statedAmountCents: null,
+      statedCurrency: null
+    }
+  }
+
+  if (statedTarget !== null) {
+    return {
+      currency,
+      baseCurrency,
+      fxRate: deriveRate(input.amountCents, statedTarget),
+      fxRateSource: 'manual',
+      amountBaseCents: statedTarget,
+      statedAmountCents: statedTarget,
+      statedCurrency: baseCurrency
+    }
+  }
+
+  if (statedRate !== null) {
+    // A typed RATE is a statement about money too: the person asserted that
+    // this receipt cost them this much, and multiplying it out is arithmetic,
+    // not a lookup. So the product is recorded as stated — the two manual forms
+    // are kept the same way because the question a later reader asks of either
+    // is the same one.
+    const stated = convertCents(input.amountCents, statedRate)
+    return {
+      currency,
+      baseCurrency,
+      fxRate: statedRate,
+      fxRateSource: 'manual',
+      amountBaseCents: stated,
+      statedAmountCents: stated,
+      statedCurrency: baseCurrency
+    }
+  }
+
+  const quote = await fetchFxRate(currency, baseCurrency)
+  if (!quote) {
+    throw createError({
+      statusCode: 422,
+      message: `No ${currency} → ${baseCurrency} rate could be fetched just now. Enter the rate yourself, or what you were actually charged, and the expense will be recorded with it.`
+    })
+  }
+  return {
+    currency,
+    baseCurrency,
+    fxRate: quote.rate,
+    fxRateSource: 'fetched',
+    amountBaseCents: convertCents(input.amountCents, quote.rate),
+    statedAmountCents: null,
+    statedCurrency: null
+  }
 }
 
 /**
@@ -946,23 +1223,46 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
   }
   const splitMode = input.splitMode ?? 'even'
   const resolved = resolveShares(input.amountCents, input.participants, splitMode)
-  const { currency, baseCurrency, fxRate, amountBaseCents } = await resolveConversion(input)
+  const [ev] = await useDb()
+    .select({ currency: tables.event.currency })
+    .from(tables.event)
+    .where(eq(tables.event.id, eventId))
+    .limit(1)
+  if (!ev) throw createError({ statusCode: 404, message: 'Event not found' })
+  const {
+    currency,
+    baseCurrency,
+    fxRate,
+    fxRateSource,
+    amountBaseCents,
+    statedAmountCents,
+    statedCurrency
+  } = await resolveConversion(input, ev.currency)
   const expenseId = createId()
   const db = useDb()
 
   await db.transaction(async (tx) => {
-    // The base was read (and the rate fetched) OUTSIDE this transaction, because
-    // an outbound HTTP call must never be made with one open. Re-read it here
-    // and refuse if it moved: without this, an expense recorded while the owner
-    // is changing the instance base lands stamped with the old one — which is
-    // this issue's bug, in one row, produced by a race rather than by the
-    // arithmetic. See the note in `setInstanceBaseCurrency` for the half of
-    // this window that a re-read alone cannot close.
-    const current = await baseCurrencyWithin(tx)
-    if (current !== baseCurrency) {
+    // The trip's currency was read (and the rate fetched) OUTSIDE this
+    // transaction, because an outbound HTTP call must never be made with one
+    // open. Take the row's lock here and re-read it: without this, an expense
+    // recorded while a planner is changing the trip's currency lands stamped
+    // with the old one and is missed by the recompute that is running beside
+    // it — a mis-stamped row produced by a race rather than by the arithmetic.
+    //
+    // `for update` and not merely a re-read, because `setEventCurrency` takes
+    // the same lock: the two operations are then ordered rather than
+    // interleaved, which is the half of the window #57 had to leave open on the
+    // instance setting and this shape closes.
+    const [held] = await tx
+      .select({ currency: tables.event.currency })
+      .from(tables.event)
+      .where(eq(tables.event.id, eventId))
+      .for('update')
+      .limit(1)
+    if (held?.currency !== baseCurrency) {
       throw createError({
         statusCode: 409,
-        message: 'The instance base currency changed while this was being recorded. Try again.'
+        message: `This trip's currency changed to ${held?.currency} while the expense was being recorded. Try again.`
       })
     }
 
@@ -1003,7 +1303,10 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
       currency,
       baseCurrency,
       fxRate,
+      fxRateSource,
       amountBaseCents,
+      statedAmountCents,
+      statedCurrency,
       splitMode,
       paidByName: input.paidByName,
       paidByEmail: input.paidByEmail.toLowerCase(),

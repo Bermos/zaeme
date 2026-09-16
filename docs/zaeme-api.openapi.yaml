@@ -850,14 +850,20 @@ paths:
         lines, the event's accounts, per-person balances (paid vs owed), and the
         suggested "who pays whom" settlement plan. Amounts are integer cents.
         Each expense carries BOTH what was spent (amountCents in its own
-        currency) and what it settles for (amountBaseCents in the instance base
+        currency) and what it settles for (amountBaseCents in THE EVENT'S
         currency, frozen at the fxRate it was recorded at); `currency` on the
-        budget is the instance base currency, and totalCents, every balance and
-        every settlement are in it.
+        budget is the event's currency, and totalCents, every balance and every
+        settlement are in it. That was the INSTANCE's base currency until #59
+        moved it to the trip; the field names are unchanged.
 
         The budget is a double-entry ledger: each expense is an entry whose
         lines post signed amounts to member, category and rounding accounts and
         sum to zero. totalCents is the sum of debits into category accounts.
+
+        `approximate` says whether anything here went through a conversion. When
+        it is true the figures are converted at the rate recorded with each
+        entry, so they are close rather than exact — show it as a statement of
+        fact, the way a card receipt says "rate at time of purchase".
       responses:
         '200':
           description: Expenses, balances and the settlement plan.
@@ -886,11 +892,16 @@ paths:
         leaves somebody out of this one). It is optional and defaults to even,
         which is exactly what this operation did before it existed.
 
-        An expense in a currency other than the instance base is converted ONCE,
-        at write time, and the rate is frozen onto it — history never moves when
-        the market does. Pass fxRate to pin that conversion yourself; omit it and
-        the rate is fetched. If no rate can be fetched the call answers 422 and
-        names fxRate, rather than recording money at a rate nobody chose.
+        An expense in a currency other than the event's is converted ONCE, at
+        write time, and the rate is frozen onto it — history never moves when the
+        market does. The fetched rate is a SUGGESTION: pass fxRate to pin the
+        conversion yourself, or targetAmountCents to state what the payer was
+        actually out of pocket, which is what the group splits when a bank
+        charged price x rate x fee. Either one skips the fetch entirely and is
+        recorded as fxRateSource "manual"; the two together are refused, because
+        they can disagree. If no rate can be fetched and neither was given the
+        call answers 422 and names both fields, rather than recording money at a
+        rate nobody chose.
 
         The expense is recorded as a balanced journal entry: the payer is
         credited, the category account is debited what it cost and credited what
@@ -934,18 +945,32 @@ paths:
                   minLength: 3
                   maxLength: 3
                   description: >-
-                    What was actually spent. Defaults to the instance base currency.
+                    What was actually spent. Defaults to the event's own currency.
                 fxRate:
                   type: string
                   pattern: '^[0-9]{1,9}(\.[0-9]{1,10})?$'
                   description: >-
                     Decimal string; amountCents x fxRate = amountBaseCents exactly.
                     Supply it to pin the conversion (and to skip the rate fetch
-                    entirely); omit it and today's rate is fetched. Ignored when
-                    currency is already the instance base, where the rate is always 1.
-                    At most 10 decimal places, which is what the column stores: a
-                    longer rate would be rounded on the way in while amountBaseCents
-                    had been computed at full precision, breaking the equality above.
+                    entirely); omit it and today's rate is fetched. Refused beside
+                    targetAmountCents, and refused when currency is already the
+                    event's, where the rate is always 1 and there is nothing to
+                    apply. At most 10 decimal places, which is what the column
+                    stores: a longer rate would be rounded on the way in while
+                    amountBaseCents had been computed at full precision, breaking
+                    the equality above.
+                targetAmountCents:
+                  type: integer
+                  minimum: 1
+                  description: >-
+                    What the payer was ACTUALLY out of pocket, in the event's
+                    currency. The other override, and the one somebody reading a
+                    card statement reaches for: a bank charging price x rate x fee
+                    hands over a figure no mid-market rate reproduces, and that
+                    figure is what the group splits. Given it, nothing is fetched,
+                    amountBaseCents is exactly this, fxRate carries the EFFECTIVE
+                    rate derived from the pair, and fxRateSource is "manual".
+                    Refused beside fxRate.
                 note: { type: string, maxLength: 500 }
                 paidByName: { type: string, minLength: 1, maxLength: 200 }
                 paidByEmail: { type: string, format: email }
@@ -2192,12 +2217,18 @@ components:
 
     Expense:
       type: object
-      required: [id, title, amountCents, currency, amountBaseCents, baseCurrency, fxRate, shares, lines]
+      required: [id, title, amountCents, currency, amountBaseCents, baseCurrency, fxRate, fxRateSource, shares, lines]
       description: >-
         One JOURNAL ENTRY. Two amounts, always: amountCents/currency is what was
-        handed over; amountBaseCents/baseCurrency is what it settles for,
-        converted once at fxRate when it was recorded and frozen there. Only the
-        base figures are ever summed.
+        handed over; amountBaseCents/baseCurrency is what it settles for IN THE
+        EVENT'S CURRENCY, converted once at fxRate when it was recorded and
+        frozen there. Only the base figures are ever summed.
+
+        baseCurrency named the INSTANCE's base currency before #59 and names the
+        event's afterwards. The field did not move and neither did its type; what
+        it is a property OF did. On an instance whose trips all settle in the same
+        currency — which is the common case, since a new trip takes that setting
+        as its default — the two answers are identical.
 
         `lines` is the entry itself — every posting, credits included, summing to
         zero. `shares` is the member DEBIT lines of that same entry, the shape
@@ -2226,12 +2257,50 @@ components:
           description: 'As settled, in `baseCurrency`. The only figure balances are computed from.'
         baseCurrency:
           type: string
-          description: 'The instance base currency at the moment this expense was recorded.'
+          description: >-
+            The EVENT'S currency at the moment this expense was recorded (the
+            instance's, before #59).
         fxRate:
           type: string
           description: >-
             Decimal string, frozen at write time: amountCents x fxRate = amountBaseCents.
-            "1" whenever currency is already baseCurrency.
+            When somebody stated the out-of-pocket total instead of a rate, this is
+            the EFFECTIVE rate derived from the pair — the mid-market rate plus
+            whatever the bank took — and amountBaseCents is the stated figure rather
+            than a product of this.
+
+            "1" means NOTHING WAS APPLIED, and it is the only reliable way to ask
+            whether this entry was converted. It is NOT 1 merely because currency
+            equals baseCurrency: a stated figure survives a trip moving to the
+            currency its own receipt is in, so such a row reads currency EUR,
+            baseCurrency EUR, fxRate 1.0366972477, with amountCents and
+            amountBaseCents nine francs apart and every balance built from the
+            second. A client that branches on currency === baseCurrency to decide
+            "no conversion happened" renders the wrong money.
+        fxRateSource:
+          type: string
+          enum: [fetched, manual]
+          description: >-
+            Where that rate came from. "manual" means a PERSON stated it — the rate
+            itself, or what their bank actually took off them — so it is the row
+            somebody checked against a statement, and changing the trip's currency
+            carries that figure across rather than re-deriving it from the receipt.
+            "fetched" means the instance derived it: a lookup, an identity
+            conversion, or a recompute after the trip's currency changed.
+        statedAmountCents:
+          type: [integer, 'null']
+          description: >-
+            What the payer SAID they were out of pocket, in statedCurrency, exactly
+            as stated. Null on a fetched row. amountBaseCents is re-derived by every
+            change of the trip's currency; this is not, so when the two differ the
+            settled figure is a chained conversion of what somebody typed rather
+            than the figure itself. Show both, or "checked against a statement"
+            attributes arithmetic to a person.
+        statedCurrency:
+          type: [string, 'null']
+          description: >-
+            The currency statedAmountCents was stated in — the trip's currency at
+            the time. Null on a fetched row.
         splitMode:
           type: string
           enum: [even, exact, percentage, weight]
@@ -2277,7 +2346,11 @@ components:
 
             A rounding line appears when an entry would not otherwise balance.
             Nothing recorded through addTripExpense produces one: the shares are
-            converted as a group, so they sum to amountBaseCents exactly.
+            converted as a group, so they sum to amountBaseCents exactly. What
+            does produce one is changing the trip's currency, where each person's
+            existing debt is re-expressed on its own — converting eleven numbers
+            at one rate does not give the same answer as converting their sum, and
+            the difference lands here instead of on whoever is owed most.
           items:
             type: object
             required: [accountId, accountName, accountKind, amountCents, amountBaseCents]
@@ -2297,7 +2370,8 @@ components:
       description: >-
         A DOUBLE-ENTRY LEDGER. All amounts are integer cents; there is no
         floating point anywhere in this payload. Everything outside the expense
-        list is denominated in `currency`, the instance base currency.
+        list is denominated in `currency`, THE EVENT'S currency (the instance's,
+        before #59).
 
         Every figure here is a sum over accounts. totalCents is the sum of
         debits into category accounts, so a member-to-member transfer — which
@@ -2307,8 +2381,16 @@ components:
         currency:
           type: string
           description: >-
-            The INSTANCE BASE CURRENCY — what totalCents, every balance and every
+            THE EVENT'S CURRENCY — what totalCents, every balance and every
             settlement below are in. Not the currency of any particular expense.
+        approximate:
+          type: boolean
+          description: >-
+            True when anything in this budget went through a conversion, or when
+            changing the trip's currency left cents on the Rounding account.
+            Converted figures are computed at the rate recorded with each entry,
+            so they are close rather than exact. Say so once, as a statement of
+            fact — not a warning, and not a modal.
         totalCents:
           type: integer
           description: >-

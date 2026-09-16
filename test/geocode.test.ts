@@ -984,13 +984,19 @@ describe('the cache is a table, and the schema says the rules', () => {
     expect(update).toMatch(/assertOsmRefFree\(ev\.id, ref, placeId\)/)
   })
 
-  it('adds exactly one migration, and it carries no foreign key', () => {
+  it('is one migration, and it carries no foreign key', () => {
     // The 42830 trap `0007_useful_loa.sql` documents: drizzle-kit emits every
     // constraint before every index, so a composite foreign key added here
     // would abort the whole migration — and with it the deploy.
+    //
+    // This used to also assert that NOTHING followed 0008, which was true on
+    // the branch that wrote it and is a countdown everywhere else: the next
+    // migration to land makes it red for a reason that has nothing to do with
+    // the geocode cache (#59 was the one that did). The claim worth keeping is
+    // about THIS migration — one file, no foreign key — so that is what is
+    // asserted.
     const files = readdirSync(join(ROOT, 'server', 'database', 'migrations')).filter(f => f.endsWith('.sql'))
     expect(files.filter(f => f.startsWith('0008')).length).toBe(1)
-    expect(files.filter(f => /^00(09|1\d)/.test(f))).toEqual([])
     expect(codeOnly(migration)).not.toMatch(/FOREIGN KEY/i)
   })
 })

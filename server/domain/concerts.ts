@@ -4,6 +4,7 @@ import { createError } from 'h3'
 import { tables, useDb } from './db'
 import { addPlanner } from './permissions'
 import { generateUniqueSlug } from './slugify'
+import { instanceBaseCurrency } from './instance-settings'
 import { toDate } from './events-data'
 import { normalisePosterUrl } from './poster'
 
@@ -113,11 +114,16 @@ export async function publishConcert(
 
   const id = createId()
   const slug = await generateUniqueSlug(input.title)
+  // Every creation path sets the event's currency (#59) — an account that only
+  // exists on three of four paths is worse than none, and so is a trip whose
+  // budget cannot say what it is denominated in.
+  const currency = await instanceBaseCurrency()
   await db.transaction(async (tx) => {
     await tx.insert(tables.event).values({
       id,
       slug,
       type: 'concert',
+      currency,
       // Created already published: that is what puts it on `/concerts`. This
       // deliberately does NOT go through `setEventStatus` — there are no invites
       // to send, so there is no dispatch to fire.
