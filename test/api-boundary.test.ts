@@ -485,9 +485,13 @@ describe('the account surface is a session, and the invite link never becomes on
     expect(updates.length).toBeGreaterThan(0)
     expect([...new Set(updates)]).toEqual(['.update(tables.media)'])
 
-    // …and a ticket may not be one. A ticket is visible to the attendee it
-    // belongs to and to planners; a receipt travels in a budget the whole event
-    // can read, so pinning one would publish it through a side door.
+    // …and a ticket may not be one — but NOT for the reason this comment used
+    // to give. It said a ticket is visible only to the attendee it belongs to,
+    // so pinning one would publish it through a side door; since #37 the whole
+    // event reads every ticket already, and that argument is spent. What holds
+    // the list at two is meaning: a receipt is what you were charged and a
+    // ticket is what you were issued. The assertion is unchanged; read
+    // `RECEIPT_TYPES` in `server/domain/media.ts` before widening it.
     expect(media).toMatch(/export const RECEIPT_TYPES: readonly MediaType\[\] = \['photo', 'document'\]/)
   })
 

@@ -3,10 +3,16 @@ import type { TicketDetailFields } from '#shared/utils/ticket-detail'
 
 /**
  * The host's media manager: the shared gallery plus the papers — documents
- * (reservations, itineraries) everyone sees, and tickets assigned per
- * attendee (each guest only ever sees their own). Wraps MediaGallery with the
- * host endpoints and adds ticket assignment, the ticket's own details (#35)
- * and delete.
+ * (reservations, itineraries) everyone sees, and tickets assigned per attendee.
+ * Wraps MediaGallery with the host endpoints and adds ticket assignment, the
+ * ticket's own details (#35) and delete.
+ *
+ * ASSIGNMENT IS A LABEL, NOT A LOCK, SINCE #37. It used to be both: a guest saw
+ * the tickets matched to their address and no others, which left four friends
+ * at a barrier with one working phone unable to reach three of their own
+ * tickets. Everyone on the event now sees every ticket and the assignment says
+ * whose it is, so what a planner does here is tell the group who is on what —
+ * still worth getting right, and no longer the thing keeping anybody out.
  */
 interface MediaItem {
   id: string
@@ -252,10 +258,16 @@ const zoneLine = computed(() => zoneNote(props.timezone))
 
 <template>
   <div class="flex flex-col gap-4">
+    <!--
+      No tickets are handed to the gallery here — this card renders its own,
+      with the assignment controls — so there is nobody for it to mark them for
+      and `:viewer-email` is null (#37).
+    -->
     <MediaGallery
       :gallery="gallery"
       :documents="documents"
       :tickets="[]"
+      :viewer-email="null"
       :timezone="timezone"
       :presign-url="`/api/host/events/${slug}/media/presign`"
       :confirm-url="`/api/host/events/${slug}/media/confirm`"
@@ -263,7 +275,7 @@ const zoneLine = computed(() => zoneNote(props.timezone))
       @updated="refresh"
     />
 
-    <!-- Tickets: assigned per attendee, guests only see their own -->
+    <!-- Tickets: assigned per attendee; everyone on the event sees them (#37) -->
     <UCard v-if="tickets.length">
       <template #header>
         <div>
@@ -271,7 +283,8 @@ const zoneLine = computed(() => zoneNote(props.timezone))
             🎟️ Tickets
           </p>
           <p class="text-sm text-muted">
-            Assign each ticket to its attendee — they'll see only theirs.
+            Say who each ticket is for — everyone on the trip can see them all,
+            so a friend with a working phone can hand one over at the barrier.
           </p>
         </div>
       </template>

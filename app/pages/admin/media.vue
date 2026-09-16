@@ -155,11 +155,14 @@ const visual = (t: string) => t === 'photo' || t === 'video'
               class="font-medium"
             >{{ item.fileName }}</span>
             <span class="text-muted"> · {{ item.eventTitle }}</span>
-            <!-- A ticket nobody has been given is one nobody can see, which is
-                 what this badge is for. It reads `assigneeCount === 0` rather
-                 than the null `assignedRsvpId` used to be (#36) — and the
-                 second badge is the state that column could not express at
-                 all: one ticket covering a pair, a family, a booking for six. -->
+            <!-- A ticket nobody has been given. That used to mean one nobody
+                 could see; since #37 everybody on the event sees it and what is
+                 missing is the NAME against it, so this badge is a loose end to
+                 tie up rather than a warning that a file is stranded. It reads
+                 `assigneeCount === 0` rather than the null `assignedRsvpId`
+                 used to be (#36) — and the second badge is the state that
+                 column could not express at all: one ticket covering a pair, a
+                 family, a booking for six. -->
             <UBadge
               v-if="item.type === 'ticket' && item.assigneeCount === 0"
               size="sm"

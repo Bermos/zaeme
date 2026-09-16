@@ -15,7 +15,18 @@ export function assertStorageConfigured(): void {
   }
 }
 
-export async function signMediaItems(items: MediaItemView[]): Promise<SignedMediaItem[]> {
+/**
+ * GENERIC IN THE ITEM, not in `MediaItemView`, and that is load-bearing rather
+ * than tidy. The invite link's tickets carry two fields no other surface has —
+ * `mine` and `assignedTo` (#37) — and a signature fixed to `MediaItemView[]`
+ * would keep them at runtime (the spread copies everything) while ERASING them
+ * from the type on the way out. The card would then read `t.mine` off a type
+ * that does not have it, `nuxt typecheck` would refuse the binding, and the
+ * obvious way out is a cast — which is the #78 shape this repository has
+ * already shipped twice. The generic makes the wire shape and the type agree
+ * without anybody asserting anything.
+ */
+export async function signMediaItems<T extends MediaItemView>(items: T[]): Promise<Array<T & { url: string }>> {
   if (items.length === 0) return []
   assertStorageConfigured()
   const store = createObjectStore()

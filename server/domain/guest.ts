@@ -419,16 +419,23 @@ export async function guestPostMessage(token: string, body: string, identity: Gu
 const GUEST_UPLOAD_TYPES: MediaType[] = ['photo', 'video']
 
 /**
- * What this invite's holder may see: the gallery, the shared documents, and —
- * matched through the viewer's email — their own tickets. Storage keys only;
- * the app signs download URLs.
+ * What this invite's holder may see: the gallery, the shared documents, and
+ * EVERY ticket on the event, each marked as the viewer's or not (#37).
+ * Storage keys only; the app signs download URLs.
  *
- * "THEIR OWN" IS AN INTERSECTION, NOT AN EQUALITY (#36). A ticket is this
+ * THE EMAIL IS A MARKER, NOT A FILTER, AND THAT IS THE WHOLE OF #37. It used to
+ * decide which tickets came back, which read like a gate and was never one: the
+ * address is asserted by whoever holds the link and anybody can type anybody's.
+ * What it decides now is `mine` — which of these are yours — and the owner has
+ * said yes to the consequence: anyone holding the invite capability URL reaches
+ * every ticket on the event. "Mine" and "All" are two buttons over one
+ * response, not two permissions.
+ *
+ * "MINE" IS STILL AN INTERSECTION, NOT AN EQUALITY (#36): a ticket is this
  * viewer's if they are ANY of its assignees, so a pair fare bought for two
- * people is on both their screens and neither of them has to be "the" one it
- * belongs to. `listMediaForViewer` in `server/domain/media.ts` is where that
- * rule is written; this function's job is the credential, and the email is
- * still the whole of the identity behind it.
+ * people is marked for both of them. `listMediaForViewer` in
+ * `server/domain/media.ts` is where that rule is written; this function's job
+ * is the credential, and the credential is the token and nothing else.
  */
 export async function guestListMedia(token: string, viewerEmail: string | null) {
   const { event: ev } = await resolveInviteToken(token)
