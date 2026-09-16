@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { setEventCurrencyAsPlanner } from '#server/domain/index'
 import { requireGuestUser } from '#server/utils/auth'
+import { signBudgetReceipts } from '#server/utils/media-sign'
 
 /**
  * Change what this trip settles in, and recompute every amount on it (#59).
@@ -34,5 +35,6 @@ export default defineEventHandler(async (e) => {
   const user = await requireGuestUser(e)
   const slug = getRouterParam(e, 'slug')!
   const body = await readValidatedBody(e, bodySchema.parse)
-  return setEventCurrencyAsPlanner(user.id, slug, body)
+  const { change, budget } = await setEventCurrencyAsPlanner(user.id, slug, body)
+  return { change, budget: await signBudgetReceipts(budget) }
 })

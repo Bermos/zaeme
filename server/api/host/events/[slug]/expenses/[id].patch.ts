@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { updateExpenseAsPlanner } from '#server/domain/index'
 import { requireGuestUser } from '#server/utils/auth'
+import { signBudgetReceipts } from '#server/utils/media-sign'
 
 /**
  * Correct an expense as the host (owner/co-planner only) — #27.
@@ -38,5 +39,5 @@ export default defineEventHandler(async (e) => {
   const id = getRouterParam(e, 'id')!
   const body = await readValidatedBody(e, bodySchema.parse)
   const budget = await updateExpenseAsPlanner(user.id, slug, id, body)
-  return { budget }
+  return { budget: await signBudgetReceipts(budget) }
 })

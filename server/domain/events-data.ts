@@ -196,6 +196,9 @@ export async function listMedia(userId: string, slug: string) {
       takenAt: tables.media.takenAt,
       assignedRsvpId: tables.media.assignedRsvpId,
       timelineItemId: tables.media.timelineItemId,
+      // The expense this item is the receipt for (#29). An id, not a URL: the
+      // bytes stay in zäme and are served to guests there.
+      expenseId: tables.media.expenseId,
       createdAt: tables.media.createdAt
     })
     .from(tables.media)

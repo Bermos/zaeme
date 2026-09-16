@@ -138,6 +138,10 @@ export function mediaItem(row: object) {
     takenAt: r.takenAt ?? null,
     assignedRsvpId: r.assignedRsvpId ?? null,
     timelineItemId: r.timelineItemId ?? null,
+    // The expense this item is the receipt for (#29). Additive, and an id
+    // rather than a URL for the same reason as everything else here: the bytes
+    // stay in zäme and are served to guests there.
+    expenseId: r.expenseId ?? null,
     createdAt: r.createdAt
   }
 }

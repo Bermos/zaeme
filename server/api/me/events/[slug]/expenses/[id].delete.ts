@@ -1,5 +1,6 @@
 import { removeExpenseAsParticipant } from '#server/domain/index'
 import { requireGuestUser } from '#server/utils/auth'
+import { signBudgetReceipts } from '#server/utils/media-sign'
 
 /**
  * Remove an expense you recorded or paid — or any of them, if you plan the
@@ -11,5 +12,5 @@ export default defineEventHandler(async (e) => {
   const slug = getRouterParam(e, 'slug')!
   const id = getRouterParam(e, 'id')!
   const budget = await removeExpenseAsParticipant(user, slug, id)
-  return { budget }
+  return { budget: await signBudgetReceipts(budget) }
 })

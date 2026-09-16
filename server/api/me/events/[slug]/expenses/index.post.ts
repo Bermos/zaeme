@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { addExpenseAsParticipant } from '#server/domain/index'
 import { requireGuestUser } from '#server/utils/auth'
+import { signBudgetReceipts } from '#server/utils/media-sign'
 
 /**
  * Record an expense as a signed-in participant of the event (#48).
@@ -64,5 +65,5 @@ export default defineEventHandler(async (e) => {
   const slug = getRouterParam(e, 'slug')!
   const body = await readValidatedBody(e, bodySchema.parse)
   const budget = await addExpenseAsParticipant(user, slug, body)
-  return { budget }
+  return { budget: await signBudgetReceipts(budget) }
 })

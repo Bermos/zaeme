@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { addExpenseAsPlanner } from '../../../../../domain/index'
 import { requireGuestUser } from '../../../../../utils/auth'
+import { signBudgetReceipts } from '../../../../../utils/media-sign'
 
 /** Record an expense as the host (owner/co-planner only). */
 const bodySchema = z.object({
@@ -51,5 +52,5 @@ export default defineEventHandler(async (e) => {
   const slug = getRouterParam(e, 'slug')!
   const body = await readValidatedBody(e, bodySchema.parse)
   const budget = await addExpenseAsPlanner(user.id, slug, body)
-  return { budget }
+  return { budget: await signBudgetReceipts(budget) }
 })
