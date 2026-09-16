@@ -3650,19 +3650,19 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
 
   if [ -n "${S3_BUCKET:-}${R2_BUCKET:-}" ]; then
     TSPDF='%PDF-1.4 two seats, one barcode, four phones and one battery.'
-    TSSIZE=${#TSPDF}
 
-    # `upload_media <type> <fileName> <mimeType> <body>` — presign, PUT, confirm,
-    # printing the media id. Four uploads in this block and the dance is the same
-    # every time; a copy per upload is four places for a typo to read as a
-    # feature being broken.
+    # `upload_media <type> <fileName> <mimeType> <body> [hostBase]` — presign,
+    # PUT, confirm, printing the media id. Five uploads in this block and the
+    # dance is the same every time; a copy per upload is five places for a typo
+    # to read as a feature being broken. `hostBase` defaults to this block's
+    # trip and is passed only by the concert below, which is a different event.
     upload_media() {
-      local pre mid
-      pre=$(body "${TSP[@]}" "${JSON[@]}" -X POST "$TSHOST/media/presign" \
+      local pre mid host=${5:-$TSHOST}
+      pre=$(body "${TSP[@]}" "${JSON[@]}" -X POST "$host/media/presign" \
         -d "{\"type\":\"$1\",\"fileName\":\"$2\",\"mimeType\":\"$3\",\"sizeBytes\":${#4}}")
       mid=$(json_field "$pre" mediaId)
       curl -s -o /dev/null -X PUT -H "content-type: $3" --data-binary "$4" "$(json_field "$pre" upload.url)"
-      body "${TSP[@]}" "${JSON[@]}" -X POST "$TSHOST/media/confirm" -d "{\"mediaId\":\"$mid\"}" > /dev/null
+      body "${TSP[@]}" "${JSON[@]}" -X POST "$host/media/confirm" -d "{\"mediaId\":\"$mid\"}" > /dev/null
       printf '%s' "$mid"
     }
 
@@ -3765,6 +3765,48 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
       | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
     equals "another trip's link reaches none of them" \
       "$(guest_bucket "$(body "$BASE/api/invites/$TSOTOK/media?email=ana-show-$SUFFIX@example.com")" tickets)" "none"
+
+    # --- ACCEPTANCE 5, AND IT IS NOT QUITE THE SENTENCE THE ISSUE WROTE.
+    #     "A concert exposes no uploaded tickets, because it has none" is a
+    #     claim about PRACTICE — a concert announces an external
+    #     `event.ticketUrl` and nobody uploads PDFs to one — and the issue asked
+    #     for it to be verified rather than assumed. It is NOT enforced
+    #     anywhere: `media/presign` accepts `ticket` for every event type, no
+    #     invite mint refuses a concert, and the block below uploads one to
+    #     prove it rather than arguing about it.
+    #
+    #     WHAT DOES HOLD, for every event type and not only for concerts, is
+    #     that NO PUBLIC SURFACE CARRIES MEDIA AT ALL — `PublicEventPage` has no
+    #     gallery, no documents and no tickets on it, and there is no public
+    #     media route. That is the property the criterion is actually
+    #     protecting, it is stronger than the one it names, and it is what these
+    #     lines pin: the widening cannot reach anybody who is not holding an
+    #     invite capability URL, whatever type the event is.
+    TSCON=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+      -d "{\"title\":\"Smoke show-all gig $SUFFIX\",\"type\":\"concert\",\"startsAt\":\"2038-05-05T19:00:00Z\"}" \
+      | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+    body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSCON/status" -d '{"status":"published"}' > /dev/null
+    TSCONTKT=$(upload_media ticket gig.pdf application/pdf "$TSPDF" "$BASE/api/host/events/$TSCON")
+    # THE ANTI-VACUITY GUARD, and it is the whole weight of the three
+    # `excludes` below: if the upload had failed, "the public page does not
+    # carry gig.pdf" would be true of a concert that has no gig.pdf anywhere.
+    equals "a concert really does take a ticket upload" \
+      "$(media_field "$(body "${AUTH[@]}" "$API/events/$TSCON/media")" "$TSCONTKT" fileName)" "gig.pdf"
+    TSCONPUB=$(body "$BASE/api/public/events/$TSCON")
+    contains "the gig's public page is really there"  "$TSCONPUB" "Smoke show-all gig $SUFFIX"
+    excludes "...and carries no uploaded ticket"      "$TSCONPUB" 'gig.pdf'
+    excludes "...nor any media bucket to put one in"  "$TSCONPUB" '"gallery"'
+    TSCONLIST=$(body "$BASE/api/public/events")
+    contains "the gig is on the open listing"         "$TSCONLIST" "Smoke show-all gig $SUFFIX"
+    excludes "...and its ticket file is not"          "$TSCONLIST" 'gig.pdf'
+    # AND THE HALF THE ISSUE ASSUMED: an invite link to the gig reaches that
+    # ticket exactly as a trip's does. Nothing makes a concert special, so if
+    # one should refuse the upload that is a decision for the owner and this is
+    # the line that goes red when they make it.
+    TSCONTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSCON/invites" -d '{"label":"Gig"}' \
+      | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    equals "...while an invite to the gig does reach it" \
+      "$(guest_bucket "$(body "$BASE/api/invites/$TSCONTOK/media")" tickets)" "$TSCONTKT"
 
     # --- AND THE OTHER TWO SURFACES DID NOT LEARN THIS PROJECTION. `mine` and
     #     `assignedTo` are the invite link's; `/api/v1` is Enterprise's contract

@@ -394,24 +394,24 @@ concurrency:
 # `scripts/ci-upgrade-check.mjs` compares what the previous release said about a
 # ticket against what this one says after the migration. 731 -> 787.
 #
-# EVERYONE'S TICKETS, ONE PHONE BETWEEN FOUR (#37) adds 38, and FOUR OF #36's
-# ABOVE CHANGED THEIR EXPECTED ANSWER rather than being removed — the count is
-# 42 new lines less those 4, and the distinction matters because what those four
-# assert is now the opposite sentence. The invite link used to return the
-# tickets matched to the `?email=` it was given; it returns EVERY ticket on the
-# event and marks which are the viewer's, so "the fourth attendee sees no
-# ticket" became "the fourth attendee sees whose it is". No migration, no
-# column, no per-event toggle: the owner's decision (D2, revised) is that this
-# was never a permission boundary.
+# EVERYONE'S TICKETS, ONE PHONE BETWEEN FOUR (#37) adds 45 — 52 new check lines
+# less the SEVEN ABOVE THAT CHANGED THEIR EXPECTED ANSWER rather than being
+# added or removed (three in #35's detail block, four in #36's assignment
+# block). The distinction matters because what those seven assert is now the
+# opposite sentence. The invite link used to return the tickets matched to the
+# `?email=` it was given; it returns EVERY ticket on the event and marks which
+# are the viewer's, so "the fourth attendee sees no ticket" became "the fourth
+# attendee sees whose it is". No migration, no column, no per-event toggle: the
+# owner's decision (D2, revised) is that this was never a permission boundary.
 #
-# FIVE OF THE 38 NEED NO BUCKET and are the half that says the CREDENTIAL did
+# FIVE OF THE 45 NEED NO BUCKET and are the half that says the CREDENTIAL did
 # not move with the behaviour: a made-up token is a 404 with no credential, with
 # an owner cookie and with the service token alike, a real one answers with no
 # identity at all, and a malformed `?email=` is still a 400 — which is what says
 # the parameter is still being read rather than ignored now that it no longer
 # filters.
 #
-# THE OTHER 33 NEED AN UPLOAD and skip as ONE line without `S3_*`, like the #35
+# THE OTHER 40 NEED AN UPLOAD and skip as ONE line without `S3_*`, like the #35
 # and #36 blocks above; this job fails on any `skip` at all. Their fixture is
 # built around the wrong answers rather than around thoroughness: THREE people
 # and TWO tickets, where the third person is on neither and the second ticket is
@@ -433,18 +433,28 @@ concurrency:
 # a link to a DIFFERENT trip reaches none of these. "Every ticket" means every
 # ticket on this event, and the difference is one dropped `where event_id`.
 #
-# WHAT THESE 38 CANNOT SEE is the two buttons, for the reason #35's 52 could not
+# SEVEN ARE THE CONCERT, which the issue asked to be VERIFIED rather than
+# assumed: "a concert exposes no uploaded tickets, because it has none" is a
+# claim about practice and is enforced nowhere — `media/presign` takes a
+# `ticket` for every event type. So the block uploads one to a published
+# concert and pins the property that DOES hold, for every type rather than only
+# for gigs: no public surface carries media at all, so the widening cannot
+# reach anybody who is not holding an invite capability URL. The upload is
+# asserted on `/api/v1` first, because "the public page does not carry gig.pdf"
+# is true of a concert whose upload silently failed.
+#
+# WHAT THESE 45 CANNOT SEE is the two buttons, for the reason #35's 52 could not
 # see a seat number: the ticket list is fetched by the BROWSER, so no SSR'd HTML
 # carries it and nothing here can watch `Mine` render an empty box instead of a
 # sentence. That half is `test/ticket-scope.test.ts` — the pure rule executed,
 # plus the bindings in `MediaGallery.vue` pinned structurally, which is the only
-# thing in this repository that catches a deleted `<p>`. 787 -> 825.
+# thing in this repository that catches a deleted `<p>`. 787 -> 832.
 #
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '825'
+  MIN_SMOKE_CHECKS: '832'
 
 jobs:
   ci:
