@@ -164,10 +164,28 @@ const hasAnything = computed(() =>
  * MINE OR EVERYBODY'S (#37). `mine` is the default because it is the right
  * answer on the way in — you open the link to find your own ticket — and `all`
  * is the answer at the barrier, when three of the four phones are flat.
+ *
+ * THE DEFAULT IS IMPORTED, NOT TYPED. `ref<TicketScope>('all')` is one word
+ * away from here, deletes the acceptance criterion that `Mine` is the default,
+ * and leaves eslint, `nuxt typecheck` and every test green — a card that looks
+ * right and opens on somebody else's tickets. `DEFAULT_TICKET_SCOPE` is a value
+ * a test can execute, and `test/ticket-scope.test.ts` pins that this line reads
+ * it.
  */
-const scope = ref<TicketScope>('mine')
-const shownTickets = computed(() => ticketsInScope(props.tickets, scope.value))
-const mineCount = computed(() => props.tickets.filter(t => t.mine).length)
+const scope = ref<TicketScope>(DEFAULT_TICKET_SCOPE)
+/**
+ * ONE CALL, THREE ARGUMENTS, AND THAT IS DELIBERATE. This was three separate
+ * expressions — the filter, the count, and `identified: !!props.viewerEmail` —
+ * and each was a silent mutation waiting to happen: `ticketsInScope(…, 'all')`
+ * makes both buttons labels, and a hard-coded `identified: true` tells an
+ * anonymous viewer that nothing here is theirs, which is advice they cannot
+ * act on. Nothing in this repository executes a `.vue` file, so none of the
+ * three had a check. Folded into `ticketScopeView` they are ONE call site the
+ * structural test can pin verbatim, with `identified` derived inside the rule
+ * rather than asserted out here.
+ */
+const ticketView = computed(() => ticketScopeView(props.tickets, scope.value, props.viewerEmail))
+const shownTickets = computed(() => ticketView.value.shown)
 /**
  * The sentence that goes where the list would be, or `null` when there is a
  * list. An empty `Mine` is the ORDINARY first visit — nobody has to say who
@@ -176,11 +194,7 @@ const mineCount = computed(() => props.tickets.filter(t => t.mine).length)
  * box. The wording lives in `shared/utils/ticket-scope.ts` with the filter it
  * belongs to.
  */
-const ticketNotice = computed(() => ticketScopeNotice(scope.value, {
-  total: props.tickets.length,
-  mine: mineCount.value,
-  identified: !!props.viewerEmail
-}))
+const ticketNotice = computed(() => ticketView.value.notice)
 
 /**
  * WHO A TICKET IS FOR, ON SCREEN — the half of this issue that makes `All`

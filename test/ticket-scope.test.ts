@@ -35,7 +35,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { ticketScopeNotice, ticketsInScope } from '../shared/utils/ticket-scope'
+import { DEFAULT_TICKET_SCOPE, ticketScopeNotice, ticketScopeView, ticketsInScope } from '../shared/utils/ticket-scope'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 const ROOT = join(HERE, '..')
@@ -71,6 +71,61 @@ describe('which tickets a button shows', () => {
     // `All` is a copy, so a caller that sorts what it renders does not reorder
     // the prop underneath the component that owns it.
     expect(ticketsInScope(TICKETS, 'all')).not.toBe(TICKETS)
+  })
+})
+
+describe('which button is pressed before anybody presses one', () => {
+  it('opens on Mine', () => {
+    // ACCEPTANCE CRITERION 2, AND IT HAD NO CHECK AT ALL. It lived as the
+    // literal in `ref<TicketScope>('mine')`, one word from `'all'`, and that
+    // word is in a `.vue` file that nothing in this repository executes:
+    // changing it left eslint, `nuxt typecheck` and all 446 tests green while
+    // the card opened on somebody else's tickets. A value can be executed; a
+    // literal in a component cannot.
+    expect(DEFAULT_TICKET_SCOPE).toBe('mine')
+  })
+})
+
+describe('the decision the card actually makes', () => {
+  // `ticketScopeView` exists because a rule can be perfect and its ARGUMENTS
+  // wrong — the #35 lesson this file's preamble quotes, which was closed for
+  // DELETING a binding and left open for WIRING one wrong. These run the whole
+  // derivation, `identified` included, so the card is left with one call site
+  // to get right instead of three.
+  it('shows the viewer theirs and says nothing, under Mine', () => {
+    const view = ticketScopeView(TICKETS, 'mine', 'ana@example.com')
+    expect(view.shown.map(t => t.id)).toEqual(['mine'])
+    expect(view.notice).toBeNull()
+  })
+
+  it('shows everything under All', () => {
+    expect(ticketScopeView(TICKETS, 'all', null).shown.map(t => t.id))
+      .toEqual(['mine', 'theirs', 'nobodys'])
+  })
+
+  it('derives `identified` from the email rather than taking it on trust', () => {
+    // THE MUTATION THIS CATCHES is `identified: true` hard-coded at the call
+    // site, which used to live in the component where nothing could see it. The
+    // two sentences are different on purpose, so asserting they DIFFER is the
+    // assertion — a fixture-free way of saying the flag is really being read.
+    const anonymous = ticketScopeView([TICKETS[1]!], 'mine', null).notice
+    const known = ticketScopeView([TICKETS[1]!], 'mine', 'ana@example.com').notice
+    expect(anonymous).toBeTruthy()
+    expect(known).toBeTruthy()
+    expect(anonymous).not.toBe(known)
+    expect(anonymous!.toLowerCase()).toContain('who you are')
+    expect(known!.toLowerCase()).not.toContain('who you are')
+  })
+
+  it('treats an empty address as nobody having said', () => {
+    // `identity.email` is `''` before anybody types into the box. A caller that
+    // forwards the raw field must still get "you have not told us" — telling
+    // somebody we looked and found nothing of theirs, when they have not given
+    // us a name, is the empty-Mine screen wearing the other sentence.
+    expect(ticketScopeView([TICKETS[1]!], 'mine', '').notice)
+      .toBe(ticketScopeView([TICKETS[1]!], 'mine', null).notice)
+    expect(ticketScopeView([TICKETS[1]!], 'mine', '   ').notice)
+      .toBe(ticketScopeView([TICKETS[1]!], 'mine', null).notice)
   })
 })
 
@@ -126,6 +181,45 @@ describe('what an empty list says', () => {
 describe('the card that renders it', () => {
   const sfc = (...parts: string[]) => readFileSync(join(ROOT, 'app', ...parts), 'utf8')
   const template = (src: string) => /<template>([\s\S]*)<\/template>/.exec(src)?.[1] ?? ''
+  /**
+   * The `<script setup>` block WITH ITS COMMENTS REMOVED. Same caveat as
+   * reading only `<template>`, one level down: the prose explaining why a line
+   * reads `DEFAULT_TICKET_SCOPE` rather than `'mine'` has to quote the wrong
+   * version to be worth reading, so an assertion over the raw script matches
+   * the explanation and passes on the mutation it describes. Strip the prose
+   * and every assertion below is about code.
+   */
+  const script = (src: string) =>
+    (/<script setup[^>]*>([\s\S]*?)<\/script>/.exec(src)?.[1] ?? '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+
+  it('wires the rule to the card\'s own state, in the script', () => {
+    // THE HALF THE TEMPLATE CANNOT SHOW, and it was open. Reading only
+    // `<template>` is right for the bindings — the prose above one names it too
+    // — but it leaves every expression in `<script setup>` pinned by nothing,
+    // and four separate one-word mutations there survived eslint, `nuxt
+    // typecheck` and all 446 tests with the card still rendering.
+    const body = script(sfc('components', 'MediaGallery.vue'))
+    expect(body, 'the script has a <script setup> block to read').not.toBe('')
+
+    // THE DEFAULT IS THE IMPORTED VALUE, not a literal. `ref<TicketScope>('all')`
+    // deletes acceptance criterion 2 in one word; `DEFAULT_TICKET_SCOPE` is
+    // executed by the test above, so the mutation has to happen somewhere a
+    // check is looking.
+    expect(body).toMatch(/ref<TicketScope>\(DEFAULT_TICKET_SCOPE\)/)
+    expect(body, 'the default scope is typed into the card as a literal').not.toMatch(/ref<TicketScope>\('/)
+
+    // AND THE RULE IS CALLED WITH THE CARD'S OWN STATE — pinned VERBATIM,
+    // because every wrong version of this line type-checks. `scope.value`
+    // replaced by `'all'` makes both buttons labels while `v-for="t in
+    // shownTickets"` still reads correctly; `props.viewerEmail` replaced by
+    // `null` tells somebody who typed their address that they have not.
+    expect(body).toMatch(/ticketScopeView\(props\.tickets, scope\.value, props\.viewerEmail\)/)
+    // …and `identified` is DERIVED inside the rule, never asserted out here,
+    // where `identified: true` would be invisible to everything.
+    expect(body, 'the card decides `identified` for itself').not.toMatch(/identified:/)
+  })
 
   it('renders the notice and the filtered list, in the template', () => {
     const body = template(sfc('components', 'MediaGallery.vue'))
@@ -158,6 +252,7 @@ describe('the card that renders it', () => {
 
     const missing: string[] = []
     let callSites = 0
+    let ticketCallSites = 0
     const visit = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name)
@@ -169,9 +264,23 @@ describe('the card that renders it', () => {
         const body = template(readFileSync(full, 'utf8'))
         for (const at of [...body.matchAll(/<MediaGallery(?![\w-])/g)].map(m => m.index!)) {
           callSites += 1
-          if (!/:viewer-email=/.test(body.slice(at, body.indexOf('>', at)))) {
+          const tag = body.slice(at, body.indexOf('>', at))
+          const viewer = /:viewer-email="([^"]*)"/.exec(tag)
+          const tickets = /:tickets="([^"]*)"/.exec(tag)
+          if (!viewer) {
             missing.push(`${full}: <MediaGallery> with no :viewer-email`)
+            continue
           }
+          // PRESENT IS NOT THE SAME AS RIGHT. `HostMediaCard.vue` legitimately
+          // binds `null` — it hands the gallery `:tickets="[]"` and renders its
+          // own — so `null` is a correct answer there and copying that literal
+          // onto a call site that DOES pass tickets is the natural regression:
+          // every viewer who has typed their address is then told forever to
+          // say who they are. The rule is therefore about the pair.
+          if (viewer[1]!.trim() === 'null' && tickets?.[1]!.trim() !== '[]') {
+            missing.push(`${full}: <MediaGallery> is told nobody is watching while it is given tickets`)
+          }
+          if (tickets && tickets[1]!.trim() !== '[]') ticketCallSites += 1
         }
       }
     }
@@ -182,6 +291,10 @@ describe('the card that renders it', () => {
     // at all. Two exist today — the gallery on the guest page, and the gallery
     // nested inside the host card.
     expect(callSites).toBe(2)
+    // …AND THE SECOND HALF OF THE SAME GUARD: the `null`-beside-tickets rule
+    // above is vacuous if no call site passes tickets at all. Exactly one does
+    // today — the gallery on the guest page.
+    expect(ticketCallSites).toBe(1)
   })
 })
 
@@ -210,5 +323,17 @@ describe('what the server sends', () => {
     const uses = [...body.matchAll(/myRsvpIds/g)].length
     expect(uses, 'myRsvpIds is read somewhere other than the `mine` marker').toBe(2)
     expect(body).toMatch(/mine: v\.assignedRsvpIds\.some\(id => myRsvpIds\.has\(id\)\)/)
+
+    // …AND NOTHING NARROWS THE LIST AFTERWARDS. Counting `myRsvpIds` catches
+    // the filter that reads the viewer's ids again and MISSES the cheaper one
+    // that reads the marker this function just computed: `.filter(v => v.mine)`
+    // on the end of the chain introduces no new `myRsvpIds`, restores exactly
+    // the pre-#37 behaviour, and left all 446 tests green. So the `tickets:`
+    // expression is asserted to contain no filter at all — scoped to that
+    // expression, because `gallery` and `documents` legitimately filter by type
+    // two lines above it.
+    const projection = body.slice(body.indexOf('tickets: ticketRows'))
+    expect(projection).not.toBe('')
+    expect(projection, 'something narrows the ticket list after it is built').not.toMatch(/\.filter\(/)
   })
 })

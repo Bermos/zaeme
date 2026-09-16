@@ -31,8 +31,19 @@
  * beside the filter rather than left to a `v-if` somebody adds later.
  */
 
-/** Which of the two buttons is pressed. `mine` is the default. */
+/** Which of the two buttons is pressed. */
 export type TicketScope = 'mine' | 'all'
+
+/**
+ * WHICH BUTTON IS PRESSED BEFORE ANYBODY PRESSES ONE, and it lives here rather
+ * than as a literal in `ref<TicketScope>('mine')` because a literal in a
+ * component is pinned by NOTHING this repository runs. Changing that one word
+ * to `'all'` deletes acceptance criterion 2 ("Mine … is the default") and
+ * leaves eslint, `nuxt typecheck` and all 446 tests green — the card looks
+ * fine, it just opens on somebody else's tickets. Exported, it is a value a
+ * test can execute, and the card is asserted to read it.
+ */
+export const DEFAULT_TICKET_SCOPE: TicketScope = 'mine'
 
 /** The least a ticket has to carry for these two functions to do their job. */
 export interface ScopedTicket {
@@ -94,4 +105,50 @@ export function ticketScopeNotice(scope: TicketScope, counts: TicketScopeCounts)
   return counts.total === 0
     ? 'No tickets yet — your host adds them here.'
     : 'Nothing here is yours yet. Tap All to see everybody\'s — one phone at the barrier is enough.'
+}
+
+/** What the card renders: the rows under the pressed button, and the sentence
+ *  to put there instead when there are none. */
+export interface TicketScopeView<T extends ScopedTicket> {
+  shown: T[]
+  notice: string | null
+}
+
+/**
+ * THE WHOLE DECISION IN ONE CALL, and the reason it exists is the reason #35's
+ * review exists: a rule can be perfect and its ARGUMENTS wrong, and nothing in
+ * this repository executes a `.vue` file.
+ *
+ * `ticketsInScope` and `ticketScopeNotice` below are each covered by tests that
+ * run them. What was not covered is the card deriving their inputs — three
+ * separate expressions in `<script setup>`, each of which could be mutated
+ * without a single check going red: pass `'all'` where `scope.value` belongs
+ * and both buttons become labels while `v-for="t in shownTickets"` still reads
+ * correctly; hard-code `identified: true` and the anonymous viewer is told that
+ * nothing here is theirs, which is advice they cannot act on.
+ *
+ * So the card makes ONE call with THREE arguments, `identified` is DERIVED here
+ * from the email rather than asserted by the caller, and the structural test
+ * pins that one call site verbatim. Three silent mutations become one visible
+ * one.
+ */
+export function ticketScopeView<T extends ScopedTicket>(
+  tickets: readonly T[],
+  scope: TicketScope,
+  viewerEmail: string | null
+): TicketScopeView<T> {
+  const shown = ticketsInScope(tickets, scope)
+  return {
+    shown,
+    notice: ticketScopeNotice(scope, {
+      total: tickets.length,
+      mine: tickets.filter(t => t.mine).length,
+      // AN EMPTY STRING IS NOT AN IDENTITY. `identity.email` is `''` before
+      // anybody types into the box, and the guest page turns that into `null`
+      // on the way in — this is the second half of the same rule, so a caller
+      // that forwards the raw field still gets "you have not told us" rather
+      // than "we looked and none of these is yours".
+      identified: !!viewerEmail && viewerEmail.trim() !== ''
+    })
+  }
 }
