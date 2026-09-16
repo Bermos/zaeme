@@ -52,11 +52,20 @@
 -- if one exists, is left behind rather than aborting the upgrade. Every
 -- assignment the app itself made satisfies the join and comes across.
 --
--- The id is `md5(media_id || ':' || rsvp_id)` — deterministic, so it needs no
--- extension (`gen_random_uuid()` is core only from PG13) and a replay against a
--- half-migrated database would produce the same row rather than a second one.
--- The column is `text`, so a 32-character digest sits in it exactly as a cuid2
--- does.
+-- The id is `md5(media_id || ':' || rsvp_id)` for ONE reason: it needs no
+-- extension, where `gen_random_uuid()` is core only from PG13. The column is
+-- `text`, so a 32-character digest sits in it exactly as a cuid2 does.
+--
+-- BEING DETERMINISTIC BUYS NOTHING HERE, and an earlier draft of this comment
+-- claimed it did — that a replay would produce the same row rather than a
+-- second one. It would not: there is no `ON CONFLICT` on this INSERT, so
+-- running it twice ABORTS on the primary key. Nothing is going to run it twice
+-- (drizzle records what it has applied and wraps the pending set in one
+-- transaction, so a failed migration leaves no half-written rows to replay
+-- onto) — which is why the statement is written without one rather than being
+-- made idempotent for a case that cannot arise. The next person writing a
+-- destructive migration will read this header; it should not teach them that a
+-- deterministic key is the same thing as a re-runnable statement.
 --
 -- ── THE ORDER IS HAND-EDITED, AND THAT IS THE WHOLE POINT ──────────────────
 --

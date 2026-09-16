@@ -93,6 +93,10 @@ async function setAssignees(t: MediaItem, next: string[]) {
     const base = `/api/host/events/${props.slug}/media/${t.id}/assignees`
     for (const rsvpId of added) await $fetch(base, { method: 'POST', body: { rsvpId } })
     for (const rsvpId of removed) await $fetch(`${base}/${rsvpId}`, { method: 'DELETE' })
+    // THE ANSWERS ARE DISCARDED ON PURPOSE. Both routes reply with the whole
+    // media item, but this card renders a DOWNLOAD and its items need a signed
+    // `url` — which a domain view does not carry, and which a mutation is not
+    // the place to mint. So the state comes from the list read that does sign.
     await refresh()
   } catch (e) {
     toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not assign that', color: 'error' })

@@ -1179,11 +1179,22 @@ describe('what a ticket says is written by a planner, on the host surface only',
     // `expenseId` (#29) and `ticket` (#35) each shipped that way for a release.
     //
     // THIS IS A WALK, NOT A LIST OF FILENAMES. It reads what `mediaItem`
-    // actually projects and what its one feeder actually selects, and compares
+    // actually projects and what its one feeder actually produces, and compares
     // the two — so a field added to the shape and forgotten in the feeder is
     // red here rather than null in Enterprise. A list of expected field names
     // would be a closure wearing a test's clothes: it would agree with itself
     // whatever either file said.
+    //
+    // IT CHECKS TWO THINGS, BECAUSE DELETING A LINE IS THE EASY MUTATION AND
+    // NEUTERING IT IS THE ONE THAT SHIPS. The first pass below asks whether the
+    // NAME is produced at all; on its own that passed while
+    // `assignedRsvpIds: assignments.get(media.id) ?? []` was replaced with
+    // `assignedRsvpIds: [] as string[]` — the #78 shape one level deeper, and
+    // the exact wrong answer ("this ticket is nobody's") the field exists to
+    // prevent. So the second pass refuses a field ANSWERED AS A BARE LITERAL:
+    // a feeder handing the shape a constant is not feeding it, whatever the
+    // typecheck says. A cast is stripped first, because `[] as string[]` is the
+    // spelling the compiler pushes you towards.
     const shapes = readFileSync(join(ROOT, 'server', 'utils', 'v1-shapes.ts'), 'utf8')
     const shape = shapes.slice(shapes.indexOf('export function mediaItem('), shapes.indexOf('function ticketDetail('))
     expect(shape).not.toBe('')
@@ -1208,6 +1219,78 @@ describe('what a ticket says is written by a planner, on the host surface only',
       expect(produced, `${feeder} never produces \`${field}\`, which mediaItem reads`).toMatch(
         new RegExp(`\\b${field}\\b`)
       )
+    }
+
+    // …AND NONE OF THEM IS A CONSTANT. `<field>: <expr>` up to the end of its
+    // line; a multi-line expression (the `ticket:` ternary) keeps its first
+    // line, which is never a bare literal and so is never flagged.
+    const LITERAL = /^(\[\s*\]|\{\s*\}|null|undefined|0|''|""|`` |false|true)$/
+    const constants: string[] = []
+    for (const field of projected) {
+      for (const m of produced.matchAll(new RegExp(`^\\s*${field}:\\s*(.+?),?\\s*$`, 'gm'))) {
+        // `x as T` is stripped: the cast is how a neutered field gets past
+        // `nuxt typecheck`, so it must not be how it gets past this.
+        const expr = m[1]!.replace(/\s+as\s+[\w[\]<>|,\s]+$/, '').trim()
+        if (LITERAL.test(expr)) constants.push(`${field}: ${m[1]}`)
+      }
+    }
+    expect(
+      constants,
+      `${feeder} answers a constant for a field mediaItem reads — a feeder handing the shape a literal is not feeding it`
+    ).toEqual([])
+
+    // AND THE SAME RULE ON THE OTHER TWO READS, which do not go through
+    // `mediaItem` at all: the host card's and the invite link's both build
+    // their views with `toView`, whose third argument is the assignee list.
+    // Deleting that argument is a type error and needs no test; passing `[]`
+    // is not, and is the same wrong answer as above on the two surfaces a
+    // PERSON reads.
+    //
+    // The rule is DERIVED, not listed: `toView`'s second argument is the ticket
+    // detail, and it is the literal `null` exactly where the caller knows the
+    // item is not a ticket (a gallery photo, a shared document, a pinned
+    // receipt). So every call that passes anything else is producing a TICKET
+    // view, and that one must take its assignees from the loader.
+    const domain = readFileSync(join(ROOT, 'server', 'domain', 'media.ts'), 'utf8')
+    const args = (from: number) => {
+      // Balanced-paren split, because one of these call sites is
+      // `(await loadTicketAssignments([item.id])).get(item.id) ?? []`.
+      let depth = 0
+      const out: string[] = []
+      let cur = ''
+      for (let i = from; i < domain.length; i++) {
+        const c = domain[i]!
+        if (c === '(' || c === '[' || c === '{') depth++
+        if (c === ')' || c === ']' || c === '}') {
+          if (depth === 0) {
+            out.push(cur.trim())
+            return out
+          }
+          depth--
+        }
+        if (c === ',' && depth === 0) {
+          out.push(cur.trim())
+          cur = ''
+          continue
+        }
+        cur += c
+      }
+      return out
+    }
+    const ticketViews: string[][] = []
+    for (const m of domain.matchAll(/(?<!function )\btoView\(/g)) {
+      const a = args(m.index! + m[0].length)
+      expect(a.length, `a toView call takes three arguments: ${a.join(' | ')}`).toBe(3)
+      if (a[1] !== 'null') ticketViews.push(a)
+    }
+    // COUNT WHAT THE WALK FOUND. Four call sites produce a ticket view today;
+    // a regex that stopped matching would find none and agree with itself.
+    expect(ticketViews.length, 'no toView call produces a ticket view any more').toBeGreaterThan(3)
+    for (const a of ticketViews) {
+      expect(
+        a[2],
+        `toView(${a[0]}, ${a[1]}, …) builds a TICKET view from a constant instead of its assignees`
+      ).toMatch(/assignments|loadTicketAssignments/)
     }
   })
 

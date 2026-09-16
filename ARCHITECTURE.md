@@ -106,6 +106,7 @@ guest's answers are stored.
 | `events_expense` / `events_expense_share` | the trip budget, in integer cents |
 | `events_timeline_item` | the itinerary |
 | `events_media` | photos, videos, documents and tickets |
+| `events_ticket_assignment` | who each ticket is for — one row per (ticket, person), so one covers a pair |
 | `events_series_member` | the standing group of a recurring series |
 | `events_message` | the per-event group chat |
 | `events_ical_token` | the per-person calendar-feed credential |

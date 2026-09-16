@@ -12,8 +12,10 @@ import { requireGuestUser } from '#server/utils/auth'
  * rsvpId would be a request to remove nobody.
  *
  * Idempotent: removing somebody who is not on the ticket answers 200 with the
- * ticket as it stands. The reply is the whole media item, for the same reason
- * the add's is.
+ * ticket as it stands. The reply is the whole media item, and the host card
+ * discards it and re-fetches — for the reason spelled out on the add beside
+ * this one, which is that the card needs a signed download URL and a domain
+ * view does not carry one.
  */
 export default defineEventHandler(async (e) => {
   const user = await requireGuestUser(e)
