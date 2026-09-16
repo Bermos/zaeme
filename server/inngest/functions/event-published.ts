@@ -57,6 +57,7 @@ export const eventPublished = inngest.createFunction(
           eventDescription: ev.description,
           startsAt: ev.startsAt,
           endsAt: ev.endsAt,
+          timezone: ev.timezone,
           location: ev.location,
           inviteToken: inv.token
         })

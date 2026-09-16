@@ -3,13 +3,23 @@
  * (`app/utils`), the same way `auth-client` is.
  */
 
-/** A date, the way this app says dates everywhere else. */
-export function formatWhen(value: string | Date | null | undefined, opts: { time?: boolean } = {}): string {
+/**
+ * A date, the way this app says dates everywhere else.
+ *
+ * `zone` is the EVENT's display zone (#31) where the caller has one; omitting
+ * it reads the reader's own clock, which is what every caller did before that
+ * issue and is still right for a log line or a cross-event list.
+ */
+export function formatWhen(
+  value: string | Date | null | undefined,
+  opts: { time?: boolean, zone?: string | null } = {}
+): string {
   if (!value) return '—'
-  const d = new Date(value)
-  return opts.time === false
-    ? d.toLocaleDateString('en-CH', { dateStyle: 'medium' })
-    : d.toLocaleString('en-CH', { dateStyle: 'medium', timeStyle: 'short' })
+  return formatInZone(
+    value,
+    opts.time === false ? { dateStyle: 'medium' } : { dateStyle: 'medium', timeStyle: 'short' },
+    opts.zone ?? null
+  ) ?? '—'
 }
 
 /** Relative, for a log: "3 min ago". Falls back to the date past a week. */

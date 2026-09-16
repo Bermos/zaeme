@@ -13,6 +13,8 @@ export interface RsvpConfirmationEmailProps {
   plusOne?: boolean
   startsAt?: Date | string | null
   endsAt?: Date | string | null
+  /** The event's display zone (#31); null renders in the server's own clock, as before. */
+  timezone?: string | null
   location?: string | null
   inviteToken?: string | null
   /** Live iCal subscription URL for the attendee (`/calendar/{token}.ics`). */
@@ -27,7 +29,7 @@ const statusCopy: Record<RsvpConfirmationEmailProps['status'], string> = {
 }
 
 export function RsvpConfirmationEmail(props: RsvpConfirmationEmailProps) {
-  const when = formatEventWhen(props.startsAt ?? null, props.endsAt ?? null)
+  const when = formatEventWhen(props.startsAt ?? null, props.endsAt ?? null, props.timezone ?? null)
   // Guests land on their zäme invite page; the tokenless fallback stays the
   // owner app's events dive-in (only planners receive those).
   const eventUrl = props.inviteToken

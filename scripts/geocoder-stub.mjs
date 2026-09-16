@@ -54,13 +54,39 @@ const BRIDGE = {
 }
 
 /**
- * The stub knows ONE place and answers nothing for everything else, which is
+ * A SECOND PLACE, IN A COUNTRY WITH MANY ZONES.
+ *
+ * Portugal has three and fits in any list, which is exactly why it hid #31's
+ * worst bug: the zone offer showed `.slice(0, 4)` of an ALPHABETICAL list, and
+ * every fixture in this repository was Portuguese, so nothing ever saw the
+ * United States — twenty-nine zones, of which the first four are Adak,
+ * Anchorage, Boise and Chicago. A pin in Brooklyn was offered none of them.
+ * A fixture that cannot express the failure is a fixture that endorses it.
+ */
+const BROOKLYN = {
+  place_id: 2,
+  osm_type: 'way',
+  osm_id: 61785451,
+  lat: '40.7060855',
+  lon: '-73.9968643',
+  category: 'man_made',
+  type: 'bridge',
+  name: 'Brooklyn Bridge',
+  display_name: 'Brooklyn Bridge, New York, United States',
+  address: { country_code: 'us' }
+}
+
+/**
+ * The stub knows TWO places and answers nothing for everything else, which is
  * the second shape the smoke suite needs: an empty list is a real answer ("no
  * such place") and has to stay distinguishable from an outage. A stub that
  * matched every query would make the "no matches" state untestable.
  */
 function search(q) {
-  return (q ?? '').toLowerCase().includes('ponte') ? [BRIDGE] : []
+  const query = (q ?? '').toLowerCase()
+  if (query.includes('ponte')) return [BRIDGE]
+  if (query.includes('brooklyn')) return [BROOKLYN]
+  return []
 }
 
 let served = 0

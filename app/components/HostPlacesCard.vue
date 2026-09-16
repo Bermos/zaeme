@@ -120,6 +120,8 @@ interface Suggestion {
   category: string | null
   /** The zones the country this landed in has (#31). See `offerZones` below. */
   timeZones?: string[]
+  /** Only so the offer can say "Portugal" rather than "pt". */
+  countryCode?: string | null
 }
 interface GeocodeAnswer {
   status: 'ok' | 'unavailable'
@@ -477,23 +479,68 @@ const zoneLine = computed(() => zoneNote(props.timezone))
  * must not also relabel the whole trip's clock behind the planner's back —
  * especially not on the third place of a trip that crosses a border, where the
  * silent version would leave the itinerary reading against wherever the last
- * pin happened to be. Portugal has THREE zones and the United States has
- * twenty-nine: the honest answer to "which one" is to show them and let the
- * person who is going say.
+ * pin happened to be.
  *
- * The offer is skipped when the trip is already in one of that country's
- * zones, which is the usual case from the second place onwards.
+ * AND IT IS NEVER A GUESS. Every zone the country has is shown — one button
+ * when there is one, and all of them in a searchable list when there are more,
+ * with nothing preselected. This shipped as `.slice(0, 4)` of an ALPHABETICAL
+ * list, which is four confident buttons that are wrong for most of the world:
+ * the United States has twenty-nine zones and the first four are Adak,
+ * Anchorage, Boise and Chicago, so a pin in New York was offered none of them
+ * and Adak is five hours out; Australia led with `Antarctica/Macquarie`; Brazil
+ * offered four, none of them São Paulo. Portugal has exactly three and fits,
+ * which is why the geocoder stub and both fixtures — all Portuguese — saw
+ * nothing wrong.
+ *
+ * RANKING THEM WAS TRIED AND REJECTED. The obvious heuristic is the only one
+ * available without a table: compare each zone's UTC offset to the one the
+ * pin's longitude implies. Measured, it picks `America/Chicago` for a New York
+ * pin, `America/Anchorage` for Los Angeles and — the case this whole feature is
+ * written around — `Atlantic/Azores` for LISBON, because summer time pushes a
+ * civil clock an hour east of its own sun. A ranking that is wrong about the
+ * worked example is worse than no ranking: it moves the mistake from "the host
+ * has to choose" to "the host was told, confidently".
+ *
+ * The offer is skipped when the trip is already in one of that country's zones,
+ * which is the usual case from the second place onwards. `sameZone` and not
+ * `includes`: the stored value may be the spelling the host typed
+ * (`Europe/Kyiv`) while ICU lists the alias (`Europe/Kiev`), and comparing the
+ * strings re-offers the trip its own zone under the name it was spared.
  */
-const zoneOffer = ref<{ place: string, zones: string[] } | null>(null)
+const zoneOffer = ref<{ place: string, country: string, zones: string[] } | null>(null)
 const settingZone = ref<string | null>(null)
+/**
+ * Nothing is preselected; the host picks, or the offer does nothing.
+ * `undefined` rather than `null` because that is what `USelectMenu` means by
+ * "no selection" — bound to null it renders the placeholder and then refuses
+ * the model type.
+ */
+const chosenZone = ref<string | undefined>(undefined)
 
 function offerZones(s: Suggestion) {
-  const zones = (s.timeZones ?? []).slice(0, 4)
-  if (!zones.length || (props.timezone && zones.includes(props.timezone))) {
-    zoneOffer.value = null
-    return
+  chosenZone.value = undefined
+  // The decision itself is `zonesToOffer` in `shared/utils/timezone.ts`, where
+  // a unit test can execute it: this card is client-side, so the smoke suite
+  // watches the wire and cannot see a renderer that drops most of the answer —
+  // which is precisely what `.slice(0, 4)` did here.
+  const zones = zonesToOffer(s.timeZones, props.timezone)
+  zoneOffer.value = zones ? { place: s.name, country: countryName(s.countryCode), zones } : null
+}
+
+/**
+ * The country as a person says it, for the sentence above the list —
+ * "Portugal, which has 3 time zones" rather than "pt". `Intl.DisplayNames` is
+ * ICU's own, so there is no table here either; the code itself is the fallback
+ * for a runtime that does not know it.
+ */
+function countryName(code: string | null | undefined): string {
+  const cc = (code ?? '').trim().toUpperCase()
+  if (!/^[A-Z]{2}$/.test(cc)) return 'this country'
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'region' }).of(cc) ?? cc
+  } catch {
+    return cc
   }
-  zoneOffer.value = { place: s.name, zones }
 }
 
 async function useZone(zone: string) {
@@ -501,6 +548,7 @@ async function useZone(zone: string) {
   try {
     await $fetch(`/api/host/events/${props.slug}`, { method: 'PATCH', body: { timezone: zone } })
     zoneOffer.value = null
+    chosenZone.value = undefined
     emit('updated')
     toast.add({ title: `Times now shown in ${zone}`, color: 'success' })
   } catch (e) {
@@ -680,38 +728,15 @@ function coordinates(place: Place): string | null {
               {{ attribution }}
             </p>
           </div>
-          <!-- The zone that place suggests (#31): an offer, never a write. -->
-          <div
-            v-if="zoneOffer"
-            class="flex flex-col gap-1.5 rounded-md bg-elevated px-3 py-2"
-          >
-            <p class="text-sm">
-              🕓 {{ zoneOffer.place }} is in
-              {{ zoneOffer.zones.length > 1 ? 'one of these zones' : zoneOffer.zones[0] }}.
-              Show this trip's times in it?
-            </p>
-            <div class="flex flex-wrap gap-1.5">
-              <UButton
-                v-for="zone in zoneOffer.zones"
-                :key="zone"
-                size="xs"
-                variant="soft"
-                :loading="settingZone === zone"
-                @click="useZone(zone)"
-              >
-                {{ zone }}
-              </UButton>
-              <UButton
-                size="xs"
-                variant="ghost"
-                color="neutral"
-                @click="zoneOffer = null"
-              >
-                Not now
-              </UButton>
-            </div>
-          </div>
-          <!-- The two states that must never read as each other. -->
+          <!-- The two states that must never read as each other.
+
+               THESE TWO BELONG TO THE `v-if` ABOVE AND NOTHING MAY COME BETWEEN
+               THEM. #31's zone offer was inserted here and broke the chain: the
+               `suggestions.length` branch then terminated in a comment node and
+               both `v-else-if`s hung off `zoneOffer` instead, so a search that
+               returned three results rendered them and said "No matches"
+               directly underneath. Lint, typecheck and every test stayed green.
+               Anything new goes AFTER the chain, as the offer now does. -->
           <p
             v-else-if="searchState === 'unavailable'"
             class="text-sm text-warning"
@@ -724,6 +749,76 @@ function coordinates(place: Place): string | null {
           >
             No matches. Type the name yourself — a place is fine without coordinates.
           </p>
+
+          <!-- The zone that place suggests (#31): an offer, never a write, and
+               never a guess either — see `offerZones`. -->
+          <div
+            v-if="zoneOffer"
+            class="flex flex-col gap-1.5 rounded-md bg-elevated px-3 py-2"
+          >
+            <p class="text-sm">
+              🕓 {{ zoneOffer.place }} is in
+              <template v-if="zoneOffer.zones.length === 1">
+                {{ zoneOffer.zones[0] }}
+              </template>
+              <template v-else>
+                {{ zoneOffer.country }}, which has {{ zoneOffer.zones.length }} time zones
+              </template>.
+              Show this trip's times in it?
+            </p>
+            <!-- One zone: one click, and it cannot be the wrong one. -->
+            <div
+              v-if="zoneOffer.zones.length === 1"
+              class="flex flex-wrap gap-1.5"
+            >
+              <UButton
+                size="xs"
+                variant="soft"
+                :loading="settingZone !== null"
+                @click="useZone(zoneOffer.zones[0]!)"
+              >
+                {{ zoneOffer.zones[0] }}
+              </UButton>
+              <UButton
+                size="xs"
+                variant="ghost"
+                color="neutral"
+                @click="zoneOffer = null"
+              >
+                Not now
+              </UButton>
+            </div>
+            <!-- More than one: ALL of them, searchable, and nothing preselected. -->
+            <div
+              v-else
+              class="flex flex-wrap items-center gap-1.5"
+            >
+              <USelectMenu
+                v-model="chosenZone"
+                :items="zoneOffer.zones"
+                placeholder="Which one?"
+                size="xs"
+                class="w-56"
+              />
+              <UButton
+                size="xs"
+                variant="soft"
+                :disabled="!chosenZone"
+                :loading="settingZone !== null"
+                @click="chosenZone && useZone(chosenZone)"
+              >
+                Use it
+              </UButton>
+              <UButton
+                size="xs"
+                variant="ghost"
+                color="neutral"
+                @click="zoneOffer = null"
+              >
+                Not now
+              </UButton>
+            </div>
+          </div>
         </div>
 
         <form

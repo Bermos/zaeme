@@ -535,6 +535,22 @@ geocode_shape() {
 #
 # `well-zoned` is therefore also the right answer for an EMPTY result list and
 # for the unavailable envelope: there is nothing to suggest and nothing wrong.
+# `zone_count <body>` (#31) — how many zones the first result offers, or a
+# sentinel. The point of the number is that it is NOT four: the offer used to be
+# `.slice(0, 4)` and a `contains` on any single zone name passes either way.
+zone_count() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const first = (b.results ?? [])[0]
+      if (!first) return process.stdout.write("no-results")
+      if (!Array.isArray(first.timeZones)) return process.stdout.write("no-zone-list")
+      process.stdout.write(String(first.timeZones.length))
+    })'
+}
+
 geocode_zones() {
   printf '%s' "$1" | node -e '
     let s = ""
@@ -2639,6 +2655,18 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # a verdict about the rule rather than about Portugal, for the reason the
   # whole section gives: no check here may need Nominatim to answer.
   equals "...offering the zones of the country it is in" "$(geocode_zones "$S1")" "well-zoned"
+  # EVERY ZONE, NOT THE FIRST FEW. The card shipped `.slice(0, 4)` of an
+  # ALPHABETICAL list; Portugal has exactly three and fits, which is why the
+  # stub, both fixtures and every check here were blind to it. The stub now also
+  # knows a place in a country with twenty-nine, and this asserts the two a pin
+  # in Brooklyn must be offered — one of which, `America/Los_Angeles`,
+  # alphabetically sorts far below the four that used to be shown.
+  US1=$(body "${PLN32[@]}" --get --data-urlencode "q=brooklyn bridge $SUFFIX" "$HSEARCH")
+  equals "a country with many zones is well-zoned too" "$(geocode_zones "$US1")" "well-zoned"
+  ZCOUNT=$(zone_count "$US1")
+  equals "...and the offer is not truncated to four" "$ZCOUNT" "29"
+  contains "...so a pin in Brooklyn is offered New York"  "$US1" '"America/New_York"'
+  contains "...and Los Angeles, which sorts below the old cut" "$US1" '"America/Los_Angeles"'
 
   # THE CACHE, on a query NOTHING has ever asked — this suite re-runs against
   # the database the last run left behind, and "Ponte 25 de Abril" may well be
@@ -2858,12 +2886,42 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   CLEARED=$(body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":null}')
   contains "clearing the zone is allowed"             "$CLEARED" '"timezone":null'
   contains "...and an empty string means the same"    "$(body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":""}')" '"timezone":null'
+  # AGAINST THE LITERAL, not against `$TZBEFORE`. A rebase that is SYMMETRIC —
+  # shift on set, shift back on clear — has already undone itself by the time
+  # this samples, so comparing to a baseline the same mutation could have moved
+  # is a check that cannot fail on the mutation it is written for. The literal
+  # is the instant the fixture was written at, and the `equals` above pins
+  # `$TZBEFORE` to it, so the two together cover both directions.
   equals "...and clearing it moves no instant either" \
-    "$(tl_start "$(body "${AUTH[@]}" "$API/events/$TZSLUG/timeline")" "The early ferry west")" "$TZBEFORE"
+    "$(tl_start "$(body "${AUTH[@]}" "$API/events/$TZSLUG/timeline")" "The early ferry west")" "2027-07-01T08:14:00.000Z"
   # Absent is not null: a PATCH about something else must not clear the zone.
   body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"timezone":"Pacific/Chatham"}' > /dev/null
   body "${TZP[@]}" "${JSON[@]}" -X PATCH "$TZHOST" -d '{"location":"Cais do Sodre"}' > /dev/null
   contains "a PATCH about something else keeps it"    "$(body "${TZP[@]}" "$TZHOST")" '"timezone":"Pacific/Chatham"'
+
+  # THE DATE POLL, ON THE LINK THAT GOES IN THE GROUP CHAT.
+  #
+  # This is the surface #31 shipped wrong and no check here could see: the smoke
+  # fixture was a TRIP WITH A TIMELINE ITEM, so the poll card was executed by
+  # nothing. The host page reads candidates against the event's clock and writes
+  # them there, so a host in Zürich planning a Lisbon party types 20:00 and
+  # `isoFromZonedInput` stores the right instant — while `DatePoll.vue` rendered
+  # it in the READER's zone with no label anywhere on the card. One event, two
+  # clocks, and the wrong one on the forwarded link. The poll's winner also
+  # becomes the event's own `startsAt` when the host locks it.
+  #
+  # 17:30Z is 18:30 in Lisbon and 17:30 on this runner's own clock, and the
+  # needles are anchored on element boundaries for the `__NUXT_DATA__` reason
+  # given above.
+  TZPARTY=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/parties" \
+    -d "{\"title\":\"Smoke party abroad $SUFFIX\",\"coreInvites\":[{\"name\":\"Ana\"}],\"dateOptions\":[{\"startsAt\":\"2027-07-01T17:30:00Z\"}]}")
+  TZPSLUG=$(printf '%s' "$TZPARTY" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  TZPTOK=$(printf '%s' "$TZPARTY" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  body "${TZP[@]}" "${JSON[@]}" -X PATCH "$BASE/api/host/events/$TZPSLUG" -d '{"timezone":"Europe/Lisbon"}' > /dev/null
+  TZPHTML=$(body "$BASE/i/$TZPTOK")
+  contains "the poll card names the clock it is showing" "$TZPHTML" 'Times are in Europe/Lisbon'
+  contains "...and offers the candidate at 18:30 there" "$TZPHTML" '>Thu, 1 Jul, 18:30<'
+  excludes "...not at this server's own 17:30"          "$TZPHTML" '>Thu, 1 Jul, 17:30<'
 
   # A SHOWING INHERITS ITS SERIES' CLOCK, which is a decision taken on the
   # owner's behalf and is executed here because nothing else can see it: a

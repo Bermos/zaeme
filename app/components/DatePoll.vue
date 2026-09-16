@@ -14,7 +14,26 @@ interface PollOption {
   tally: { yes: number, ifneedbe: number, no: number }
 }
 
-const props = defineProps<{ token: string, poll: PollOption[] }>()
+const props = withDefaults(
+  defineProps<{
+    token: string
+    poll: PollOption[]
+    /**
+     * The event's display zone (#31), or null for the reader's own.
+     *
+     * THIS CARD WAS THE ONE THAT WAS MISSED, and it is the surface that matters
+     * most: the host page reads its candidates against the event's clock and
+     * writes them there too, so a host in Zürich planning a Lisbon party types
+     * 20:00, `isoFromZonedInput` correctly stores 19:00Z, and the host page
+     * says 20:00 — while this card, on the link that goes in the group chat,
+     * said 19:00 with no zone named anywhere on it. One event, two clocks, and
+     * the one the guests read was the wrong one. The winner also becomes the
+     * event's own `startsAt` when the host locks it.
+     */
+    timezone?: string | null
+  }>(),
+  { timezone: null }
+)
 const emit = defineEmits<{ updated: [] }>()
 
 const { identity, complete } = useGuestIdentity()
@@ -60,8 +79,10 @@ async function submit() {
 }
 
 function when(iso: string): string {
-  return new Date(iso).toLocaleString('en-CH', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+  return formatInZone(iso, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }, props.timezone) ?? '—'
 }
+
+const zoneLine = computed(() => zoneNote(props.timezone))
 </script>
 
 <template>
@@ -73,6 +94,12 @@ function when(iso: string): string {
         </p>
         <p class="text-sm text-muted">
           The host locks the date once everyone has answered.
+        </p>
+        <p
+          v-if="zoneLine"
+          class="text-xs text-muted mt-0.5"
+        >
+          🕓 {{ zoneLine }}
         </p>
       </div>
     </template>

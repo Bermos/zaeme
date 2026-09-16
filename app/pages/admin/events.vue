@@ -173,8 +173,17 @@ const WHEN_ITEMS = [
                     <span v-if="ev.location"> · {{ ev.location }}</span>
                   </p>
                 </td>
+                <!-- The EVENT's clock, not the owner's (#31). This row expands to
+                     `AdminEventTimeline`, which edits times against that zone —
+                     one row showing two clocks is the confusion this feature
+                     exists to end, and /admin is where it matters most because
+                     it is the surface for events the owner does not plan. -->
                 <td class="py-2 px-3 whitespace-nowrap">
-                  {{ formatWhen(ev.startsAt) }}
+                  {{ formatWhen(ev.startsAt, { zone: ev.timezone }) }}
+                  <span
+                    v-if="ev.timezone"
+                    class="block text-xs text-muted"
+                  >🕓 {{ ev.timezone }}</span>
                 </td>
                 <td class="py-2 px-3">
                   <UBadge

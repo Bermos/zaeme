@@ -296,6 +296,7 @@ const errorMessage = computed(() => {
         v-if="polling && page.poll.length"
         :token="token"
         :poll="page.poll"
+        :timezone="page.event.timezone"
         @updated="refresh"
       />
 

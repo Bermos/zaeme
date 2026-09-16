@@ -13,6 +13,8 @@ export interface InviteEmailProps {
   eventDescription?: string | null
   startsAt?: Date | string | null
   endsAt?: Date | string | null
+  /** The event's display zone (#31); null renders in the server's own clock, as before. */
+  timezone?: string | null
   location?: string | null
   inviteToken: string
 }
@@ -27,7 +29,7 @@ const buttonStyle: React.CSSProperties = {
 }
 
 export function InviteEmail(props: InviteEmailProps) {
-  const when = formatEventWhen(props.startsAt ?? null, props.endsAt ?? null)
+  const when = formatEventWhen(props.startsAt ?? null, props.endsAt ?? null, props.timezone ?? null)
   // Guest links point at the zäme app (ADR-0019) — /i/{token} is the invite page.
   const inviteUrl = publicSiteUrl(`/i/${props.inviteToken}`)
   const greeting = props.recipientName ? `Hi ${props.recipientName},` : 'Hi there,'

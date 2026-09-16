@@ -58,6 +58,7 @@ export const rsvpConfirmed = inngest.createFunction(
       plusOne: r.plusOne,
       startsAt: ev.startsAt,
       endsAt: ev.endsAt,
+      timezone: ev.timezone,
       location: ev.location,
       inviteToken: inv?.token ?? null,
       calendarFeedUrl

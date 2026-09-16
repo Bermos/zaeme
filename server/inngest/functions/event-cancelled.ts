@@ -44,6 +44,7 @@ export const eventCancelled = inngest.createFunction(
           eventTitle: ev.title,
           startsAt: ev.startsAt,
           endsAt: ev.endsAt,
+          timezone: ev.timezone,
           location: ev.location,
           reason: reason ?? null
         })

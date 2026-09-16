@@ -29,8 +29,15 @@ afterAll(() => {
   else process.env.TZ = AMBIENT_TZ
 })
 
-const { canonicalTimezone, formatInZone, isBlankTimezone, isoFromZonedInput, timezonesForCountry, toZonedInputValue, zoneDayKey, zoneNote }
+const { canonicalTimezone, formatInZone, isBlankTimezone, isoFromZonedInput, sameZone, timezoneChoices, zonesToOffer, timezonesForCountry, toZonedInputValue, zoneDayKey, zoneNote }
   = await import('../shared/utils/timezone')
+
+/**
+ * Imported after the clock is moved, for the same reason: it formats against
+ * the ambient zone when an event has none, and that reading has to be the
+ * third one too.
+ */
+const { formatEventWhen } = await import('../server/emails/format')
 
 /** Minutes and hours, the way every screen asks for them. */
 const HHMM = { hour: '2-digit', minute: '2-digit' } as const
@@ -74,6 +81,39 @@ describe('what may be stored as an event zone', () => {
     expect(formatInZone('2026-07-01T08:14:00Z', HHMM, 'Europe/Kyiv')).toBe('11:14')
   })
 
+  it('refuses EVERY family that is not one of the ten geographic areas', () => {
+    // THE SECOND VERSION OF THIS RULE. The first excluded `Etc/` by name and
+    // still admitted `SystemV/`: `SystemV/EST5` is a permanent −05:00, and
+    // `SystemV/EST5EDT` follows the PRE-2007 US daylight rules, so it agrees
+    // with `America/New_York` for most of the year and is an hour out for three
+    // weeks every March — a zone that is wrong just rarely enough not to be
+    // reported. Both resolve happily through `Intl`.
+    expect(canonicalTimezone('SystemV/EST5')).toBeNull()
+    expect(canonicalTimezone('SystemV/EST5EDT')).toBeNull()
+    // …and this is the fact that makes that one an hour wrong rather than
+    // merely obsolete, asserted rather than asserted-about.
+    const march = '2026-03-15T17:00:00Z'
+    expect(formatInZone(march, HHMM, 'SystemV/EST5EDT')).not.toBe(formatInZone(march, HHMM, 'America/New_York'))
+    // The single-word aliases and the legacy country areas go with them. Every
+    // one resolves; none is reachable except by hand-typing past a picker.
+    for (const legacy of ['US/Eastern', 'Brazil/East', 'Canada/Eastern', 'Mexico/General', 'Japan', 'GB', 'GB-Eire', 'Portugal', 'W-SU', 'NZ', 'Navajo']) {
+      expect(canonicalTimezone(legacy), legacy).toBeNull()
+    }
+  })
+
+  it('refuses nothing the picker offers or a geocoded place suggests', () => {
+    // WHAT MAKES THE ALLOW-LIST SAFE TO BE THAT STRICT, and the check that has
+    // to go red if a future ICU adds an eleventh area: every zone this app can
+    // put in front of a host must be one it will store. `timezoneChoices` is
+    // the picker; `timezonesForCountry` is the geocoded suggestion.
+    const offered = timezoneChoices()
+    expect(offered.length).toBeGreaterThan(300)
+    expect(offered).toContain('Europe/Lisbon')
+    for (const zone of Intl.supportedValuesOf('timeZone')) {
+      expect(canonicalTimezone(zone), zone).toBe(zone)
+    }
+  })
+
   it('refuses a fixed offset, however it is spelled', () => {
     // THIS IS THE SET THE RULE EXISTS FOR, and `Intl.DateTimeFormat` accepts
     // every one of them. A trip labelled `+01:00` reads correctly in March and
@@ -94,6 +134,25 @@ describe('what may be stored as an event zone', () => {
     }
     // Longer than any identifier, refused before it reaches ICU.
     expect(canonicalTimezone('Europe/'.concat('x'.repeat(200)))).toBeNull()
+  })
+
+  it('knows an alias names the same zone, which a string comparison does not', () => {
+    // The other half of keeping the host's spelling: every comparison between a
+    // stored value and a list ICU produced has to go through `sameZone`, or the
+    // decision is undone by one `includes`. `HostPlacesCard` asks exactly this
+    // question — "is the trip already in one of this country's zones?" — and
+    // answered it with `includes` until the review, so a trip on `Europe/Kyiv`
+    // was re-offered its own zone spelled `Europe/Kiev`.
+    expect(sameZone('Europe/Kyiv', 'Europe/Kiev')).toBe(true)
+    expect(sameZone('Asia/Kolkata', 'Asia/Calcutta')).toBe(true)
+    expect(sameZone('Europe/Lisbon', 'Europe/Lisbon')).toBe(true)
+    expect(sameZone('Europe/Kyiv', 'Europe/Lisbon')).toBe(false)
+    expect(sameZone('Europe/Kyiv', null)).toBe(false)
+    expect(sameZone(null, null)).toBe(true)
+    // A value ICU cannot resolve is not the same as anything, including itself
+    // spelled differently — and it does not throw.
+    expect(sameZone('America/Nowhere', 'America/Nowhere')).toBe(true)
+    expect(sameZone('America/Nowhere', 'Europe/Lisbon')).toBe(false)
   })
 
   it('tells "no zone" apart from "not a zone"', () => {
@@ -280,6 +339,20 @@ describe('the zone a geocoded place offers', () => {
     expect(timezonesForCountry('JP')).toEqual(['Asia/Tokyo'])
   })
 
+  it('names EVERY zone the country has, because a shortened list is a wrong one', () => {
+    // THE CARD SHOWS ALL OF THESE AND RANKS NONE OF THEM, and this is the
+    // assertion that keeps it honest. It used to show `.slice(0, 4)` of an
+    // ALPHABETICAL list, which for the United States is Adak, Anchorage, Boise
+    // and Chicago — a pin in New York was offered none of them and Adak is five
+    // hours out. Portugal fits in four, which is why the stub, both fixtures
+    // and every check missed it.
+    expect(timezonesForCountry('us')).toContain('America/New_York')
+    expect(timezonesForCountry('us')).toContain('America/Los_Angeles')
+    expect(timezonesForCountry('us').length).toBeGreaterThan(4)
+    expect(timezonesForCountry('au')).toContain('Australia/Sydney')
+    expect(timezonesForCountry('br')).toContain('America/Sao_Paulo')
+  })
+
   it('offers every zone it names as one that may actually be stored', () => {
     // A suggestion the host cannot accept would be a button that 422s. The
     // list is filtered through the same rule the write side applies.
@@ -290,6 +363,36 @@ describe('the zone a geocoded place offers', () => {
     }
   })
 
+  it('offers the WHOLE list, because the card is the half no smoke check can see', () => {
+    // THE DECISION THE CARD MAKES, executed. `HostPlacesCard` is client-side —
+    // the suggestions arrive from a `$fetch` and nothing in this repository
+    // drives a browser — so the smoke suite can prove the SERVER answered with
+    // all twenty-nine US zones and cannot see the card keeping four. That is
+    // where the bug was, so the decision lives in a function a test can call.
+    const us = zonesToOffer(timezonesForCountry('us'), null)
+    expect(us).not.toBeNull()
+    expect(us!.length).toBe(timezonesForCountry('us').length)
+    expect(us!.length).toBeGreaterThan(4)
+    expect(us).toContain('America/New_York')
+    // Alphabetically this one sits far below the four that used to be shown.
+    expect(us).toContain('America/Los_Angeles')
+    // Every offered zone is one the write side will accept — a suggestion the
+    // host cannot take is a button that 422s.
+    for (const zone of us!) expect(canonicalTimezone(zone), zone).toBe(zone)
+  })
+
+  it('says nothing when the trip is already in one of that country\'s zones', () => {
+    // From the second pin onwards this is the usual case, and it is the one the
+    // alias decision can undo: a trip stored as the host's `Europe/Kyiv` is in
+    // Ukraine's list under ICU's `Europe/Kiev`, and a string comparison would
+    // re-offer it its own zone spelled the way it was spared.
+    expect(zonesToOffer(timezonesForCountry('pt'), 'Europe/Lisbon')).toBeNull()
+    expect(zonesToOffer(timezonesForCountry('ua'), 'Europe/Kyiv')).toBeNull()
+    expect(zonesToOffer(timezonesForCountry('ua'), 'Europe/Kiev')).toBeNull()
+    // …and a trip in a different country still gets the offer.
+    expect(zonesToOffer(timezonesForCountry('pt'), 'Europe/Zurich')).toContain('Europe/Lisbon')
+  })
+
   it('offers nothing rather than failing when the geocoder named no country', () => {
     // A pin in the middle of the sea, or a row cached before `addressdetails`
     // was asked for. Search still works; it just makes no suggestion.
@@ -297,5 +400,55 @@ describe('the zone a geocoded place offers', () => {
     expect(timezonesForCountry('')).toEqual([])
     expect(timezonesForCountry('xx')).toEqual([])
     expect(timezonesForCountry('Portugal')).toEqual([])
+    expect(zonesToOffer([], 'Europe/Lisbon')).toBeNull()
+    expect(zonesToOffer(undefined, null)).toBeNull()
+  })
+})
+
+/* ------------------------------ outgoing mail ----------------------------- */
+
+describe('an email says which clock it is stating', () => {
+  it('states the time in the event\'s zone, stamped', async () => {
+    // THE SURFACE THAT NEEDS THE LABEL MOST: a mail lands in an inbox with no
+    // card around it, is read days later and somewhere else, and is the thing
+    // people act on. Before #31 it stated the start in whatever zone the
+    // SERVER's container was set to, unlabelled — so the invite email for a
+    // Lisbon trip said 08:14 while the invite page it links to said 09:14 WEST.
+    const when = formatEventWhen('2027-07-01T08:14:00Z', null, 'Europe/Lisbon')
+    expect(when).toContain('09:14')
+    expect(when).toContain('WEST')
+    // …and the ambient reading — which is what it used to send — is neither.
+    expect(when).not.toContain('20:59')
+  })
+
+  it('stamps the START\'s own abbreviation and never the span\'s', () => {
+    // A trip across the last Sunday in October is half WEST and half WET, so
+    // the stamp is taken at the instant it labels. Lisbon shifts at 01:00 UTC
+    // on 2026-10-25; these two straddle it.
+    expect(formatEventWhen('2026-10-24T12:00:00Z', null, 'Europe/Lisbon')).toContain('WEST')
+    expect(formatEventWhen('2026-10-26T12:00:00Z', null, 'Europe/Lisbon')).toContain('WET')
+  })
+
+  it('decides "same day" on the event\'s calendar, not the server\'s', () => {
+    // A party from 22:00 to 23:30 in Lisbon is one evening. On this file's
+    // ambient clock (Chatham, +12:45) both instants are already the next day
+    // and a server-calendar comparison would still call it one day — the case
+    // that separates them is the one where the two disagree, so assert the
+    // shape: one day prints one date, two days print two.
+    const oneEvening = formatEventWhen('2027-07-01T21:00:00Z', '2027-07-01T22:30:00Z', 'Europe/Lisbon')
+    expect(oneEvening).toBe('1 July 2027 at 22:00 – 23:30 WEST')
+    const twoDays = formatEventWhen('2027-07-01T21:00:00Z', '2027-07-02T09:00:00Z', 'Europe/Lisbon')
+    expect(twoDays).toContain('2 July 2027')
+  })
+
+  it('renders exactly as it did before when the event has no zone', () => {
+    // Criterion one, on this surface too.
+    const iso = '2027-07-01T08:14:00Z'
+    expect(formatEventWhen(iso, null, null)).toBe(new Date(iso).toLocaleString('en-CH', { dateStyle: 'long', timeStyle: 'short' }))
+    expect(formatEventWhen(iso, null, null)).not.toContain('WEST')
+    // A zone nobody can render falls back the same way rather than throwing
+    // inside a background job that has already decided to send.
+    expect(formatEventWhen(iso, null, 'America/Nowhere')).toBe(formatEventWhen(iso, null, null))
+    expect(formatEventWhen(null, null, 'Europe/Lisbon')).toBeNull()
   })
 })

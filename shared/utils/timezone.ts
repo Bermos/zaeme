@@ -24,8 +24,12 @@
  * in March and an hour wrong in April, with nothing on screen saying so; and
  * `Etc/GMT+5` is west of Greenwich, not east, which is a sign error waiting for
  * somebody who read it as an offset. So `canonicalTimezone` refuses all of
- * them and asks for a named region zone (`Europe/Lisbon`), whose DST rules
- * ICU already knows and applies per instant.
+ * them and asks for a zone in one of IANA's ten GEOGRAPHIC AREAS
+ * (`Europe/Lisbon`), whose DST rules ICU already knows and applies per instant.
+ * That allow-list is deliberate rather than a list of exclusions: excluding
+ * `Etc/` by name left `SystemV/EST5EDT` — pre-2007 US daylight rules, an hour
+ * off `America/New_York` for three weeks every March — and a rule written as
+ * "not these families" is a rule nobody can finish.
  *
  * The refusal is the SERVER's (`server/domain/events-data.ts` turns a null from
  * here into a 422); this module returns null and carries no h3 dependency, so
@@ -47,19 +51,41 @@
  */
 
 /**
- * A named region zone: at least one `/`, no leading sign. This is what rules
- * out `+02:00`, `UTC`, `GMT` and `Z` — none of which has a slash or starts with
- * a letter followed by one.
+ * THE TEN GEOGRAPHIC AREAS IANA USES, AND NOTHING ELSE — an ALLOW-LIST, which
+ * is the second version of this rule and the reason for the change.
  *
- * It does NOT rule out `Etc/GMT+5`, which matches this pattern exactly and is a
- * fixed offset with an inverted sign; that whole area is excluded separately
- * below. A regex that looks like it means "a real zone" and quietly admits the
- * one family the rule exists to exclude is the shape worth naming here.
+ * The first version was a shape (`Area/Location`, at least one `/`, no leading
+ * sign) with `Etc/` excluded by name, and its own comment said that a regex
+ * "which quietly admits the one family the rule exists to exclude" is the shape
+ * worth naming. It was admitting TWO: `SystemV/EST5` canonicalises and is a
+ * permanent −05:00, and `SystemV/EST5EDT` follows the PRE-2007 US daylight
+ * rules, so on 2026-03-15 it reads an hour off `America/New_York` — a zone that
+ * is wrong for three weeks a year and right the rest of the time, which is the
+ * worst kind. Excluding one family by name means asking whether there is a
+ * third; naming the areas that ARE geographic ends the question.
+ *
+ * This list is not a guess. `Intl.supportedValuesOf('timeZone')` on this
+ * runtime contains exactly these ten areas and no others, so the allow-list can
+ * refuse nothing the picker offers or `timezonesForCountry` suggests — which is
+ * what makes it safe to be this strict.
+ *
+ * What it now refuses that it used to take: the single-word country aliases and
+ * the legacy country areas — `Japan`, `GB`, `Portugal`, `US/Eastern`,
+ * `Brazil/East`, `W-SU`. All of them resolve, and all of them are reachable
+ * only by hand-typing into an API that does not accept this field at all: the
+ * one way in is the host form's picker, which lists `supportedValuesOf`.
  */
-const REGION_ZONE = /^[A-Za-z][A-Za-z0-9_-]*(?:\/[A-Za-z0-9_+-]+)+$/
+const GEOGRAPHIC_AREAS = [
+  'Africa', 'America', 'Antarctica', 'Arctic', 'Asia',
+  'Atlantic', 'Australia', 'Europe', 'Indian', 'Pacific'
+]
 
-/** Every `Etc/*` identifier is a fixed offset, including `Etc/UTC` and `Etc/Zulu`. */
-const FIXED_OFFSET_AREA = /^etc\//i
+/**
+ * `Area/Location`, with the area being one of the ten above. The location half
+ * still allows `+`/`-` because real ones use them (`GMT+0` never reaches here;
+ * `America/Port-au-Prince` does).
+ */
+const REGION_ZONE = new RegExp(`^(?:${GEOGRAPHIC_AREAS.join('|')})(?:/[A-Za-z0-9_+-]+)+$`, 'i')
 
 /** Longer than any IANA identifier; a bound before the string reaches ICU. */
 export const MAX_TIMEZONE_LENGTH = 64
@@ -86,17 +112,17 @@ export const TIMEZONE_REFUSAL
 export function canonicalTimezone(raw: string | null | undefined): string | null {
   const name = (raw ?? '').trim()
   if (name === '' || name.length > MAX_TIMEZONE_LENGTH) return null
-  if (!REGION_ZONE.test(name) || FIXED_OFFSET_AREA.test(name)) return null
+  if (!REGION_ZONE.test(name)) return null
   let resolved: string
   try {
     resolved = new Intl.DateTimeFormat('en', { timeZone: name }).resolvedOptions().timeZone
   } catch {
     return null
   }
-  // A named zone that ICU resolves to a fixed offset is the same lie by another
-  // spelling; `Etc/*` is the only family that does it today, and this is what
-  // keeps the rule true if that ever stops being so.
-  if (!resolved.includes('/')) return null
+  // A zone in a geographic area that ICU nonetheless resolves to a fixed offset
+  // would be the same lie by another spelling. Nothing does that today; this is
+  // what keeps the rule true if anything ever starts.
+  if (!REGION_ZONE.test(resolved)) return null
   return resolved.toLowerCase() === name.toLowerCase() ? resolved : name
 }
 
@@ -114,6 +140,31 @@ export function isRenderableTimezone(zone: string | null | undefined): zone is s
   } catch {
     return false
   }
+}
+
+/**
+ * Whether two identifiers name THE SAME zone, which is not the same question as
+ * whether the two strings match.
+ *
+ * `Europe/Kyiv` and `Europe/Kiev` are one zone with two spellings, and this
+ * module deliberately stores whichever the host typed (see `canonicalTimezone`)
+ * — so every comparison between a stored value and a list that came from ICU
+ * has to go through here. A `zones.includes(stored)` undoes that decision in
+ * one line: it reports "not in the list", and whatever acts on that answer then
+ * offers the host the alias they were spared.
+ */
+export function sameZone(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return a === b || (!a && !b)
+  if (a === b) return true
+  const resolve = (z: string) => {
+    try {
+      return new Intl.DateTimeFormat('en', { timeZone: z }).resolvedOptions().timeZone.toLowerCase()
+    } catch {
+      return null
+    }
+  }
+  const ra = resolve(a)
+  return ra !== null && ra === resolve(b)
 }
 
 /** The zone to hand `Intl`, or undefined for the viewer's own. See the fallback note above. */
@@ -310,6 +361,36 @@ export function timezoneChoices(): string[] {
   } catch {
     return []
   }
+}
+
+/**
+ * WHAT A GEOCODED PLACE SHOULD OFFER, given the zones of its country and the
+ * zone the trip already carries: the whole list, or null for "say nothing".
+ *
+ * This is a pure function and not three lines inside `HostPlacesCard.vue` for a
+ * reason worth stating. The card is client-side — the suggestions arrive from a
+ * `$fetch` and nothing in this repository drives a browser — so the smoke suite
+ * can prove the SERVER answers with all twenty-nine US zones and cannot see the
+ * card keeping four of them. That is exactly where the bug was: `.slice(0, 4)`
+ * of an alphabetical list, which for a pin in Brooklyn is Adak, Anchorage,
+ * Boise and Chicago. A check that watches the wire while the defect lives in
+ * the renderer is a check that would have passed. So the decision moved here,
+ * where a unit test executes the real thing.
+ *
+ * NOTHING IS TRUNCATED AND NOTHING IS RANKED — see `HostPlacesCard.vue` for why
+ * the obvious ranking (each zone's offset against the one the pin's longitude
+ * implies) was measured and thrown away.
+ *
+ * Null when the country has no zones, or when the trip is ALREADY in one of
+ * them — compared with `sameZone`, because the stored value may be the spelling
+ * the host typed while ICU lists the alias, and `includes` would re-offer a
+ * trip its own zone under the name it was spared.
+ */
+export function zonesToOffer(zones: string[] | undefined | null, current: string | null | undefined): string[] | null {
+  const all = (zones ?? []).filter(z => canonicalTimezone(z) !== null)
+  if (all.length === 0) return null
+  if (all.some(z => sameZone(z, current))) return null
+  return all
 }
 
 /**
