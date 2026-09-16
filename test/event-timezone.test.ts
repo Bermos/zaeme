@@ -248,6 +248,13 @@ describe('a daylight-saving boundary inside the trip', () => {
     expect(isoFromZonedInput('2026-07-01T09:14', null)).toBe(new Date('2026-07-01T09:14').toISOString())
     expect(isoFromZonedInput('', 'Europe/Lisbon')).toBeNull()
     expect(isoFromZonedInput('not a date', 'Europe/Lisbon')).toBeNull()
+    // NOT ASSERTED HERE, and worth saying why: `2026-02-31T10:00` is
+    // well-formed and not real, and what it does depends on the ENGINE. V8
+    // rolls it over to 3 March; a spec-strict parser answers Invalid Date,
+    // whose `toISOString()` throws. `isoFromZonedInput` guards for the second
+    // case, but nothing in this repository runs an engine that takes it — an
+    // expectation either way would be a claim about V8 dressed up as one about
+    // the function.
   })
 
   it('leaves an instant that already carries its offset alone', () => {

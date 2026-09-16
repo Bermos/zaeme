@@ -254,7 +254,10 @@ const LOCAL_INPUT = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/
  * beside it is not read as a promise it does not make.
  *
  * Null for anything that is not `YYYY-MM-DDTHH:mm`, so a caller sends null
- * rather than an `Invalid Date`.
+ * rather than an `Invalid Date`. A date that is well-formed but does not exist
+ * (`2026-02-31T10:00`) cannot throw either: with a zone `Date.UTC` rolls it
+ * over, and without one the parse is guarded — see the note in the body, which
+ * is the only part of this file no test here can reach.
  */
 export function isoFromZonedInput(local: string | null | undefined, zone: string | null | undefined): string | null {
   const text = (local ?? '').trim()
@@ -265,7 +268,16 @@ export function isoFromZonedInput(local: string | null | undefined, zone: string
   }
   const tz = safeZone(zone)
   const wall = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0))
-  if (!tz) return new Date(text).toISOString()
+  if (!tz) {
+    // WELL-FORMED IS NOT THE SAME AS REAL, and what `2026-02-31T10:00` does
+    // here depends on the engine: V8 rolls it over to 3 March, while a
+    // spec-strict parser answers Invalid Date and `toISOString()` then THROWS
+    // — out of a click handler, on a browser this repository never runs a test
+    // on. A `datetime-local` field cannot produce such a value, which is
+    // exactly why nobody would ever find it.
+    const own = toDate(text)
+    return own ? own.toISOString() : null
+  }
   const firstPass = wall - offsetMsAt(new Date(wall), tz)
   const settled = wall - offsetMsAt(new Date(firstPass), tz)
   return new Date(settled).toISOString()
