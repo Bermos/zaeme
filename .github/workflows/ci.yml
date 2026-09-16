@@ -251,11 +251,44 @@ concurrency:
 # the budget refresh beside it signed them correctly — and SSR renders the guest
 # page off that route. 521 -> 578.
 #
+# SETTLING UP (#28) adds 63, and they are the arithmetic rather than the route:
+# a lopsided CHF 300.00 owed 50 / 150 / 100, whose plan therefore has an ORDER
+# (the smaller debt is matched first), paid off one transfer at a time with the
+# balances and the plan read back after each. A partial payment of 40.00 reduces
+# the debt by exactly 40.00 and no more; deleting it puts the balance back to
+# the figure from before it, asserted against that figure rather than a
+# constant; paying MORE than you owe turns the plan around and asks for the
+# difference back. The trip total is read after every one of them and never
+# moves, which is the criterion the whole shape exists for: a settlement touches
+# no category account, so CHF 300.00 of expenses and CHF 100.00 of transfers is
+# still CHF 300.00. Then the two no-lock-out cases, which are the owner's
+# standing rule and cannot be proved without a database: a trip that has already
+# settled changes currency and everybody STAYS at zero (three entries recomputed
+# at 1.0645 — a franc is worth more than a euro, and a fixture with that
+# backwards proves its arithmetic against nonsense — with the transfers
+# re-expressed alongside the expense), and an expense corrected afterwards
+# re-opens exactly 31.93 rather than being refused. The bodies are the ones
+# `BudgetCard.vue` composes, on both surfaces it posts to.
+#
+# THE REVIEW ADDED 14 MORE, and every one of them is a hole it found. The host
+# surface's DELETE was executed by nothing at all — `removeSettlementAsPlanner
+# (userId, slug, settlementId)` is three interchangeable strings, so transposing
+# two type-checks, passes every vitest test and 404s every ✕ on the host page —
+# so it is now run, and the balance read back after it. An edit may not split a
+# payment three ways, give it a split mode or title it by hand, and the budget
+# is re-read from a THIRD surface afterwards to prove the refusals wrote
+# nothing — on figures rather than on an entry found by title, because two
+# payments between one pair share a name. An edit MAY correct who was paid, and
+# the entry is renamed with them, which is what stops a derived title becoming a
+# lie. And a `logistics` planner — the role the shared gate exists to keep out,
+# accepted through a real planner-invite so the 403 is about the ROLE and not
+# about having no standing — is refused both verbs. 627 -> 641.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '578'
+  MIN_SMOKE_CHECKS: '641'
 
 jobs:
   ci:

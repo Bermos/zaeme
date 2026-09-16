@@ -53,8 +53,11 @@ interface Account {
 interface Expense {
   id: string
   title: string
-  /** The NAME of the category account this cost was debited to. */
-  category: string
+  /**
+   * The NAME of the category account this cost was debited to, and `null` on a
+   * settlement, which has no category line at all (#28).
+   */
+  category: string | null
   categoryAccountId?: string | null
   /** As spent, in `currency`. */
   amountCents: number
@@ -154,6 +157,15 @@ const props = defineProps<{
    * still shown, which is the read-only surface's shape.
    */
   receiptUploadBase?: string | null
+  /**
+   * Where a payment between two people is recorded (#28): POST here, DELETE to
+   * `${settlementsBase}/{id}`.
+   *
+   * Absent means the trip can be read but not settled — the plan still says who
+   * should pay whom, and there is nothing offering to record that they did,
+   * rather than a button that 404s.
+   */
+  settlementsBase?: string | null
 }>()
 const emit = defineEmits<{ updated: [budget: Budget] }>()
 
@@ -168,7 +180,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   travel: '🚆', accommodation: '🛏️', food: '🍕', tickets: '🎟️', uncategorised: '🧾'
 }
 
-function categoryIcon(name: string | undefined): string {
+function categoryIcon(name: string | null | undefined): string {
   return CATEGORY_ICONS[(name ?? '').toLowerCase()] ?? '🧾'
 }
 
@@ -210,6 +222,21 @@ function isForeign(x: Expense): boolean {
 }
 
 const canWrite = computed(() => !!props.viewer && !props.lockedReason)
+
+/**
+ * THE TWO KINDS OF ENTRY IN ONE LEDGER (#28). A settlement is an entry whose
+ * lines touch member accounts only — no category — so it is not a cost and does
+ * not belong in the expense list, in "what it went on", or in the total badge
+ * (which is the server's `totalCents`, a sum of category debits, and already
+ * excludes it).
+ *
+ * `isSettlement` is `shared/utils/settlement.ts`, auto-imported, and is the
+ * SAME rule the server writes by: the shape is the discriminator, so there is
+ * no flag here that could disagree with the lines. An entry that does not carry
+ * `categoryAccountId` at all reads as a cost, which is the safe way round.
+ */
+const costs = computed(() => props.budget.expenses.filter(x => !isSettlement(x)))
+const payments = computed(() => props.budget.expenses.filter(x => isSettlement(x)))
 
 /**
  * Everybody the form may offer: the trip's participants, plus anyone already on
@@ -837,12 +864,14 @@ async function saveExpense() {
           //
           // On an EDIT it is always sent, because there absent means "leave it
           // where it is" and moving a cost BACK to Uncategorised has to say so.
-          // NOTE for whoever writes the first member-to-member transfer (#28):
-          // such an entry has `categoryAccountId: null` and no category line at
-          // all, and this would give it one on the first edit — putting a
-          // transfer into `totalCents`, which is the sum of category debits.
-          // Nothing writes one today; when something does, this needs to send
-          // `null` for it rather than `uncategorised`.
+          //
+          // AND IT IS WHY THIS FORM NEVER OPENS ON A SETTLEMENT (#28). A
+          // transfer has `categoryAccountId: null` and no category line at all;
+          // sending `accountId` for one would give it a category and put CHF
+          // 300 that was handed over to clear a debt into `totalCents`, which
+          // is the sum of category debits. The list this form's ✎ lives in is
+          // `costs`, which excludes them, and the server refuses the field on a
+          // transfer besides — two locks, because the failure is silent money.
           ...(editing
             ? { accountId: categoryId.value || null }
             : showCategory.value && categoryId.value && categoryId.value !== uncategorised.value?.id
@@ -950,6 +979,136 @@ async function changeCurrency() {
     toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not change the currency', color: 'error' })
   } finally {
     changingSaving.value = false
+  }
+}
+
+/* ---- settling up (#28) ---- */
+
+/**
+ * "Mark as paid", and the arbitrary transfer beside it.
+ *
+ * A settlement is recorded through its own endpoint with its own four fields,
+ * and never through the expense form: the two would have to share the category
+ * picker, the split rows and the currency block, none of which mean anything
+ * for a payment between two people — and an expense form that could produce an
+ * entry with no category line is one accidental click away from taking a real
+ * cost out of the trip total.
+ *
+ * THE AMOUNT IS EDITABLE EVEN WHEN IT WAS PREFILLED FROM THE PLAN, because
+ * people settle in amounts that do not match a suggestion: a partial payment
+ * leaves the rest of the debt where it was, and paying too much turns the
+ * balance around and has the plan suggest the difference back. Neither is
+ * special-cased anywhere — see `server/domain/settlements.ts`.
+ *
+ * IN THE TRIP'S CURRENCY, always, because that is what the plan and the
+ * balances above are denominated in and what a person reading this screen is
+ * copying out of it. A transfer genuinely made in another currency is recorded
+ * through the API, which takes `currency` and a rate like any other entry; it
+ * is deliberately not a fifth control on a form whose whole job is one line.
+ */
+const settling = ref(false)
+const settleFrom = ref('')
+const settleTo = ref('')
+const settleAmount = ref('')
+const settleNote = ref('')
+const settleSaving = ref(false)
+
+/** Where the money can be recorded at all: the write standing, and an endpoint. */
+const canSettle = computed(() => canWrite.value && !!props.settlementsBase)
+
+const settleCents = computed(() => Math.round(Number.parseFloat(settleAmount.value || '0') * 100))
+
+/**
+ * Everybody a payment can be between: the split roster, plus anybody who
+ * carries a balance.
+ *
+ * The second half is what makes "mark as paid" work at all. A balance belongs
+ * to a member ACCOUNT, and an expense can name somebody who never RSVP'd — so
+ * the plan can legitimately suggest a transfer between two people the
+ * participant list does not contain, and a picker built from that list alone
+ * would silently drop one end of it.
+ */
+const settleOptions = computed(() => {
+  const seen = new Map<string, Participant>()
+  for (const p of payerOptions.value) if (p.email) seen.set(p.email, p)
+  for (const b of props.budget.balances) if (b.email && !seen.has(b.email)) seen.set(b.email, { name: b.name, email: b.email })
+  return [...seen.values()]
+})
+const settleItems = computed(() => settleOptions.value.map(p => ({ label: p.name, value: p.email })))
+
+/** Who a recorded payment went TO: its single share. */
+function paidTo(x: Expense): string {
+  return x.shares[0]?.name ?? '—'
+}
+
+/** Open the form, prefilled from a suggested transfer or empty for any other. */
+function startSettle(s?: { fromName: string, fromEmail: string, toName: string, toEmail: string, amountCents: number }) {
+  adding.value = false
+  settleFrom.value = s?.fromEmail ?? props.viewer?.email ?? ''
+  settleTo.value = s?.toEmail ?? ''
+  settleAmount.value = s ? (s.amountCents / 100).toFixed(2) : ''
+  settleNote.value = ''
+  settling.value = true
+}
+
+function cancelSettle() {
+  settling.value = false
+  settleFrom.value = ''
+  settleTo.value = ''
+  settleAmount.value = ''
+  settleNote.value = ''
+}
+
+const settleReady = computed(() =>
+  !!settleFrom.value && !!settleTo.value && settleFrom.value !== settleTo.value
+  && Number.isFinite(settleCents.value) && settleCents.value > 0)
+
+async function saveSettlement() {
+  const base = props.settlementsBase
+  const from = settleOptions.value.find(p => p.email === settleFrom.value)
+  const to = settleOptions.value.find(p => p.email === settleTo.value)
+  if (!base || !from || !to || !settleReady.value) return
+  settleSaving.value = true
+  try {
+    const res = await $fetch<{ budget: Budget }>(base, {
+      method: 'POST',
+      body: {
+        fromName: from.name,
+        fromEmail: from.email,
+        toName: to.name,
+        toEmail: to.email,
+        amountCents: settleCents.value,
+        // An empty note is no note. Sending `""` would record a blank string as
+        // if somebody had typed one.
+        ...(settleNote.value.trim() ? { note: settleNote.value.trim() } : {})
+      }
+    })
+    cancelSettle()
+    emit('updated', res.budget)
+    toast.add({ title: 'Payment recorded', color: 'success' })
+  } catch (e) {
+    toast.add({
+      title: (e as { data?: { message?: string } }).data?.message ?? 'Could not record that payment',
+      color: 'error'
+    })
+  } finally {
+    settleSaving.value = false
+  }
+}
+
+/**
+ * Take a recorded payment back off. Anyone who may record one may remove one
+ * (#28): a settlement is a claim that money changed hands, and a mistyped one
+ * nobody can undo is worse than no feature.
+ */
+async function removeSettlement(id: string) {
+  if (!props.settlementsBase) return
+  try {
+    const res = await $fetch<{ budget: Budget }>(`${props.settlementsBase}/${id}`, { method: 'DELETE' })
+    emit('updated', res.budget)
+    toast.add({ title: 'Payment removed', color: 'success' })
+  } catch (e) {
+    toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not remove that', color: 'error' })
   }
 }
 
@@ -1109,13 +1268,16 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
            direct children of a `flex flex-col gap-4`, and a real div would
            collapse them into one gapless item. -->
       <template v-if="showAmounts">
-        <!-- Expenses -->
+        <!-- Expenses. `costs` and not `budget.expenses`: a settlement is an
+             entry in the same list and is not a cost (#28), so it renders in
+             its own section below rather than as somebody buying a mysterious
+             CHF 300 thing. -->
         <div
-          v-if="budget.expenses.length"
+          v-if="costs.length"
           class="flex flex-col gap-1"
         >
           <div
-            v-for="x in budget.expenses"
+            v-for="x in costs"
             :key="x.id"
             class="flex items-start justify-between gap-2 py-2 border-b border-default last:border-b-0 text-sm"
           >
@@ -1255,6 +1417,54 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
         >
           No expenses yet.
         </p>
+
+        <!-- What has actually been paid back (#28). Rendered apart from the
+             expenses, because a transfer between two friends is not a cost:
+             it moves the balances below and touches no category, which is
+             exactly why the total badge above cannot see it. -->
+        <div
+          v-if="payments.length"
+          class="flex flex-col gap-1"
+        >
+          <p class="text-sm font-medium">
+            Paid back
+          </p>
+          <div
+            v-for="x in payments"
+            :key="x.id"
+            class="flex items-start justify-between gap-2 text-sm py-1"
+          >
+            <div>
+              <p>
+                🤝 <span class="font-medium">{{ x.paidByName }}</span> paid
+                <span class="font-medium">{{ paidTo(x) }}</span>
+                {{ money(x.amountCents, x.currency) }}{{ isForeign(x) ? ` (${money(x.amountBaseCents, x.baseCurrency)})` : '' }}
+              </p>
+              <p
+                v-if="x.note"
+                class="text-muted text-xs"
+              >
+                {{ x.note }}
+              </p>
+              <p
+                v-if="x.addedByName"
+                class="text-muted text-xs"
+              >
+                recorded by {{ x.addedByName }}
+              </p>
+            </div>
+            <UButton
+              v-if="canSettle"
+              size="xs"
+              color="neutral"
+              variant="ghost"
+              :aria-label="`Remove the payment from ${x.paidByName} to ${paidTo(x)}`"
+              @click="removeSettlement(x.id)"
+            >
+              ✕
+            </UButton>
+          </div>
+        </div>
 
         <!-- What it went on, once the group uses categories. One line per
              account, and the figure is the sum of DEBITS into it — which is
@@ -1401,7 +1611,9 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           </div>
         </div>
 
-        <!-- Settle up -->
+        <!-- Settle up. Each suggestion carries the way to say it HAPPENED
+             (#28) — prefilled from the figure beside it, and editable, because
+             people pay in amounts that do not match a suggestion. -->
         <div
           v-if="budget.settlements.length"
           class="flex flex-col gap-1"
@@ -1409,16 +1621,36 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           <p class="text-sm font-medium">
             To settle up
           </p>
-          <p
+          <div
             v-for="(s, i) in budget.settlements"
             :key="i"
-            class="text-sm text-muted"
+            class="flex items-center justify-between gap-2 text-sm text-muted"
           >
-            👉 <span class="font-medium text-default">{{ s.fromName }}</span> pays
-            <span class="font-medium text-default">{{ s.toName }}</span>
-            {{ money(s.amountCents, budget.currency) }}
-          </p>
+            <p>
+              👉 <span class="font-medium text-default">{{ s.fromName }}</span> pays
+              <span class="font-medium text-default">{{ s.toName }}</span>
+              {{ money(s.amountCents, budget.currency) }}
+            </p>
+            <UButton
+              v-if="canSettle"
+              size="xs"
+              variant="ghost"
+              :aria-label="`Record that ${s.fromName} paid ${s.toName}`"
+              @click="startSettle(s)"
+            >
+              Mark as paid
+            </UButton>
+          </div>
         </div>
+        <!-- …and when there is nothing left to suggest, say so. A trip where
+             every transfer has been recorded ends here, which is the whole
+             point of being able to record them. -->
+        <p
+          v-else-if="budget.balances.length"
+          class="text-sm text-muted"
+        >
+          ✅ Everyone is square.
+        </p>
       </template>
 
       <!-- Money needs an account: say so, and never offer a sign-in that cannot complete -->
@@ -1714,15 +1946,99 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
           </UButton>
         </div>
       </form>
-      <UButton
-        v-else-if="canWrite"
-        size="sm"
-        variant="outline"
-        class="self-start"
-        @click="adding = true"
+      <!-- Record a payment (#28). Its own form, never the expense form with a
+           different label: the four fields here are all there is to say, and an
+           expense form that could write an entry with no category line is one
+           misclick away from taking a real cost out of the trip total. -->
+      <form
+        v-else-if="canSettle && settling"
+        class="flex flex-col gap-2 pt-1"
+        @submit.prevent="saveSettlement"
       >
-        Add an expense
-      </UButton>
+        <p class="text-sm text-muted">
+          Somebody paid somebody back. It leaves the balances and stays out of what the trip cost.
+        </p>
+        <div class="flex flex-wrap items-end gap-2">
+          <UFormField
+            label="Who paid"
+            size="sm"
+          >
+            <USelect
+              v-model="settleFrom"
+              :items="settleItems"
+              class="w-40"
+            />
+          </UFormField>
+          <UFormField
+            label="Who was paid"
+            size="sm"
+          >
+            <USelect
+              v-model="settleTo"
+              :items="settleItems"
+              class="w-40"
+            />
+          </UFormField>
+          <UFormField
+            :label="`How much, in ${budget.currency}`"
+            size="sm"
+            help="Part of it is fine — the rest stays owed."
+          >
+            <UInput
+              v-model="settleAmount"
+              type="number"
+              step="0.05"
+              min="0"
+              placeholder="300.00"
+              class="w-28"
+            />
+          </UFormField>
+        </div>
+        <UInput
+          v-model="settleNote"
+          placeholder="Twint, Tuesday"
+          size="sm"
+        />
+        <div class="flex gap-2">
+          <UButton
+            type="submit"
+            size="sm"
+            :loading="settleSaving"
+            :disabled="!settleReady"
+          >
+            Record the payment
+          </UButton>
+          <UButton
+            size="sm"
+            variant="ghost"
+            color="neutral"
+            @click="cancelSettle"
+          >
+            Cancel
+          </UButton>
+        </div>
+      </form>
+      <div
+        v-else-if="canWrite"
+        class="flex flex-wrap gap-2"
+      >
+        <UButton
+          size="sm"
+          variant="outline"
+          @click="adding = true"
+        >
+          Add an expense
+        </UButton>
+        <UButton
+          v-if="canSettle"
+          size="sm"
+          variant="ghost"
+          color="neutral"
+          @click="startSettle()"
+        >
+          Record a payment
+        </UButton>
+      </div>
     </div>
 
     <!-- One picker for every row; `receiptFor` says which expense opened it. -->
