@@ -1025,6 +1025,116 @@ describe('passkeys are a second way in, not a second credential', () => {
 })
 
 /**
+ * A TICKET STAYS HOST-MANAGED, AND WHAT IS PRINTED ON IT IS PART OF THE TICKET
+ * (#35).
+ *
+ * `server/domain/guest.ts` refuses a guest the UPLOAD of a ticket or a
+ * document, and the detail is the same thing said in rows: a seat number is not
+ * a fact anybody holding the forwarded link gets to write. Two ways for that to
+ * go wrong quietly — a write route on the invite token or the account surface,
+ * or the domain function reaching for a weaker gate than the one that governs
+ * assignment and deletion — and neither is visible in the shape of a handler.
+ */
+describe('what a ticket says is written by a planner, on the host surface only', () => {
+  const DETAIL = join(API_ROOT, 'host', 'events', '[slug]', 'media', '[id]', 'detail.put.ts')
+
+  it('lives beside assignment, and on no other credential', () => {
+    expect(existsSync(DETAIL), DETAIL).toBe(true)
+    expect(readFileSync(DETAIL, 'utf8')).toMatch(/requireGuestUser\(/)
+    // The capability URL gains nothing. A guest may not upload a ticket, so a
+    // guest may not annotate one either.
+    const elsewhere = [...guestHandlers, ...accountHandlers, ...machineHandlers, ...adminHandlers]
+      .filter(f => /detail/i.test(rel(f)))
+    expect(elsewhere.map(rel)).toEqual([])
+  })
+
+  it('asks the same gate assignment and deletion ask', () => {
+    // ASK WHAT A GUARD PERMITS, NOT WHAT IT FORBIDS (#74). `logistics` is a
+    // planner row and is deliberately not one of these two: a ticket is
+    // somebody's seat, and the role set that may re-assign it is the role set
+    // that may say what is on it. Pinned per function, because a regex over
+    // the whole file passes on any one of the three matching.
+    const src = readFileSync(join(ROOT, 'server', 'domain', 'media.ts'), 'utf8')
+    for (const fn of ['assignTicket', 'deleteMedia', 'setTicketDetail']) {
+      const start = src.indexOf(`export async function ${fn}(`)
+      expect(start, fn).toBeGreaterThan(-1)
+      const body = src.slice(start, src.indexOf('\n}\n', start))
+      expect(body, fn).toMatch(/assertPlanner\([^)]*roles: \['owner', 'co_planner'\]/s)
+    }
+  })
+
+  it('keeps tickets and documents off the guest upload list', () => {
+    // The rule this issue must not move. Read as a VALUE rather than as "does
+    // not contain 'ticket'": the refusal message beside it names both words,
+    // so a substring test passes on a list that has gained them.
+    const guest = readFileSync(join(ROOT, 'server', 'domain', 'guest.ts'), 'utf8')
+    const list = /const GUEST_UPLOAD_TYPES: MediaType\[\] = \[([^\]]*)\]/.exec(guest)?.[1]
+    expect(list).toBeDefined()
+    const types = list!.split(',').map(s => s.trim().replace(/'/g, '')).filter(Boolean)
+    expect(types).toEqual(['photo', 'video'])
+  })
+
+  it('never makes a field required, on the wire or in the database', () => {
+    // THE RULE THE ISSUE STATES IN TERMS: this must never become a form
+    // somebody has to complete before uploading a PDF. Two places can break it
+    // independently — a `.min(1)` in the route's zod schema, or a `.notNull()`
+    // on one of the eight columns — so both are read.
+    const route = readFileSync(DETAIL, 'utf8')
+    const schema = route.slice(route.indexOf('const bodySchema'), route.indexOf('export default'))
+    expect(schema).not.toMatch(/\.min\(/)
+    // Every declared field is `.nullish()`: optional AND nullable, which is
+    // what makes `{}` a legal body that clears the lot.
+    const fields = [...schema.matchAll(/^ {2}(\w+):/gm)].map(m => m[1])
+    expect(fields).toEqual([
+      'bookingRef', 'carrier', 'seat', 'coach', 'travellerName', 'validFrom', 'validUntil', 'note'
+    ])
+    expect([...schema.matchAll(/\.nullish\(\)/g)]).toHaveLength(fields.length)
+
+    const events = readFileSync(join(ROOT, 'server', 'database', 'schema', 'events.ts'), 'utf8')
+    const table = events.slice(
+      events.indexOf('export const ticketDetail = pgTable('),
+      events.indexOf('export const icalToken = pgTable(')
+    )
+    expect(table).not.toBe('')
+    for (const column of fields) {
+      const line = new RegExp(`^  ${column}: .*$`, 'm').exec(table)?.[0]
+      expect(line, column).toBeDefined()
+      expect(line, column).not.toMatch(/notNull\(\)/)
+    }
+    // …and the two that ARE not-null are the bookkeeping, not the content.
+    expect(table).toMatch(/eventId: text\('event_id'\)\.notNull\(\)/)
+    expect(table).toMatch(/mediaId: text\('media_id'\)\.notNull\(\)/)
+  })
+
+  it('cannot point at a ticket on another event', () => {
+    // A plain `media_id` reference would let a detail row on one trip name a
+    // ticket on another, with only the handler's `eventId` filter between a
+    // seat number and the wrong event. The composite key makes Postgres refuse
+    // it, and it needs the unique index on `events_media (event_id, id)` as
+    // its target — which is why the generated migration had to be re-ordered.
+    const events = readFileSync(join(ROOT, 'server', 'database', 'schema', 'events.ts'), 'utf8')
+    expect(events).toMatch(/foreignColumns: \[media\.eventId, media\.id\]/)
+    expect(events).toMatch(/uniqueIndex\('events_media_event_id_unique'\)\.on\(table\.eventId, table\.id\)/)
+
+    // THE `42830` TRAP, asserted on the file that would abort the deploy. A
+    // foreign key naming `events_media (event_id, id)` must come AFTER the
+    // unique index backing it, and drizzle-kit emits every constraint before
+    // every index — so this ordering is hand-edited and nothing but this reads
+    // it. `pnpm test` runs no SQL; without this the first sign is the Kitchen
+    // `migrate` task failing, with production left on the previous release.
+    const sql = readFileSync(
+      join(ROOT, 'server', 'database', 'migrations', '0012_worried_silver_centurion.sql'),
+      'utf8'
+    )
+    const index = sql.indexOf('CREATE UNIQUE INDEX "events_media_event_id_unique"')
+    const fk = sql.indexOf('ADD CONSTRAINT "events_ticket_detail_event_media_fk"')
+    expect(index).toBeGreaterThan(-1)
+    expect(fk).toBeGreaterThan(-1)
+    expect(index).toBeLessThan(fk)
+  })
+})
+
+/**
  * Nuxt's file-based router has one trap this app has already fallen into, and
  * it is invisible to every test that talks to the API instead of the pages.
  *

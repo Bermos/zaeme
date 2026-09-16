@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { TicketDetailFields } from '#shared/utils/ticket-detail'
+
 /**
  * The guest event page — the heart of zäme (PUBLIC-SITE-PLAN "movie night",
  * since grown into the full planner). Reached via the invite capability URL;
@@ -42,6 +44,8 @@ interface MediaItem {
   mimeType: string
   fileName: string
   caption: string | null
+  /** What the ticket says (#35) — null for every other type and for a bare PDF. */
+  ticket?: TicketDetailFields | null
   url: string
 }
 interface MediaBuckets { gallery: MediaItem[], documents: MediaItem[], tickets: MediaItem[] }
@@ -365,6 +369,7 @@ const errorMessage = computed(() => {
         :gallery="media.gallery"
         :documents="media.documents"
         :tickets="media.tickets"
+        :timezone="page.event.timezone"
         :presign-url="`/api/invites/${token}/media/presign`"
         :confirm-url="`/api/invites/${token}/media/confirm`"
         :upload-types="complete ? ['photo', 'video'] : []"

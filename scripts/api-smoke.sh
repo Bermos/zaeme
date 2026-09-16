@@ -327,6 +327,50 @@ media_field() {
     })' "$2" "$3"
 }
 
+# `ticket_field <body> <mediaId> <field>` — one field of the TICKET DETAIL on
+# one media item (#35), and the three ways it can be absent are three DIFFERENT
+# answers, which is the whole point of the helper:
+#
+#   no-such-item   the viewer cannot see that media row at all
+#   no-detail      the row is there and `ticket` is null — nobody has written
+#                  anything on it, which is every ticket from before #35
+#   null           there IS a detail row and this field of it is blank
+#
+# A helper that folded the last two together could not tell "no detail row" from
+# "a detail row somebody cleared", which is exactly the distinction the issue
+# turns on: an entirely empty detail is legal and must survive.
+ticket_field() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let items
+      try { items = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const raw = Array.isArray(items) ? items : (items.media ?? items.tickets ?? [])
+      // A write answers with ONE item under `media`; a list answers an array.
+      const list = Array.isArray(raw) ? raw : [raw]
+      const m = list.find(x => x && x.id === process.argv[1])
+      if (!m) return process.stdout.write("no-such-item")
+      if (m.ticket === undefined || m.ticket === null) return process.stdout.write("no-detail")
+      const v = m.ticket[process.argv[2]]
+      process.stdout.write(v === undefined || v === null ? "null" : String(v))
+    })' "$2" "$3"
+}
+
+# `rsvp_id <body> <email>` — the id of the RSVP with that address, from a
+# `{rsvps:…}` body. Matched on the ADDRESS rather than on "the first one": by
+# the time a ticket is assigned the trip has more than one attendee, and
+# assigning it to the wrong person reads exactly like the feature being broken.
+rsvp_id() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const r = (b.rsvps ?? []).find(x => (x.guestEmail ?? "").toLowerCase() === process.argv[1].toLowerCase())
+      process.stdout.write(r ? r.id : "no-such-rsvp")
+    })' "$2"
+}
+
 # `json_field <body> <dotted-path>` — a scalar out of a small response, for the
 # two-step upload's `mediaId` and presigned URL. `sed` cannot be trusted with
 # the second: it is a URL full of `&`, `=` and `/`.
@@ -2944,6 +2988,218 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
     "$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TZSERSLUG2/series/showings" -d '{"title":"Heat","startsAt":"2027-07-09T20:00:00+02:00"}')" '"timezone":null'
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
+
+echo
+echo "== what a ticket says (Bermos/zaeme#35) =="
+# A ticket was a PDF with a filename. At a barrier you need the booking
+# reference and the seat BEFORE the PDF finishes rendering — or, on a train with
+# no signal, when it never does — so the facts are rows in `events_ticket_detail`
+# and they travel beside the download.
+#
+# WHAT ONLY A DATABASE CAN SHOW. The table is new, its foreign key is composite,
+# and its cascade runs in Postgres and nowhere else: `pnpm test` reads the
+# schema file and executes no SQL at all, so the upsert, the scoping to one
+# event and the delete that takes the detail with the ticket are proved here or
+# by nothing.
+#
+# THE ONE THING THIS BLOCK CANNOT SEE is the rendering. The ticket list is
+# fetched by the browser (media URLs are short-lived signatures, so
+# `app/pages/i/[token].vue` loads them `onMounted`), which means there is no
+# SSR'd HTML with a seat number in it to read the way the #31 checks above read
+# the itinerary. That half lives in `test/ticket-detail.test.ts`, over the pure
+# function the cards call — which is the same remedy #31's review reached for
+# when a zone shortlist was wrong in a card the wire could not see.
+#
+# WHAT IS ASSERTED HERE INSTEAD is the half JSON can carry, and the instants are
+# most of it: `valid_from`/`valid_until` are `timestamptz`, so setting the trip's
+# zone and clearing it again must move neither, compared against the literal
+# they were written as rather than against a baseline the same mutation could
+# have moved.
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  TDP=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  TDG=(-H "Cookie: $ZAEME_TEST_GUEST_COOKIE")
+
+  # Its own trip, published so an invite token resolves on it, and its own
+  # invite: this script re-runs against the previous run's rows.
+  TDSLUG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke ticket $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TDSLUG/status" -d '{"status":"published"}' > /dev/null
+  TDTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TDSLUG/invites" -d '{"label":"Ticket smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  TDHOST="$BASE/api/host/events/$TDSLUG"
+  echo "  trip: $TDSLUG"
+
+  # --- WHO MAY WRITE ONE. Needs no object storage: every credential gate runs
+  #     before the media row is ever looked up, so these run on a bare instance.
+  check "an anonymous ticket detail is refused"     401 "${JSON[@]}" -X PUT "$TDHOST/media/nope/detail" -d '{"seat":"41A"}'
+  check "a service token is not a planner here"     401 "${AUTH[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/nope/detail" -d '{"seat":"41A"}'
+  check "an account with no standing on the trip"   403 "${TDG[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/nope/detail" -d '{"seat":"41A"}'
+  check "the invite link never gained the route"    404 "${JSON[@]}" -X PUT "$BASE/api/invites/$TDTOK/media/nope/detail" -d '{"seat":"41A"}'
+  check "...nor did the machine API"                404 "${AUTH[@]}" "${JSON[@]}" -X PUT "$API/events/$TDSLUG/media/nope/detail" -d '{"seat":"41A"}'
+  check "...nor the account surface"                404 "${TDP[@]}" "${JSON[@]}" -X PUT "$BASE/api/me/events/$TDSLUG/media/nope/detail" -d '{"seat":"41A"}'
+  # A PLANNER naming a ticket that does not exist gets a 404 rather than a 403:
+  # this is the line that says the three above are about the CREDENTIAL and not
+  # about the made-up media id they all carry.
+  check "a planner with no such ticket gets a 404"  404 "${TDP[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/nope/detail" -d '{"seat":"41A"}'
+
+  # ASK WHAT THE GUARD PERMITS, NOT WHAT IT FORBIDS (#74). `logistics` is a real
+  # planner row, and it is the one role `assertPlanner(roles: [owner,
+  # co_planner])` exists to keep out — so the 403 above, from an account with no
+  # standing at all, is a different question from this one. The acceptance is
+  # asserted first, or a 403 from an invite that never landed would be the "no
+  # standing" check wearing this one's name.
+  TDLOG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TDSLUG/planner-invites" -d '{"role":"logistics"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  contains "a second account really is a logistics planner" \
+    "$(body "${TDG[@]}" "${JSON[@]}" -X POST "$BASE/api/host/join/$TDLOG/accept")" '"role":"logistics"'
+  check "...and a logistics planner may not annotate" 403 "${TDG[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/nope/detail" -d '{"seat":"41A"}'
+
+  # --- THE ROWS THEMSELVES. These need a bucket, because there is no ticket
+  #     without an upload, and skip as ONE line without one — exactly like the
+  #     receipt bytes and the poster checks. CI always has `adobe/s3mock`, and
+  #     the job fails on any `skip` at all.
+  if [ -n "${S3_BUCKET:-}${R2_BUCKET:-}" ]; then
+    TDPDF='%PDF-1.4 not really a pdf, but bytes enough for a smoke check.'
+    TDSIZE=${#TDPDF}
+    TDPRE=$(body "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/presign" \
+      -d "{\"type\":\"ticket\",\"fileName\":\"lisbon.pdf\",\"mimeType\":\"application/pdf\",\"sizeBytes\":$TDSIZE}")
+    TDMID=$(json_field "$TDPRE" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: application/pdf' --data-binary "$TDPDF" "$(json_field "$TDPRE" upload.url)"
+    check "a planner uploads a ticket"              200 "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/confirm" -d "{\"mediaId\":\"$TDMID\"}"
+
+    # ACCEPTANCE 1: A TICKET WITH NO DETAIL ROW READS EXACTLY AS IT DID TODAY.
+    # `no-such-item` and `no-detail` are different answers from this helper, so
+    # the first line is not satisfied by a ticket that vanished from the list.
+    TDV1=$(body "${AUTH[@]}" "$API/events/$TDSLUG/media")
+    equals "the fresh ticket is in the list"        "$(media_field "$TDV1" "$TDMID" id)" "$TDMID"
+    equals "...and reports NO detail at all"        "$(ticket_field "$TDV1" "$TDMID" seat)" "no-detail"
+    contains "...as an explicit null, not a gap"    "$TDV1" '"ticket":null'
+    equals "...on the host surface too"             "$(ticket_field "$(body "${TDP[@]}" "$TDHOST/media")" "$TDMID" seat)" "no-detail"
+
+    # ACCEPTANCE 2: A PLANNER WRITES THEM AFTER THE UPLOAD. Lopsided values on
+    # purpose — none of them is a default, so a handler that discarded its input
+    # and answered its own defaults is visibly a different string.
+    TDSET=$(body "${TDP[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/$TDMID/detail" \
+      -d '{"carrier":"SBB","bookingRef":"XY7Q2M","coach":"12","seat":"41A","travellerName":"Ana Silva","validFrom":"2026-07-01T07:00:00Z","validUntil":"2026-07-01T22:59:00Z","note":"Window, facing forwards"}')
+    equals "a planner writes the seat after upload" "$(ticket_field "$TDSET" "$TDMID" seat)" "41A"
+    equals "...and the coach"                       "$(ticket_field "$TDSET" "$TDMID" coach)" "12"
+    equals "...and the booking reference"           "$(ticket_field "$TDSET" "$TDMID" bookingRef)" "XY7Q2M"
+    equals "...and the carrier"                     "$(ticket_field "$TDSET" "$TDMID" carrier)" "SBB"
+    equals "...and the name printed on it"          "$(ticket_field "$TDSET" "$TDMID" travellerName)" "Ana Silva"
+    TDREAD=$(body "${AUTH[@]}" "$API/events/$TDSLUG/media")
+    equals "...and it is STORED, not just echoed"   "$(ticket_field "$TDREAD" "$TDMID" seat)" "41A"
+
+    # ACCEPTANCE 3: `validFrom`/`validUntil` ARE INSTANTS AND STAY INSTANTS.
+    # A ticket valid "until 23:59" means 23:59 where the barrier is, and the way
+    # that goes wrong is a well-meaning refactor rebasing the stored value onto
+    # the event's zone. Against the LITERAL it was written as, because a rebase
+    # that is symmetric — shift on set, shift back on clear — has already undone
+    # itself by the time a baseline comparison samples it.
+    equals "the validity comes back as written"     "$(ticket_field "$TDSET" "$TDMID" validUntil)" "2026-07-01T22:59:00.000Z"
+    equals "...and so does the start of it"         "$(ticket_field "$TDSET" "$TDMID" validFrom)" "2026-07-01T07:00:00.000Z"
+    body "${TDP[@]}" "${JSON[@]}" -X PATCH "$TDHOST" -d '{"timezone":"Europe/Lisbon"}' > /dev/null
+    equals "setting the trip's zone moves neither"   \
+      "$(ticket_field "$(body "${AUTH[@]}" "$API/events/$TDSLUG/media")" "$TDMID" validUntil)" "2026-07-01T22:59:00.000Z"
+    body "${TDP[@]}" "${JSON[@]}" -X PATCH "$TDHOST" -d '{"timezone":null}' > /dev/null
+    equals "...and clearing it moves neither either" \
+      "$(ticket_field "$(body "${AUTH[@]}" "$API/events/$TDSLUG/media")" "$TDMID" validUntil)" "2026-07-01T22:59:00.000Z"
+    body "${TDP[@]}" "${JSON[@]}" -X PATCH "$TDHOST" -d '{"timezone":"Europe/Lisbon"}' > /dev/null
+    contains "the trip is in Lisbon for the reader"  "$(body "$BASE/api/invites/$TDTOK")" '"timezone":"Europe/Lisbon"'
+
+    # ACCEPTANCE 4: THE ATTENDEE READS IT NEXT TO THE DOWNLOAD — and nobody
+    # else does. A ticket is per-person; the detail says where somebody is
+    # sitting, so it travels with the ticket and never one row further.
+    TDEMAIL=$(body "${TDG[@]}" "$BASE/api/auth/get-session" | grep -o '"email":"[^"]*"' | head -1 | sed 's/^"email":"//;s/"$//')
+    body "${JSON[@]}" -X POST "$BASE/api/invites/$TDTOK/rsvp" \
+      -d "{\"status\":\"yes\",\"guestName\":\"CI Guest\",\"guestEmail\":\"$TDEMAIL\"}" > /dev/null
+    TDRID=$(rsvp_id "$(body "${AUTH[@]}" "$API/events/$TDSLUG/rsvps")" "$TDEMAIL")
+    check "a planner assigns the ticket to them"    200 "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/$TDMID/assign" -d "{\"rsvpId\":\"$TDRID\"}"
+    equals "...without losing what is written on it" \
+      "$(ticket_field "$(body "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/$TDMID/assign" -d "{\"rsvpId\":\"$TDRID\"}")" "$TDMID" seat)" "41A"
+    TDGUEST=$(body "$BASE/api/invites/$TDTOK/media?email=$TDEMAIL")
+    equals "the attendee's own ticket carries the seat" "$(ticket_field "$TDGUEST" "$TDMID" seat)" "41A"
+    equals "...and the coach beside it"             "$(ticket_field "$TDGUEST" "$TDMID" coach)" "12"
+    contains "...alongside a SIGNED download URL"   "$TDGUEST" 'X-Amz-Signature='
+    # AND NO FURTHER. Somebody else holding the same forwarded link sees neither
+    # the ticket nor a seat number anywhere in the body.
+    TDOTHER=$(body "$BASE/api/invites/$TDTOK/media?email=nobody@example.com")
+    equals "a stranger on the same link sees no ticket" "$(ticket_field "$TDOTHER" "$TDMID" seat)" "no-such-item"
+    excludes "...and no seat number anywhere in it" "$TDOTHER" '41A'
+    excludes "...nor the booking reference"         "$TDOTHER" 'XY7Q2M'
+
+    # ACCEPTANCE 2, THE EDIT HALF. A PUT REPLACES: what is not sent is cleared,
+    # which is one meaning per request. The third line is the one that matters —
+    # `null` rather than `no-detail` says the ROW survived the clearing, which
+    # is what makes an empty detail a state rather than a deletion.
+    TDED=$(body "${TDP[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/$TDMID/detail" -d '{"seat":"12C"}')
+    equals "a planner corrects the seat"            "$(ticket_field "$TDED" "$TDMID" seat)" "12C"
+    equals "...and what was not sent is cleared"    "$(ticket_field "$TDED" "$TDMID" bookingRef)" "null"
+    equals "...the row itself surviving the clear"  "$(ticket_field "$TDED" "$TDMID" coach)" "null"
+    excludes "...so the old seat is gone from the wire" \
+      "$(body "$BASE/api/invites/$TDTOK/media?email=$TDEMAIL")" '41A'
+
+    # A TICKET WITH NOTHING FILLED IN IS STILL A TICKET. `{}` is a legal body —
+    # it must not arrive as a 400, and it must leave a row rather than removing
+    # one. This is the rule the issue states in terms, executed.
+    check "an empty detail is accepted"             200 "${TDP[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/$TDMID/detail" -d '{}'
+    TDEMPTY=$(body "${TDP[@]}" "$TDHOST/media")
+    equals "...leaving a row that says nothing"     "$(ticket_field "$TDEMPTY" "$TDMID" seat)" "null"
+    equals "...and no stale validity on it"         "$(ticket_field "$TDEMPTY" "$TDMID" validUntil)" "null"
+    equals "...while the ticket itself is untouched" "$(media_field "$TDEMPTY" "$TDMID" fileName)" "lisbon.pdf"
+    excludes "...and the attendee reads no stale seat" \
+      "$(body "$BASE/api/invites/$TDTOK/media?email=$TDEMAIL")" '12C'
+
+    # A PHOTO HAS NO BOOKING REFERENCE, and the refusal is 422 rather than 400:
+    # a 400 would mean zod refused the body and the domain rule was never
+    # consulted, which is a different finding and the same colour.
+    TDPPRE=$(body "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/presign" \
+      -d '{"type":"photo","fileName":"platform.png","mimeType":"image/png","sizeBytes":8}')
+    TDPID=$(json_field "$TDPPRE" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: image/png' --data-binary 'eightbit' "$(json_field "$TDPPRE" upload.url)"
+    body "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/confirm" -d "{\"mediaId\":\"$TDPID\"}" > /dev/null
+    check "a photo has no seat to write"            422 "${TDP[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/$TDPID/detail" -d '{"seat":"41A"}'
+    contains "...and says why, in words"            "$(body "${TDP[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/$TDPID/detail" -d '{"seat":"41A"}')" 'Only a ticket'
+    equals "...and the photo still reports none"    "$(ticket_field "$(body "${AUTH[@]}" "$API/events/$TDSLUG/media")" "$TDPID" seat)" "no-detail"
+
+    # A REAL TICKET FROM ANOTHER TRIP, not a made-up id. The two are the same
+    # 404 today and stop being the same the moment somebody drops the `eventId`
+    # half of the lookup — at which point a made-up id still 404s and this check
+    # still passes while a stranger's seat number can be overwritten. The owner
+    # plans both trips, so the gate lets the request through and only the
+    # scoping refuses it.
+    TDSLUG2=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+      -d "{\"title\":\"Smoke ticket other $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+    TDOPRE=$(body "${TDP[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$TDSLUG2/media/presign" \
+      -d "{\"type\":\"ticket\",\"fileName\":\"elsewhere.pdf\",\"mimeType\":\"application/pdf\",\"sizeBytes\":$TDSIZE}")
+    TDOMID=$(json_field "$TDOPRE" mediaId)
+    curl -s -o /dev/null -X PUT -H 'content-type: application/pdf' --data-binary "$TDPDF" "$(json_field "$TDOPRE" upload.url)"
+    body "${TDP[@]}" "${JSON[@]}" -X POST "$BASE/api/host/events/$TDSLUG2/media/confirm" -d "{\"mediaId\":\"$TDOMID\"}" > /dev/null
+    check "a real ticket from ANOTHER trip is 404"  404 "${TDP[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/$TDOMID/detail" -d '{"seat":"41A"}'
+    check "...and the same in reverse"              404 "${TDP[@]}" "${JSON[@]}" -X PUT "$BASE/api/host/events/$TDSLUG2/media/$TDMID/detail" -d '{"seat":"41A"}'
+
+    # A TICKET STILL UPLOADING MAY BE ANNOTATED — a planner typing the seat
+    # while 4 MB of PDF goes up is doing the ordinary thing — and it stays
+    # invisible until the upload is confirmed, which is what makes that harmless.
+    TDQPRE=$(body "${TDP[@]}" "${JSON[@]}" -X POST "$TDHOST/media/presign" \
+      -d "{\"type\":\"ticket\",\"fileName\":\"pending.pdf\",\"mimeType\":\"application/pdf\",\"sizeBytes\":$TDSIZE}")
+    TDQID=$(json_field "$TDQPRE" mediaId)
+    check "a ticket still uploading may be annotated" 200 "${TDP[@]}" "${JSON[@]}" -X PUT "$TDHOST/media/$TDQID/detail" -d '{"seat":"9F"}'
+    equals "...and is still invisible until confirmed" \
+      "$(media_field "$(body "${AUTH[@]}" "$API/events/$TDSLUG/media")" "$TDQID" id)" "no-such-item"
+
+    # DELETING THE TICKET TAKES WHAT WAS WRITTEN ON IT. The cascade is a
+    # Postgres constraint and nothing else: a composite foreign key that failed
+    # to cascade would make this DELETE a 500, which is what the 200 rules out.
+    check "a planner deletes the annotated ticket"  200 "${TDP[@]}" -X DELETE "$TDHOST/media/$TDMID"
+    TDGONE=$(body "${AUTH[@]}" "$API/events/$TDSLUG/media")
+    equals "...and the ticket is gone from the list" "$(media_field "$TDGONE" "$TDMID" id)" "no-such-item"
+    equals "...while the photo beside it remains"    "$(media_field "$TDGONE" "$TDPID" id)" "$TDPID"
+  else
+    echo "  skip  set S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT to run the ticket rows"
+  fi
+else
+  echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
 fi
 
 echo

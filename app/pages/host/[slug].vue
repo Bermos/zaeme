@@ -831,6 +831,7 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
       <HostMediaCard
         :slug="slug"
         :rsvps="data.rsvps"
+        :timezone="data.event.timezone"
       />
 
       <!-- RSVPs -->

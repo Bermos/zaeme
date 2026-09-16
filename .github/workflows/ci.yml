@@ -329,11 +329,45 @@ concurrency:
 # them. The stub now knows a place in a 29-zone country, and the count is
 # asserted as 29 rather than needled on a name that passes either way. 641 -> 679.
 #
+# WHAT A TICKET SAYS (#35) adds 52, and the shape of them is what a new TABLE
+# needs and a pure function cannot give. `events_ticket_detail` is written by an
+# upsert, scoped to one event by a COMPOSITE foreign key and taken away by a
+# cascade — three things that live in Postgres and in no source file, so `pnpm
+# test` reads the schema and executes none of them. NINE need no bucket: every
+# credential gate runs before the media row is looked up, so the anonymous 401,
+# the service token's 401, the stranger's 403 and the LOGISTICS PLANNER's 403
+# run on a bare instance, with a planner's 404 on the same made-up id beside
+# them to say the first four are about the credential and not about the id. The
+# other 43 need an upload and skip as ONE line without `S3_*`, exactly like the
+# receipt bytes above and the poster checks below; this job fails on any `skip`
+# at all.
+#
+# THREE OF THEM ARE THE ISSUE'S OWN SENTENCE. A ticket with no detail row reads
+# as `no-detail` and not as `no-such-item` — two different answers from the same
+# helper, so neither is satisfied by a ticket that vanished — while a detail
+# somebody CLEARED reads as `null`, which is what says the row survived being
+# emptied. An empty body is a 200 and not a 400. A ticket with nothing filled in
+# is still a ticket, executed rather than described.
+#
+# AND THREE ARE #31's LESSON APPLIED TO TWO NEW `timestamptz` COLUMNS: a
+# validity written at a known instant is read back after the trip's zone is SET
+# and again after it is CLEARED, against the literal it was written as rather
+# than against a baseline a symmetric rebase would already have undone. A
+# refactor that rendered `valid_until` into the event's clock on the way out
+# reddens there and nowhere else.
+#
+# WHAT THESE 52 CANNOT SEE is the rendering, and there is no way for them to:
+# the ticket list is fetched by the BROWSER (media URLs are short-lived
+# signatures), so no SSR'd HTML carries a seat number the way it carries the
+# itinerary's 09:14 above. That half is `test/ticket-detail.test.ts` over the
+# pure function both cards call — the same remedy #31's review reached for when
+# a zone shortlist was wrong inside a card the wire could not see. 679 -> 731.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '679'
+  MIN_SMOKE_CHECKS: '731'
 
 jobs:
   ci:

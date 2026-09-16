@@ -125,6 +125,26 @@ export async function confirmMediaUpload(
   return updated!
 }
 
+/**
+ * What a ticket SAYS (#35) — every field nullable, because a ticket with
+ * nothing filled in is still a ticket.
+ *
+ * The domain-side twin of `TicketDetailFields` in
+ * `shared/utils/ticket-detail.ts`, which is what turns these into the line a
+ * person reads. The two are kept apart on purpose: this one carries `Date`s
+ * straight off the column, the shared one accepts whatever survived JSON.
+ */
+export interface TicketDetailView {
+  bookingRef: string | null
+  carrier: string | null
+  seat: string | null
+  coach: string | null
+  travellerName: string | null
+  validFrom: Date | null
+  validUntil: Date | null
+  note: string | null
+}
+
 export interface MediaItemView {
   id: string
   type: MediaType
@@ -136,10 +156,34 @@ export interface MediaItemView {
   assignedRsvpId: string | null
   /** The expense this item is the receipt for, or `null` (#29). */
   expenseId: string | null
+  /**
+   * For a ticket, what is printed on it (#35), or `null` when nobody has
+   * written any of it down — which is every ticket uploaded before this
+   * existed, and every one uploaded since by somebody who had a PDF and
+   * nothing else. Always `null` for a photo, a video or a document: no other
+   * type has a detail row, and nothing will make one.
+   */
+  ticket: TicketDetailView | null
   createdAt: Date
 }
 
-function toView(r: typeof tables.media.$inferSelect): MediaItemView {
+function toDetailView(d: typeof tables.ticketDetail.$inferSelect): TicketDetailView {
+  return {
+    bookingRef: d.bookingRef,
+    carrier: d.carrier,
+    seat: d.seat,
+    coach: d.coach,
+    travellerName: d.travellerName,
+    validFrom: d.validFrom,
+    validUntil: d.validUntil,
+    note: d.note
+  }
+}
+
+function toView(
+  r: typeof tables.media.$inferSelect,
+  detail?: typeof tables.ticketDetail.$inferSelect | null
+): MediaItemView {
   return {
     id: r.id,
     type: r.type as MediaType,
@@ -150,8 +194,26 @@ function toView(r: typeof tables.media.$inferSelect): MediaItemView {
     takenAt: r.takenAt,
     assignedRsvpId: r.assignedRsvpId,
     expenseId: r.expenseId,
+    ticket: detail ? toDetailView(detail) : null,
     createdAt: r.createdAt
   }
+}
+
+/**
+ * The detail rows for a set of media ids, keyed by media id — ONE query for the
+ * lot, for the reason `listReceiptsByExpense` below is a batch: a gallery
+ * renders every item, and a per-item lookup here is the N+1
+ * `server/domain/admin.ts` has a note about at the top of it.
+ */
+async function loadTicketDetails(mediaIds: string[]): Promise<Map<string, typeof tables.ticketDetail.$inferSelect>> {
+  const out = new Map<string, typeof tables.ticketDetail.$inferSelect>()
+  if (mediaIds.length === 0) return out
+  const rows = await useDb()
+    .select()
+    .from(tables.ticketDetail)
+    .where(inArray(tables.ticketDetail.mediaId, mediaIds))
+  for (const d of rows) out.set(d.mediaId, d)
+  return out
 }
 
 /**
@@ -181,12 +243,16 @@ export async function listMediaForViewer(eventId: string, viewerEmail: string | 
     myRsvpIds = new Set(myRsvps.map(r => r.id))
   }
 
+  const mine = rows.filter(r => r.type === 'ticket' && r.assignedRsvpId && myRsvpIds.has(r.assignedRsvpId))
+  // Only the tickets this viewer may actually see are looked up: a detail row
+  // says where somebody is sitting, so it travels with the ticket it belongs to
+  // and never ahead of it.
+  const details = await loadTicketDetails(mine.map(r => r.id))
+
   return {
-    gallery: rows.filter(r => r.type === 'photo' || r.type === 'video').map(toView),
-    documents: rows.filter(r => r.type === 'document').map(toView),
-    tickets: rows
-      .filter(r => r.type === 'ticket' && r.assignedRsvpId && myRsvpIds.has(r.assignedRsvpId))
-      .map(toView)
+    gallery: rows.filter(r => r.type === 'photo' || r.type === 'video').map(r => toView(r)),
+    documents: rows.filter(r => r.type === 'document').map(r => toView(r)),
+    tickets: mine.map(r => toView(r, details.get(r.id)))
   }
 }
 
@@ -199,7 +265,8 @@ export async function listMediaForPlanner(userId: string, slug: string) {
     .from(tables.media)
     .where(and(eq(tables.media.eventId, ev.id), eq(tables.media.status, 'ready')))
     .orderBy(asc(tables.media.type), desc(tables.media.createdAt))
-  return rows.map(toView)
+  const details = await loadTicketDetails(rows.filter(r => r.type === 'ticket').map(r => r.id))
+  return rows.map(r => toView(r, details.get(r.id)))
 }
 
 /** Assign (or unassign) a ticket to an attendee's RSVP (owner/co-planner only). */
@@ -222,7 +289,112 @@ export async function assignTicket(userId: string, slug: string, mediaId: string
     .where(and(eq(tables.media.id, mediaId), eq(tables.media.eventId, ev.id), eq(tables.media.type, 'ticket')))
     .returning()
   if (!updated) throw createError({ statusCode: 404, message: 'Ticket not found' })
-  return toView(updated)
+  // The detail comes back with it (#35). Answering `ticket: null` here would be
+  // this function claiming a ticket has nothing written on it because it was
+  // just re-assigned, which is a different sentence from the one it means.
+  return toView(updated, (await loadTicketDetails([updated.id])).get(updated.id))
+}
+
+/* ------------------------- what the ticket says (#35) ---------------------- */
+
+/** The eight things a planner may write about a ticket. Each one optional. */
+export interface TicketDetailInput {
+  bookingRef?: string | null
+  carrier?: string | null
+  seat?: string | null
+  coach?: string | null
+  travellerName?: string | null
+  validFrom?: string | Date | null
+  validUntil?: string | Date | null
+  note?: string | null
+}
+
+/** '' is not a value somebody typed; it is a field they left alone. */
+function trimmedOrNull(v: string | null | undefined): string | null {
+  const s = (v ?? '').trim()
+  return s === '' ? null : s
+}
+
+function instantOrNull(v: string | Date | null | undefined): Date | null {
+  if (v === null || v === undefined || v === '') return null
+  const d = v instanceof Date ? v : new Date(v)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+/**
+ * Write what is printed on a ticket (owner/co-planner only, like assignment and
+ * deletion — a ticket is host-managed and `server/domain/guest.ts` refuses a
+ * guest even the upload).
+ *
+ * IT IS A REPLACE, not a merge, and the alternative was considered and dropped.
+ * A merge needs three states per field — "set it", "clear it", "leave it" — and
+ * over JSON those are a value, `null` and absent, which is exactly the
+ * distinction a form that serialises its empty inputs cannot make. So every
+ * absent field is a cleared field, one meaning per request, and the one screen
+ * that writes here posts the whole set.
+ *
+ * WHICH IS ALSO THE ESCAPE HATCH: a detail with every field blank is a legal
+ * write and leaves a row that says exactly what no row says — nobody has
+ * written anything down. There is no DELETE because there is nothing a delete
+ * would do that this does not, and a second verb that answers the same question
+ * is a second place for the two answers to drift apart.
+ *
+ * NOTHING HERE IS REQUIRED and nothing ever will be. The whole point of #35 is
+ * that the PDF is what gets you through the barrier: a ticket somebody uploaded
+ * and never annotated must stay as usable as it was, so this refuses an empty
+ * body in no way at all.
+ *
+ * A PENDING upload may be annotated. A planner typing the seat while 4 MB of
+ * PDF goes up is doing the ordinary thing, and the row is invisible either way
+ * until the upload is confirmed (`listMediaForViewer`/`listMediaForPlanner`
+ * both filter on `status = 'ready'`), so there is nothing for a refusal to
+ * protect.
+ */
+export async function setTicketDetail(
+  userId: string,
+  slug: string,
+  mediaId: string,
+  input: TicketDetailInput
+): Promise<MediaItemView> {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+
+  const [item] = await useDb()
+    .select()
+    .from(tables.media)
+    .where(and(eq(tables.media.id, mediaId), eq(tables.media.eventId, ev.id)))
+    .limit(1)
+  // The same 404 for "no such id" and "a media id from another trip": which of
+  // the two it is, is not something this caller is entitled to learn.
+  if (!item) throw createError({ statusCode: 404, message: 'Ticket not found' })
+  if (item.type !== 'ticket') {
+    throw createError({
+      statusCode: 422,
+      message: 'Only a ticket carries a booking reference and a seat — a photo or a document has neither'
+    })
+  }
+
+  const values = {
+    bookingRef: trimmedOrNull(input.bookingRef),
+    carrier: trimmedOrNull(input.carrier),
+    seat: trimmedOrNull(input.seat),
+    coach: trimmedOrNull(input.coach),
+    travellerName: trimmedOrNull(input.travellerName),
+    validFrom: instantOrNull(input.validFrom),
+    validUntil: instantOrNull(input.validUntil),
+    note: trimmedOrNull(input.note)
+  }
+
+  // `media_id` is unique, so the upsert is the whole of "create or edit" — and
+  // it is one statement, so two planners saving the same ticket at once cannot
+  // leave two rows behind. `updatedAt` is left out deliberately: the column
+  // carries `$onUpdate` and sets itself.
+  const [saved] = await useDb()
+    .insert(tables.ticketDetail)
+    .values({ id: createId(), eventId: ev.id, mediaId: item.id, ...values })
+    .onConflictDoUpdate({ target: tables.ticketDetail.mediaId, set: values })
+    .returning()
+  return toView(item, saved)
 }
 
 /**

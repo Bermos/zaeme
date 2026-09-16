@@ -2359,7 +2359,51 @@ components:
             needs the account that records the money. It is NOT a claim that
             anybody checked the figures — `Expense.fxRateSource` and the stated
             pair still mean exactly what they meant before a photograph existed.
+        ticket:
+          oneOf:
+            - $ref: '#/components/schemas/TicketDetail'
+            - type: 'null'
+          description: >-
+            What is printed on the ticket (Bermos/zaeme#35) — the booking
+            reference, the coach and the seat — or null. Null for everything
+            whose `type` is not `ticket`, and null for a ticket nobody has
+            written anything on, which is every ticket uploaded before this
+            field existed: a ticket with nothing filled in is still a ticket,
+            and the file is what gets you through the barrier. Additive and
+            read-only here; the fields are written by a planner on zäme's own
+            host surface.
         createdAt: { type: string, format: date-time }
+
+    TicketDetail:
+      type: object
+      description: >-
+        What a ticket says, stored beside the file rather than inside it, so a
+        barrier can be read before a PDF finishes rendering — or, with no
+        signal, when it never does (Bermos/zaeme#35).
+
+        EVERY FIELD IS NULLABLE AND NONE IS REQUIRED. This is not a form
+        somebody completes before uploading: a row exists as soon as a planner
+        types anything at all, and an entirely blank one is legal and says the
+        same as no row.
+
+        `validFrom`/`validUntil` are INSTANTS, like every other timestamp on
+        this API. Render them against the event's `timezone` when it has one —
+        a ticket valid "until 23:59" means 23:59 where the barrier is.
+      properties:
+        bookingRef: { type: [string, 'null'] }
+        carrier:
+          type: [string, 'null']
+          description: Who is carrying you — "SBB", "TAP Air Portugal".
+        seat: { type: [string, 'null'] }
+        coach: { type: [string, 'null'] }
+        travellerName:
+          type: [string, 'null']
+          description: >-
+            The name printed on the ticket, which is not always the attendee
+            `assignedRsvpId` names.
+        validFrom: { type: [string, 'null'], format: date-time }
+        validUntil: { type: [string, 'null'], format: date-time }
+        note: { type: [string, 'null'] }
 
     PollOption:
       type: object
