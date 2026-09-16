@@ -1036,6 +1036,156 @@ paths:
         required: true
         description: 'The expense id from getTripBudget.'
         schema: { type: string, minLength: 1 }
+    patch:
+      operationId: updateTripExpense
+      tags: [budget]
+      summary: Correct a recorded expense.
+      description: >-
+        Correct an expense that is already on the budget: a mistyped total, the
+        wrong payer, a category, a note, or the split itself. Somebody who typed
+        84.50 instead of 48.50 no longer has to delete the row and rebuild it,
+        which lost who recorded it, when, and the rate frozen onto it.
+
+        EVERY FIELD IS OPTIONAL AND LEAVING ONE OUT MEANS LEAVING IT ALONE. Send
+        title on its own and only the title moves. null is a value two of them
+        take: note null clears the note, and category or accountId null moves the
+        cost to Uncategorised.
+
+        THE SPLIT IS RE-DERIVED FROM WHAT WAS RECORDED unless you send
+        participants. A four-way even split moved from 100.00 to 120.00 becomes
+        four shares of 30.00, not four of 25.00 and an orphaned 20.00; a 3/2/1
+        weight split re-apportions at the same weights; percentages re-apply.
+        Two cases cannot be re-derived and answer 422 asking for the split rather
+        than guessing at it: a new total on an exact split, whose amounts were
+        chosen against a total that no longer exists, and a new total on an even
+        split that had some amounts fixed by hand, because which participants
+        were pinned is recorded nowhere. Sending participants (with splitMode,
+        which is refused without them) answers both.
+
+        THE CONVERSION follows three rules. State fxRate or targetAmountCents and
+        the row records your figure, with fxRateSource "manual". Change currency
+        and the rate is settled afresh — fetched, or taken from what you stated,
+        and a fetch that comes back empty is a 422 naming both fields. Change
+        only amountCents and the rate this expense was frozen at carries the new
+        one, which keeps a payer's bank fee inside the effective rate; the row
+        then reads fxRateSource "fetched" with statedAmountCents null, because
+        what somebody stated was about a figure that has just been corrected.
+
+        The entry is rewritten in place: same id, same createdAt, same recorder,
+        and the same balance check every write goes through, so the shares still
+        sum to amountCents and to amountBaseCents exactly. Who made the change is
+        in the audit log, not on the expense.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: >-
+                At least one field is expected; a body with none is a no-op that
+                rewrites the entry to itself.
+              properties:
+                title: { type: string, minLength: 1, maxLength: 200 }
+                category:
+                  type: string
+                  maxLength: 60
+                  nullable: true
+                  description: >-
+                    Where the cost lands, by the NAME of one of the event's
+                    category accounts, matched case-insensitively — the five old
+                    enum values still resolve. null moves it to Uncategorised;
+                    omitting it leaves it where it is.
+                accountId:
+                  type: string
+                  maxLength: 64
+                  nullable: true
+                  description: >-
+                    The category account outright, from the budget's accounts
+                    list. Wins over category. null is Uncategorised.
+                amountCents:
+                  type: integer
+                  minimum: 1
+                  description: >-
+                    The corrected total AS SPENT, in currency. Changing it
+                    re-splits the expense the way it was split in the first
+                    place.
+                currency:
+                  type: string
+                  minLength: 3
+                  maxLength: 3
+                  description: >-
+                    The currency the receipt is in. Changing it settles the
+                    conversion afresh: today's rate is fetched unless fxRate or
+                    targetAmountCents says otherwise.
+                fxRate:
+                  type: string
+                  pattern: '^[0-9]{1,9}(\.[0-9]{1,10})?$'
+                  description: >-
+                    The rate, stated. Records the row as fxRateSource "manual"
+                    with the figure kept beside it. Refused beside
+                    targetAmountCents, and refused when the receipt is already in
+                    the event's currency, where there is nothing to apply.
+                targetAmountCents:
+                  type: integer
+                  minimum: 1
+                  description: >-
+                    What the payer was ACTUALLY out of pocket, in the event's
+                    currency. Also "manual". Refused beside fxRate.
+                note: { type: string, maxLength: 500, nullable: true }
+                paidByName: { type: string, minLength: 1, maxLength: 200 }
+                paidByEmail:
+                  type: string
+                  format: email
+                  description: >-
+                    Who fronted the money. Send it WITH paidByName or not at all
+                    — half a payer is a 422, because a member account is a name
+                    and an address together.
+                splitMode:
+                  type: string
+                  enum: [even, exact, percentage, weight]
+                  description: >-
+                    Only ever beside participants, and a 422 without them: a mode
+                    with no numbers behind it would have to invent them. Omit both
+                    and the expense keeps the mode it was recorded with.
+                participants:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  description: >-
+                    The split, restated — the same shape addTripExpense takes,
+                    and it REPLACES the existing one entirely rather than merging
+                    into it. Omit it and the split is re-derived from the record.
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [name, email]
+                    properties:
+                      name: { type: string, minLength: 1, maxLength: 200 }
+                      email: { type: string, format: email }
+                      amountCents: { type: integer, minimum: 0 }
+                      weight:
+                        type: string
+                        pattern: '^[0-9]{1,8}(\.[0-9]{1,4})?$'
+      responses:
+        '200':
+          description: The corrected expense with its re-resolved shares.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Expense' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            The expense, or the trip's currency, changed while this edit was
+            being prepared. Nothing was written: read it again and make the
+            change on what it says now.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
     delete:
       operationId: removeTripExpense
       tags: [budget]

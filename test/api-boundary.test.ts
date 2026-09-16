@@ -252,9 +252,14 @@ describe('the account surface is a session, and the invite link never becomes on
 
     const expensePost = join(API_ROOT, 'me', 'events', '[slug]', 'expenses', 'index.post.ts')
     const expenseDelete = join(API_ROOT, 'me', 'events', '[slug]', 'expenses', '[id].delete.ts')
+    // #27 added a third verb to this surface, and it belongs in the same list:
+    // an edit is a money write, so the reason it may not live under
+    // `/api/invites/**` is the reason the other two may not.
+    const expensePatch = join(API_ROOT, 'me', 'events', '[slug]', 'expenses', '[id].patch.ts')
     expect(existsSync(expensePost)).toBe(true)
     expect(existsSync(expenseDelete)).toBe(true)
-    for (const f of [expensePost, expenseDelete]) {
+    expect(existsSync(expensePatch)).toBe(true)
+    for (const f of [expensePost, expenseDelete, expensePatch]) {
       expect(readFileSync(f, 'utf8')).toMatch(/AsParticipant/)
     }
   })

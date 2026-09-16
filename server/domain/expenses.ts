@@ -87,6 +87,34 @@ import { wasConverted } from '../../shared/utils/conversion'
  */
 
 /**
+ * CORRECTING ONE (#27). An expense used to be add-or-delete, so fixing 84.50
+ * into 48.50 meant destroying the row and rebuilding it — losing who recorded
+ * it, when, and the rate frozen onto it. `updateExpense` REWRITES THE ENTRY IN
+ * PLACE: the header keeps its id, its `created_at` and its `created_by_user_id`,
+ * and its lines are rebuilt from scratch by the same `buildEntryLines` /
+ * `assertEntryBalances` pair every other write goes through.
+ *
+ * A REPLACEMENT RATHER THAN A CORRECTING ENTRY, and the reason is that nothing
+ * else here is append-only either: `removeExpense` deletes the row outright and
+ * `setEventCurrency` deletes and re-inserts every line of every entry on the
+ * trip. A reversal-plus-restatement would make the edit the one operation that
+ * preserved history, in a ledger where history is not preserved — and it would
+ * put two extra entries on the screen per correction and make the trip total
+ * (the sum of category debits) count the mistake and its reversal unless a
+ * `kind` flag told it not to, which is exactly the flag #61 designed out.
+ *
+ * WHO CHANGED IT IS THE AUDIT'S JOB, not a column here: `server/middleware/
+ * audit.ts` records the human surfaces at the edge and `defineServiceHandler`
+ * the machine one, so `created_by_user_id` goes on meaning what it says (who
+ * ADDED it) and no migration is needed to say who edited it.
+ *
+ * NO LOCK-OUT ONCE PEOPLE HAVE SETTLED UP, following #59: the balances and the
+ * plan re-derive from the rewritten entry like they re-derive from a currency
+ * change, and a correction made halfway through settling is fixed by peer
+ * pressure rather than by a refusal from this program.
+ */
+
+/**
  * How a total is divided across the people it is split between (#26).
  *
  * - `even` — what every expense did before this existed, and still the default:
@@ -189,6 +217,49 @@ export interface AddExpenseInput {
   splitMode?: SplitMode
   /** Who the cost is split across (usually the trip's yes-RSVPs, payer included). */
   participants: ExpenseParticipantInput[]
+}
+
+/**
+ * A CORRECTION to an entry that already exists (#27). Every field is optional
+ * and ABSENT MEANS UNCHANGED — which is the whole difficulty, because `null` is
+ * a value two of them can take: `note: null` clears the note, and `category:
+ * null` moves the cost to `Uncategorised`, while leaving either out keeps what
+ * is there. A PATCH that sent `{}` would rewrite the entry to itself.
+ *
+ * THE MONEY FIELDS BEHAVE AS A GROUP, and `resolveEditConversion` below is the
+ * one place that decides how. In short: say what it cost and the row records
+ * your figure; move the receipt's currency and the rate is settled afresh;
+ * change only the amount and the rate this row was frozen at carries the new
+ * one.
+ *
+ * `splitMode` WITHOUT `participants` IS REFUSED. Changing how a total is
+ * divided is a statement about people and numbers, and the mode alone does not
+ * carry either — `percentage` with nothing behind it would have to invent the
+ * percentages. Leave both out and the split is re-derived from the record
+ * (`resplitFromRecord`), which is the ordinary edit.
+ */
+export interface UpdateExpenseInput {
+  title?: string
+  /** `null` moves the cost to `Uncategorised`; absent leaves it where it is. */
+  category?: string | null
+  /** The category account outright. Wins over `category`. `null` is `Uncategorised`. */
+  accountId?: string | null
+  /** The new total AS SPENT, in `currency`. */
+  amountCents?: number
+  /** The currency the receipt is in. Changing it settles the conversion afresh. */
+  currency?: string
+  /** The rate, stated. Records the row as `manual` — a figure somebody checked. */
+  fxRate?: string | number
+  /** What the payer was out of pocket, stated. Also `manual`. Refused beside `fxRate`. */
+  targetAmountCents?: number
+  note?: string | null
+  /** Who fronted it. Both halves together or neither: an account needs a name. */
+  paidByName?: string
+  paidByEmail?: string
+  /** Only ever beside `participants`; see above. */
+  splitMode?: SplitMode
+  /** The split, restated. Omit it and it is re-derived from what was recorded. */
+  participants?: ExpenseParticipantInput[]
 }
 
 export interface ExpenseView {
@@ -477,7 +548,7 @@ function percentText(scaled: number): string {
   return `${unscaleWeight(scaled)}%`
 }
 
-interface ResolvedShare {
+export interface ResolvedShare {
   name: string
   email: string
   amountCents: number
@@ -623,6 +694,99 @@ function resolveProportional(
     amountCents: shares[i]!,
     weight: unscaleWeight(weights[i]!)
   }))
+}
+
+/**
+ * RE-SPLIT AN EDITED EXPENSE THE WAY IT WAS SPLIT IN THE FIRST PLACE (#27) —
+ * or say, in so many words, that the record cannot answer.
+ *
+ * This is where `splitMode` and the entered `weight` #26 stored finally get
+ * read. Changing a four-way even split from 100 to 120 gives four shares of 30,
+ * not four of 25 and an orphaned 20; a 3/2/1 weight split re-apportions at the
+ * same weights; percentages re-apply. The arithmetic is `resolveShares`, so
+ * there is no second rounding path and every guarantee it makes holds here.
+ *
+ * WHAT THE RECORD CANNOT ANSWER, enumerated rather than summarised, because
+ * three of the four modes can and one cannot:
+ *
+ *  - `percentage`, `weight` — complete. The numbers are on the shares.
+ *  - `exact` — the amounts ARE the split, and they were chosen against a total
+ *    that no longer exists. Apportioning them to the new one would silently
+ *    turn "Ana's half of the room, Ben's single" into a proportional split
+ *    nobody asked for, so a new total is REFUSED until the amounts come with
+ *    it.
+ *  - `even` — honours explicit per-person amounts and splits the remainder
+ *    across the rest, recording nothing about which participants were pinned
+ *    (#26, and the comment on `events_expense.split_mode` says so). A plain
+ *    even split IS recoverable, and the shares themselves say whether it was
+ *    one: if they are exactly what `splitEvenlyCents` produces for the old
+ *    total then no one was pinned — or somebody was pinned at precisely their
+ *    even share, which is the same entry and rightly gets the same answer.
+ *    Anything else is refused, naming what is missing.
+ *
+ * AN UNCHANGED TOTAL NEEDS NO RE-SPLIT AT ALL, and that is not a shortcut: it
+ * is what lets the title, the category, the note and the payer of a mixed
+ * `even` expense be corrected without anybody being asked to type the split
+ * again for a number that did not move.
+ *
+ * Pure, and exported for that reason: the whole of "what #26 did and did not
+ * record" is decidable from four values, and a unit test reddens in 300ms what
+ * would otherwise need a built server and a live Postgres.
+ */
+export function resplitFromRecord(input: {
+  splitMode: SplitMode
+  /** The total the entry is being corrected TO, as spent. */
+  amountCents: number
+  /** The total it was split against when it was recorded. */
+  previousAmountCents: number
+  /** Its member debit lines, in the order they were written. */
+  shares: Array<{ name: string, email: string, amountCents: number, weight: string | null }>
+}): ResolvedShare[] {
+  const { splitMode, amountCents, previousAmountCents, shares } = input
+  if (shares.length === 0) {
+    throw createError({
+      statusCode: 422,
+      message: 'This expense has nobody to split between any more. Send the split with the change.'
+    })
+  }
+  if (amountCents === previousAmountCents) {
+    return shares.map(s => ({ name: s.name, email: s.email, amountCents: s.amountCents, weight: s.weight }))
+  }
+
+  const people = shares.map(s => ({ name: s.name, email: s.email }))
+  if (splitMode === 'percentage' || splitMode === 'weight') {
+    // A row of this mode always carries its numbers — `resolveProportional`
+    // refuses to write one that does not. Reaching this with a null weight
+    // means the row was written by something else, and guessing at it would be
+    // worse than asking.
+    if (shares.some(s => s.weight === null)) {
+      throw createError({
+        statusCode: 422,
+        message: `This expense says it was split by ${splitMode} but does not carry the numbers. Send the split with the new total.`
+      })
+    }
+    return resolveShares(
+      amountCents,
+      shares.map(s => ({ name: s.name, email: s.email, weight: s.weight! })),
+      splitMode
+    )
+  }
+
+  if (splitMode === 'even') {
+    const evenly = splitEvenlyCents(previousAmountCents, shares.length)
+    if (shares.every((s, i) => s.amountCents === evenly[i])) {
+      return resolveShares(amountCents, people, 'even')
+    }
+    throw createError({
+      statusCode: 422,
+      message: 'This expense was split evenly with some amounts fixed by hand, and which ones was never recorded. Send the split with the new total.'
+    })
+  }
+
+  throw createError({
+    statusCode: 422,
+    message: 'This expense was split by exact amounts, so a new total needs those amounts again. Send the split with it.'
+  })
 }
 
 /* ------------------------------ the ledger -------------------------------- */
@@ -1091,7 +1255,13 @@ export interface ParticipantActor {
  * back empty the write is refused with a message naming the fields to fill in
  * rather than being recorded at a rate nobody chose.
  */
-async function resolveConversion(input: AddExpenseInput, eventCurrency: string): Promise<{
+async function resolveConversion(
+  // Only the four money fields, so an EDIT (#27) can hand in the merged figures
+  // without pretending to be a whole `AddExpenseInput`. `AddExpenseInput` still
+  // satisfies it, so `addExpense` passes itself unchanged.
+  input: Pick<AddExpenseInput, 'amountCents' | 'currency' | 'fxRate' | 'targetAmountCents'>,
+  eventCurrency: string
+): Promise<{
   currency: string
   baseCurrency: string
   fxRate: string
@@ -1336,6 +1506,302 @@ export async function addExpense(eventId: string, input: AddExpenseInput, by: Ex
 }
 
 /**
+ * WHAT AN EDIT DOES TO THE CONVERSION (#27) — three branches, and each of them
+ * is a decision about the pair of columns #59 added for evidence.
+ *
+ * `stated_amount_cents`/`stated_currency` are what a PERSON said they were out
+ * of pocket, and `fx_rate_source = 'manual'` is the claim that somebody checked
+ * this row against a statement. Neither may be invented and neither may be
+ * quietly carried onto a figure it was never about.
+ *
+ *   SOMEBODY SAID WHAT IT COST, or the receipt's currency moved
+ *     → settle it afresh through `resolveConversion`, exactly as a new expense
+ *       would. A stated rate or total is recorded as `manual` with the evidence
+ *       beside it; a changed currency re-fetches (or takes what was typed), and
+ *       a fetch that comes back empty is the same 422 naming both fields.
+ *
+ *   THE MONEY DID NOT MOVE
+ *     → the conversion is not touched AT ALL. Correcting a title, a category, a
+ *       note or the payer of a row somebody checked leaves it checked, with the
+ *       figure they stated still on it. Re-fetching here would silently replace
+ *       a verified figure with a mid-market one.
+ *
+ *   THE AMOUNT MOVED AND NOBODY SAID ANYTHING
+ *     → the rate this row was frozen at carries the new amount, which is the
+ *       issue's own rule ("an edited expense keeps its original FX rate unless
+ *       the currency itself changes") and keeps a payer's bank fee in the
+ *       split, because it is inside that effective rate. The stated pair is
+ *       CLEARED and the source becomes `fetched`, because both were about a
+ *       receipt figure that has just been declared wrong: the honest record is
+ *       that this instance multiplied, not that somebody checked. Re-stating it
+ *       is one field away — send `fxRate` or `targetAmountCents` in the same
+ *       PATCH and the first branch takes it.
+ *
+ * The alternative to that last one was to REFUSE the edit until the figure was
+ * restated. It preserves strictly more evidence, and it was not taken: it
+ * leaves no way at all to correct a typo on a row whose receipt is already in
+ * the trip's currency but whose settled figure is not (the EUR-receipt-on-an-
+ * EUR-trip row #59 leaves behind), since neither override is accepted there.
+ */
+async function resolveEditConversion(
+  row: typeof tables.expense.$inferSelect,
+  input: UpdateExpenseInput,
+  eventCurrency: string,
+  amountCents: number
+): Promise<{
+  currency: string
+  baseCurrency: string
+  fxRate: string
+  fxRateSource: FxRateSource
+  amountBaseCents: number
+  statedAmountCents: number | null
+  statedCurrency: string | null
+}> {
+  const currency = normaliseCurrency(input.currency ?? row.currency)
+  const stated = input.fxRate !== undefined || input.targetAmountCents !== undefined
+  if (stated || currency !== normaliseCurrency(row.currency)) {
+    return resolveConversion(
+      { amountCents, currency, fxRate: input.fxRate, targetAmountCents: input.targetAmountCents },
+      eventCurrency
+    )
+  }
+
+  if (amountCents === row.amountCents) {
+    return {
+      currency,
+      // Re-stamped from the trip rather than copied from the row. They agree in
+      // every reachable state — `setEventCurrency` moves both together — and
+      // when they do not, the trip is the one that is right.
+      baseCurrency: eventCurrency,
+      fxRate: trimDecimal(row.fxRate),
+      fxRateSource: row.fxRateSource,
+      amountBaseCents: row.amountBaseCents,
+      statedAmountCents: row.statedAmountCents,
+      statedCurrency: row.statedCurrency
+    }
+  }
+
+  const fxRate = trimDecimal(row.fxRate)
+  return {
+    currency,
+    baseCurrency: eventCurrency,
+    fxRate,
+    fxRateSource: 'fetched',
+    // `1` for anything recorded in the trip's own currency, so this is the
+    // identity it looks like there; a chained or stated rate for everything
+    // else, which is what keeps the fee proportional to the corrected receipt.
+    amountBaseCents: convertCents(amountCents, fxRate),
+    statedAmountCents: null,
+    statedCurrency: null
+  }
+}
+
+/**
+ * Correct an expense in place: a new total, a different payer, a fixed title, a
+ * re-split (#27). One transaction, and the entry that comes out of it is built
+ * by the same `buildEntryLines` / `assertEntryBalances` pair as a new one — so
+ * "the shares sum to the total, in both columns" is the same invariant after an
+ * edit as before it, asserted before anything is written rather than checked
+ * afterwards.
+ *
+ * NO PER-ROW PERMISSION HERE, on purpose and unlike `removeExpense`. Any
+ * participant may correct any expense, which is how a shared ledger among
+ * friends actually works — somebody who was there knows the taxi was 88.40 —
+ * and what keeps it from being a free-for-all is that it is ATTRIBUTABLE:
+ * `created_by_user_id` still names who added it and the audit log names who
+ * changed it. The surface gates (`updateExpenseAs…` below) decide who may
+ * reach this at all.
+ */
+export async function updateExpense(eventId: string, expenseId: string, input: UpdateExpenseInput) {
+  if (input.amountCents !== undefined) {
+    if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
+      throw createError({ statusCode: 422, message: 'The amount must be a positive number of cents' })
+    }
+    if (input.amountCents > MAX_CENTS) {
+      throw createError({ statusCode: 422, message: 'That is more money than one expense can hold' })
+    }
+  }
+  // An account is a name AND an address: half a payer would either rename
+  // whoever holds the other half or create an account called after nobody.
+  if ((input.paidByName === undefined) !== (input.paidByEmail === undefined)) {
+    throw createError({ statusCode: 422, message: 'Changing who paid needs both their name and their email' })
+  }
+  if (input.splitMode !== undefined && input.participants === undefined) {
+    throw createError({
+      statusCode: 422,
+      message: 'Changing how an expense is split needs the split itself — send the participants with the mode'
+    })
+  }
+
+  const db = useDb()
+  const [row] = await db
+    .select()
+    .from(tables.expense)
+    .where(and(eq(tables.expense.id, expenseId), eq(tables.expense.eventId, eventId)))
+    .limit(1)
+  if (!row) throw createError({ statusCode: 404, message: 'Expense not found' })
+  const [ev] = await db
+    .select({ currency: tables.event.currency })
+    .from(tables.event)
+    .where(eq(tables.event.id, eventId))
+    .limit(1)
+  if (!ev) throw createError({ statusCode: 404, message: 'Event not found' })
+
+  const amountCents = input.amountCents ?? row.amountCents
+  // Outside the transaction, because this one may make an outbound call.
+  const conversion = await resolveEditConversion(row, input, ev.currency, amountCents)
+  const seenAt = row.updatedAt.getTime()
+
+  await db.transaction(async (tx) => {
+    // The same event lock `addExpense` and `setEventCurrency` take, so all
+    // three are ordered against each other rather than interleaved.
+    const [held] = await tx
+      .select({ currency: tables.event.currency })
+      .from(tables.event)
+      .where(eq(tables.event.id, eventId))
+      .for('update')
+      .limit(1)
+    if (held?.currency !== conversion.baseCurrency) {
+      throw createError({
+        statusCode: 409,
+        message: `This trip's currency changed to ${held?.currency} while the expense was being edited. Try again.`
+      })
+    }
+    // ...and the row itself may have moved under us while we were deciding
+    // (another correction, or the recompute a currency change ran). Everything
+    // below is computed from what it said THEN, including the rate, so the
+    // honest answer is to send the editor back to look rather than to write a
+    // merge nobody asked for. `updated_at` moves on every write to this row
+    // (`$onUpdate` in the schema), which is what makes it the fingerprint.
+    const [current] = await tx
+      .select({ updatedAt: tables.expense.updatedAt })
+      .from(tables.expense)
+      .where(eq(tables.expense.id, expenseId))
+      .limit(1)
+    if (!current) throw createError({ statusCode: 404, message: 'Expense not found' })
+    if (current.updatedAt.getTime() !== seenAt) {
+      throw createError({
+        statusCode: 409,
+        message: 'This expense changed while you were editing it. Open it again and make the change on what it says now.'
+      })
+    }
+
+    const accounts = await ensureEventAccountsWithin(tx, eventId)
+    const rounding = accounts.find(a => a.kind === 'rounding')
+    if (!rounding) {
+      throw createError({ statusCode: 500, message: `This event has no ${ROUNDING} account` })
+    }
+    const byAccountId = new Map(accounts.map(a => [a.id, a]))
+
+    const lineRows = await tx
+      .select()
+      .from(tables.expenseShare)
+      .where(eq(tables.expenseShare.expenseId, expenseId))
+      .orderBy(asc(tables.expenseShare.seq), asc(tables.expenseShare.id))
+
+    // The member DEBITS, in the order they were written — which is the order
+    // the person named the split in, and the order an edit has to hand back.
+    // The payer's credit is a member line too and is excluded by its sign.
+    const recorded = lineRows.flatMap((l) => {
+      const account = byAccountId.get(l.accountId)
+      if (account?.kind !== 'member' || l.amountCents < 0) return []
+      return [{
+        name: account.name,
+        email: account.email ?? '',
+        amountCents: l.amountCents,
+        weight: l.weight === null ? null : trimDecimal(l.weight)
+      }]
+    })
+    const recordedCategory = lineRows.find(
+      l => byAccountId.get(l.accountId)?.kind === 'category' && l.amountCents > 0
+    )?.accountId ?? null
+
+    const splitMode = input.splitMode ?? row.splitMode
+    const resolved = input.participants
+      ? resolveShares(amountCents, input.participants, splitMode)
+      : resplitFromRecord({
+          splitMode: row.splitMode,
+          amountCents,
+          previousAmountCents: row.amountCents,
+          shares: recorded
+        })
+
+    // Absent means unchanged, and this is the one place where the difference
+    // bites: `resolveCategoryAccount` with neither field answers `Uncategorised`,
+    // so calling it unconditionally would move every edited expense out of its
+    // category for saying nothing about categories.
+    const destination = input.accountId !== undefined || input.category !== undefined
+      ? resolveCategoryAccount(accounts, { accountId: input.accountId, category: input.category }).id
+      : recordedCategory
+
+    const paidByName = input.paidByName ?? row.paidByName
+    const paidByEmail = (input.paidByEmail ?? row.paidByEmail).trim().toLowerCase()
+    const members = await ensureMemberAccountsWithin(tx, eventId, [
+      { name: paidByName, email: paidByEmail },
+      ...resolved.map(r => ({ name: r.name, email: r.email }))
+    ])
+    const payerAccount = members.get(paidByEmail)
+    if (!payerAccount) {
+      throw createError({ statusCode: 500, message: 'The payer has no account on this event' })
+    }
+
+    const lines = buildEntryLines({
+      amountCents,
+      amountBaseCents: conversion.amountBaseCents,
+      payerAccountId: payerAccount.id,
+      categoryAccountId: destination,
+      roundingAccountId: rounding.id,
+      // No `amountBaseCents` per share, so the group apportionment runs — the
+      // WRITE path's rule and not #59's. The per-person base figures are being
+      // re-derived from a total here, not re-expressed at a new rate, so
+      // converting each on its own would invent a cent of liability rather than
+      // discover one, and the residual is structurally zero again.
+      shares: resolved.map(share => ({
+        accountId: members.get(share.email)!.id,
+        amountCents: share.amountCents,
+        weight: share.weight
+      }))
+    })
+    assertEntryBalances(lines)
+
+    await tx.update(tables.expense).set({
+      title: input.title ?? row.title,
+      amountCents,
+      currency: conversion.currency,
+      baseCurrency: conversion.baseCurrency,
+      fxRate: conversion.fxRate,
+      fxRateSource: conversion.fxRateSource,
+      amountBaseCents: conversion.amountBaseCents,
+      statedAmountCents: conversion.statedAmountCents,
+      statedCurrency: conversion.statedCurrency,
+      splitMode,
+      paidByName,
+      paidByEmail,
+      // `null` is a value here and `undefined` is not: sending `note: null`
+      // clears it, leaving it out keeps it.
+      note: input.note !== undefined ? input.note : row.note
+      // `createdByUserId` and `createdAt` are deliberately absent: they say who
+      // ADDED this and when, and an edit does not change either. Who edited it
+      // is the audit log's answer.
+    }).where(eq(tables.expense.id, expenseId))
+
+    await tx.delete(tables.expenseShare).where(eq(tables.expenseShare.expenseId, expenseId))
+    await tx.insert(tables.expenseShare).values(lines.map((line, seq) => ({
+      id: createId(),
+      expenseId,
+      eventId,
+      accountId: line.accountId,
+      seq,
+      amountCents: line.amountCents,
+      amountBaseCents: line.amountBaseCents,
+      weight: line.weight
+    })))
+  })
+
+  return { ...await loadBudget(eventId), expenseId }
+}
+
+/**
  * Remove an expense — the account that recorded it, the person it says paid,
  * or a planner. Its shares cascade away.
  */
@@ -1374,6 +1840,18 @@ export async function addExpenseAsPlanner(userId: string, slug: string, input: A
   const ev = await loadEventBySlug(slug)
   await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
   return addExpense(ev.id, input, { userId })
+}
+
+/** Correct an expense as a planner (owner/co-planner only). */
+export async function updateExpenseAsPlanner(
+  userId: string,
+  slug: string,
+  expenseId: string,
+  input: UpdateExpenseInput
+) {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+  return updateExpense(ev.id, expenseId, input)
 }
 
 /** Remove an expense as a planner (owner/co-planner only). */
@@ -1424,6 +1902,28 @@ async function assertMayWriteExpenses(slug: string, actor: ParticipantActor) {
 export async function addExpenseAsParticipant(actor: ParticipantActor, slug: string, input: AddExpenseInput) {
   const { ev } = await assertMayWriteExpenses(slug, actor)
   return addExpense(ev.id, input, { userId: actor.id })
+}
+
+/**
+ * Correct an expense as a signed-in PARTICIPANT — ANY expense on the trip,
+ * including one somebody else recorded (#27).
+ *
+ * That is wider than `removeExpenseAsParticipant`, which is the recorder, the
+ * payer or a planner, and the asymmetry is the point rather than an oversight:
+ * a friend who was there can fix a figure, and a wrong figure fixed by the
+ * wrong person is still fixed, while a wrong deletion cannot be undone by
+ * anybody. The gate is the same one `addExpenseAsParticipant` uses, so nothing
+ * is widened about WHO may touch this trip's money — and no `by` is threaded
+ * through, because there is no per-row rule for it to decide.
+ */
+export async function updateExpenseAsParticipant(
+  actor: ParticipantActor,
+  slug: string,
+  expenseId: string,
+  input: UpdateExpenseInput
+) {
+  const { ev } = await assertMayWriteExpenses(slug, actor)
+  return updateExpense(ev.id, expenseId, input)
 }
 
 /** Remove an expense you recorded or paid; a planner of the event may remove any. */

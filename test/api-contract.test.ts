@@ -141,7 +141,14 @@ describe('the operation ids are Enterprise\'s tool names and must not drift', ()
     'listTimeline', 'lockEventDate', 'openUpParty', 'postEventChatMessage',
     'proposeDateOption', 'readEventChat', 'removeRsvp', 'removeSeriesMember',
     'removeTimelineItem', 'removeTripExpense', 'revokeInvite',
-    'scheduleSeriesShowing', 'setEventStatus', 'updateEvent', 'updateRsvp'
+    'scheduleSeriesShowing', 'setEventStatus', 'updateEvent', 'updateRsvp',
+    // #27, and added here ON PURPOSE rather than to make this test pass. The XO
+    // could add an expense and delete one, so the only way it could fix a
+    // mistyped total was to destroy the entry and rebuild it — losing who
+    // recorded it, when, and the rate frozen onto it. Enterprise picks the verb
+    // up the next time it regenerates from the vendored spec; nothing it
+    // already calls changes shape.
+    'updateTripExpense'
   ]
 
   const PLUMBING = [
@@ -149,10 +156,10 @@ describe('the operation ids are Enterprise\'s tool names and must not drift', ()
     'publishConcert', 'unpublishConcert', 'uploadPoster'
   ]
 
-  it('exposes exactly the 33 tools the events department had', () => {
+  it('exposes exactly the 34 tools the events department has', () => {
     const exposed = operations.filter(o => o.exposed).map(o => o.operationId).sort()
     expect(exposed).toEqual([...EXPOSED_TOOLS].sort())
-    expect(exposed).toHaveLength(33)
+    expect(exposed).toHaveLength(34)
   })
 
   it('keeps the 7 plumbing operations out of the tool surface', () => {

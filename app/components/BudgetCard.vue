@@ -17,6 +17,17 @@
  * The payer is pickable and defaults to the viewer, because entering an expense
  * a friend fronted is the convenience that makes the account gate bearable. The
  * list therefore shows BOTH the payer and whoever typed it in.
+ *
+ * CORRECTING ONE (#27) REUSES THE SAME FORM. An edit is the add form prefilled
+ * from the entry and PATCHed to `${expensesBase}/{id}` instead of POSTed, which
+ * is the only shape in which the two can be guaranteed to offer the same
+ * controls — a second form would drift, and the control it would be missing is
+ * always the one somebody needs.
+ *
+ * ANY WRITER MAY EDIT ANY EXPENSE, which is wider than removing one (the
+ * recorder, the payer, or a planner) and is the issue's own decision: a friend
+ * who was there can fix a figure, and a wrong figure fixed by the wrong person
+ * is still fixed, while a wrong deletion cannot be undone by anybody.
  */
 interface Share { name: string, email: string, amountCents: number, amountBaseCents: number, weight: string | null }
 interface Line {
@@ -178,10 +189,28 @@ function isForeign(x: Expense): boolean {
 
 const canWrite = computed(() => !!props.viewer && !props.lockedReason)
 
+/**
+ * Everybody the form may offer: the trip's participants, plus anyone already on
+ * the expense being corrected.
+ *
+ * THE SECOND HALF IS NOT A NICETY. An expense recorded in June can be split
+ * across somebody who has since changed their RSVP, and a form that offered only
+ * today's participant list would drop them from the rows without saying so —
+ * their share would vanish into everybody else's on save. Their name comes from
+ * the participant list where there is one, because that is the current spelling.
+ */
+const editingShares = ref<Participant[]>([])
+const roster = computed(() => {
+  const seen = new Map<string, Participant>()
+  for (const p of props.participants) if (p.email) seen.set(p.email, p)
+  for (const p of editingShares.value) if (p.email && !seen.has(p.email)) seen.set(p.email, p)
+  return [...seen.values()]
+})
+
 /** Everyone offerable as the payer — the split list, plus the viewer. */
 const payerOptions = computed(() => {
   const seen = new Map<string, Participant>()
-  for (const p of props.participants) if (p.email) seen.set(p.email, p)
+  for (const p of roster.value) if (p.email) seen.set(p.email, p)
   if (props.viewer?.email) seen.set(props.viewer.email, props.viewer)
   return [...seen.values()]
 })
@@ -193,8 +222,11 @@ function canRemove(x: Expense): boolean {
   return x.paidByEmail === email || x.addedByEmail === email
 }
 
-/* ---- add expense ---- */
+/* ---- add an expense, or correct one (#27) ---- */
 const adding = ref(false)
+/** The entry being corrected, or null when the form is recording a new one. */
+const editingId = ref<string | null>(null)
+const editingTitle = ref('')
 const title = ref('')
 const amount = ref('')
 const selected = ref<string[]>([])
@@ -387,7 +419,18 @@ async function quoteRate() {
 
 // A complete code is the trigger; nothing is fetched while somebody is still
 // typing one, and nothing is fetched at all for the trip’s own currency.
+//
+// ...EXCEPT WHEN AN EDIT IS PREFILLING IT (#27). Today's rate is a suggestion
+// for an expense that does not exist yet; for one that does, the rate that
+// matters is the one FROZEN onto it, and letting the quote land would overwrite
+// the prefilled figure a moment after the form opened. `startEdit` suppresses
+// exactly one quote, so changing the currency while editing still fetches.
+let skipNextQuote = false
 watch(spentCurrency, (code) => {
+  if (skipNextQuote) {
+    skipNextQuote = false
+    return
+  }
   if (/^[A-Za-z]{3}$/.test(code.trim())) quoteRate()
 })
 
@@ -420,12 +463,30 @@ const SPLIT_LABELS: Record<string, string> = {
 
 // A percentage is not a weight is not an amount: carrying numbers across a mode
 // change would leave a plausible-looking total nobody typed.
+//
+// An EDIT sets the mode and the numbers together, though, and they are the
+// numbers that belong to it — so `setSplit` below suppresses exactly one reset
+// rather than having the prefill race the watcher it would otherwise trip.
+let keepSplitValues = false
 watch(splitMode, () => {
+  if (keepSplitValues) {
+    keepSplitValues = false
+    return
+  }
   splitValues.value = {}
 })
 
+/** Set the mode and its per-person numbers as ONE change, for a prefill. */
+function setSplit(mode: typeof splitMode.value, values: Record<string, string>) {
+  if (splitMode.value !== mode) {
+    keepSplitValues = true
+    splitMode.value = mode
+  }
+  splitValues.value = values
+}
+
 /** Everybody currently in the split, in the order the rows render. */
-const splitPeople = computed(() => props.participants.filter(p => selected.value.includes(p.email)))
+const splitPeople = computed(() => roster.value.filter(p => selected.value.includes(p.email)))
 
 /**
  * A percentage or weight as an integer at the scale the server stores it at.
@@ -522,55 +583,131 @@ function splitParticipantsBody() {
   return splitEntries.value.map(e => ({ name: e.name, email: e.email, weight: e.raw }))
 }
 
-async function addExpense() {
+/** Back to an empty form, whichever verb was on it. */
+function resetForm() {
+  editingId.value = null
+  editingTitle.value = ''
+  editingShares.value = []
+  title.value = ''
+  amount.value = ''
+  categoryId.value = uncategorised.value?.id ?? ''
+  splitMode.value = 'even'
+  splitValues.value = {}
+  selected.value = props.participants.map(p => p.email).filter(Boolean)
+  payerEmail.value = props.viewer?.email ?? ''
+  spentCurrency.value = props.budget.currency
+  fxRate.value = ''
+  fxAsOf.value = null
+  fxUnavailable.value = false
+  fxMode.value = 'rate'
+  paidAmount.value = ''
+  adding.value = false
+}
+
+/**
+ * Open the form on an expense that already exists (#27), filled in with what it
+ * says now — including the split, which is the part somebody would otherwise
+ * have to reconstruct from the list to change one number in.
+ *
+ * `even` fills in no per-person values on purpose: there are none to fill in,
+ * and typing amounts into an even split is how a person says "actually, pin
+ * these". The other three modes hand back exactly what was entered, which is
+ * what #26 stored the mode and the weights for.
+ */
+function startEdit(x: Expense) {
+  editingId.value = x.id
+  editingTitle.value = x.title
+  editingShares.value = x.shares.map(s => ({ name: s.name, email: s.email }))
+  title.value = x.title
+  amount.value = (x.amountCents / 100).toFixed(2)
+  categoryId.value = x.categoryAccountId ?? uncategorised.value?.id ?? ''
+  if (x.categoryAccountId && x.categoryAccountId !== uncategorised.value?.id) showCategory.value = true
+  payerEmail.value = x.paidByEmail
+  selected.value = x.shares.map(s => s.email)
+
+  if (spentCurrency.value !== x.currency) skipNextQuote = true
+  spentCurrency.value = x.currency
+  fxAsOf.value = null
+  fxUnavailable.value = false
+  // The frozen rate, and the figure behind it where there is one. A row that
+  // says `manual` was recorded from something a person stated, so the form
+  // opens on the field they stated it in.
+  fxRate.value = x.fxRate
+  if (x.fxRateSource === 'manual' && x.statedAmountCents) {
+    fxMode.value = 'paid'
+    paidAmount.value = (x.statedAmountCents / 100).toFixed(2)
+  } else {
+    fxMode.value = 'rate'
+    paidAmount.value = ''
+  }
+
+  const mode = (['even', 'exact', 'percentage', 'weight'].includes(x.splitMode)
+    ? x.splitMode
+    : 'even') as typeof splitMode.value
+  const values: Record<string, string> = {}
+  if (mode === 'exact') for (const s of x.shares) values[s.email] = (s.amountCents / 100).toFixed(2)
+  if (mode === 'percentage' || mode === 'weight') for (const s of x.shares) values[s.email] = s.weight ?? ''
+  setSplit(mode, values)
+
+  adding.value = true
+}
+
+/**
+ * One submit for both verbs: POST a new entry, PATCH an existing one.
+ *
+ * The bodies differ in ONE place, and it is the one an edit would get wrong by
+ * copying. On a POST an omitted `accountId` means "the server's default,
+ * Uncategorised"; on a PATCH it means "leave it where it is", so moving an
+ * expense BACK to Uncategorised has to say so explicitly or nothing happens.
+ */
+async function saveExpense() {
   if (!payer.value) return
   if (!title.value || !Number.isFinite(amountCents.value) || amountCents.value <= 0 || !selected.value.length) return
   if (!splitReady.value) return
+  const editing = editingId.value
   saving.value = true
   try {
-    const res = await $fetch<{ budget: Budget }>(props.addUrl, {
-      method: 'POST',
-      body: {
-        title: title.value,
-        // Omitted entirely unless somebody picked one: the server's default is
-        // `Uncategorised`, and sending it explicitly would make the picker look
-        // load-bearing when it is not.
-        ...(showCategory.value && categoryId.value && categoryId.value !== uncategorised.value?.id
-          ? { accountId: categoryId.value }
-          : {}),
-        amountCents: amountCents.value,
-        currency: spentCurrency.value.trim().toUpperCase() || props.budget.currency,
-        // Only when there is something to convert, and exactly ONE of the two:
-        // an empty rate field means "fetch one", not "use 0", and the server
-        // refuses a rate and a stated total together because they can disagree.
-        ...(foreign.value && fxMode.value === 'rate' && fxRate.value.trim()
-          ? { fxRate: fxRate.value.trim() }
-          : {}),
-        ...(foreign.value && fxMode.value === 'paid' && paidCents.value
-          ? { targetAmountCents: paidCents.value }
-          : {}),
-        paidByName: payer.value.name,
-        paidByEmail: payer.value.email,
-        splitMode: splitMode.value,
-        participants: splitParticipantsBody()
+    const res = await $fetch<{ budget: Budget }>(
+      editing ? `${props.expensesBase}/${editing}` : props.addUrl,
+      {
+        method: editing ? 'PATCH' : 'POST',
+        body: {
+          title: title.value,
+          // Omitted entirely on a new expense unless somebody picked one: the
+          // server's default is `Uncategorised`, and sending it explicitly would
+          // make the picker look load-bearing when it is not.
+          ...(editing
+            ? { accountId: categoryId.value || null }
+            : showCategory.value && categoryId.value && categoryId.value !== uncategorised.value?.id
+              ? { accountId: categoryId.value }
+              : {}),
+          amountCents: amountCents.value,
+          currency: spentCurrency.value.trim().toUpperCase() || props.budget.currency,
+          // Only when there is something to convert, and exactly ONE of the two:
+          // an empty rate field means "fetch one", not "use 0", and the server
+          // refuses a rate and a stated total together because they can disagree.
+          ...(foreign.value && fxMode.value === 'rate' && fxRate.value.trim()
+            ? { fxRate: fxRate.value.trim() }
+            : {}),
+          ...(foreign.value && fxMode.value === 'paid' && paidCents.value
+            ? { targetAmountCents: paidCents.value }
+            : {}),
+          paidByName: payer.value.name,
+          paidByEmail: payer.value.email,
+          splitMode: splitMode.value,
+          participants: splitParticipantsBody()
+        }
       }
-    })
-    title.value = ''
-    amount.value = ''
-    categoryId.value = uncategorised.value?.id ?? ''
-    splitMode.value = 'even'
-    splitValues.value = {}
-    spentCurrency.value = props.budget.currency
-    fxRate.value = ''
-    fxAsOf.value = null
-    fxUnavailable.value = false
-    fxMode.value = 'rate'
-    paidAmount.value = ''
-    adding.value = false
+    )
+    resetForm()
     emit('updated', res.budget)
-    toast.add({ title: 'Expense recorded', color: 'success' })
+    toast.add({ title: editing ? 'Expense updated' : 'Expense recorded', color: 'success' })
   } catch (e) {
-    toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not record that', color: 'error' })
+    toast.add({
+      title: (e as { data?: { message?: string } }).data?.message
+        ?? (editing ? 'Could not save that change' : 'Could not record that'),
+      color: 'error'
+    })
   } finally {
     saving.value = false
   }
@@ -643,7 +780,7 @@ async function removeExpense(id: string) {
   }
 }
 
-const participantItems = computed(() => props.participants.filter(p => p.email).map(p => ({ label: p.name, value: p.email })))
+const participantItems = computed(() => roster.value.filter(p => p.email).map(p => ({ label: p.name, value: p.email })))
 const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, value: p.email })))
 </script>
 
@@ -714,11 +851,26 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
               <!-- The base figure, because it is the one the balances below are
                    built from; the as-spent amount is on the line above. -->
               <span class="tabular-nums font-medium">{{ francs(x.amountBaseCents) }}</span>
+              <!-- ANY writer may correct ANY expense (#27), which is wider than
+                   removing one on purpose: a wrong figure fixed by the wrong
+                   person is still fixed, and a wrong deletion is not undoable
+                   by anybody. Who made the change is in the audit log. -->
+              <UButton
+                v-if="canWrite"
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :aria-label="`Correct ${x.title}`"
+                @click="startEdit(x)"
+              >
+                ✎
+              </UButton>
               <UButton
                 v-if="canRemove(x)"
                 size="xs"
                 color="neutral"
                 variant="ghost"
+                :aria-label="`Remove ${x.title}`"
                 @click="removeExpense(x.id)"
               >
                 ✕
@@ -924,8 +1076,15 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
       <form
         v-else-if="canWrite && adding"
         class="flex flex-col gap-2 pt-1"
-        @submit.prevent="addExpense"
+        @submit.prevent="saveExpense"
       >
+        <p
+          v-if="editingId"
+          class="text-sm text-muted"
+        >
+          Correcting <span class="font-medium text-default">{{ editingTitle }}</span>. Anyone on the
+          trip can fix any expense — the change is recorded against you.
+        </p>
         <div class="flex gap-2">
           <UInput
             v-model="title"
@@ -1160,13 +1319,13 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
               || (foreign && fxMode === 'paid' && !paidCents)
               || !splitReady"
           >
-            Record it
+            {{ editingId ? 'Save changes' : 'Record it' }}
           </UButton>
           <UButton
             size="sm"
             variant="ghost"
             color="neutral"
-            @click="adding = false"
+            @click="resetForm"
           >
             Cancel
           </UButton>
