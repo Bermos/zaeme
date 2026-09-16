@@ -12,10 +12,13 @@ import { assertPlanner, loadEventBySlug } from './permissions'
  *
  * Photos/videos are the social gallery — anyone on the event may contribute
  * and everyone sees them. Documents (reservations, itineraries) are shared
- * papers — visible to everyone on the event. Tickets are per-person: a ticket
- * is visible to the attendees it is assigned to (and to planners), and since
- * #36 that is a LIST rather than one person — a pair fare, a family entry and
- * one QR code for six are all one ticket several people are behind.
+ * papers — visible to everyone on the event. Tickets are ASSIGNED per person —
+ * since #36 to a LIST of people rather than one, because a pair fare, a family
+ * entry and one QR code for six are all one ticket several people are behind —
+ * but since #37 assignment is a LABEL and not a lock: everyone on the event
+ * sees every ticket, and the assignment says whose it is so a person can find
+ * theirs quickly. `mine` on `GuestTicketView` is that label; there is no
+ * per-event toggle and nothing stored about visibility.
  */
 
 export type MediaType = 'photo' | 'video' | 'document' | 'ticket'
@@ -285,15 +288,78 @@ export async function loadTicketAssignments(mediaIds: string[]): Promise<Map<str
 }
 
 /**
+ * WHO A TICKET IS FOR, IN WORDS, on the surface that has no other way to know
+ * (#37). The invite page's `attendees` list is names with no RSVP ids on it, so
+ * an id alone would render as a cuid2 — this resolves it here, once, beside the
+ * list it labels.
+ *
+ * `rsvpId` travels beside the name rather than the name alone: two friends
+ * genuinely called Ben are not the same person, and a parallel array of names
+ * would be a second answer to the question `assignedRsvpIds` already answers.
+ * It is DERIVED from that one list (below) and never assembled separately.
+ */
+export interface TicketAssigneeView {
+  rsvpId: string
+  /** What the group calls them — the same name `attendees` shows, never an email. */
+  name: string
+}
+
+/**
+ * A ticket as the invite link answers it (#37), which is a media item plus the
+ * two things only this surface knows: whether it is the VIEWER's, and who else
+ * it is for by name.
+ */
+export interface GuestTicketView extends MediaItemView {
+  /**
+   * Whether the viewer is one of the assignees — an intersection, not an
+   * equality (#36): a pair fare is `true` for both halves of the couple.
+   * `false` for every ticket when the read carried no email, and `false` for a
+   * ticket assigned to nobody.
+   *
+   * SERVER-DECIDED, because the browser does not have the viewer's RSVP ids and
+   * never will: the guest page is given names, not ids. It is a MARKER and not
+   * a gate — see this function's header.
+   */
+  mine: boolean
+  /** Everybody this ticket is for, named. Empty for a ticket nobody has yet. */
+  assignedTo: TicketAssigneeView[]
+}
+
+/**
  * What one viewer may see, split by handling class: the gallery (photos +
- * videos, everyone's), the shared documents, and the viewer's own tickets
- * (matched through their RSVP email). Storage keys only — the caller signs
+ * videos, everyone's), the shared documents, and EVERY ticket on the event,
+ * each marked as the viewer's or not. Storage keys only — the caller signs
  * download URLs with its own store.
+ *
+ * ── THE TICKETS ARE NO LONGER FILTERED, AND THAT IS #37 ──
+ *
+ * This function used to return the viewer's own tickets and nothing else. That
+ * is right at a busy barrier with one phone per person and wrong at a busy
+ * barrier with one phone between four, which is the case it was actually
+ * written for: the friend whose battery survived could open their own ticket
+ * and nobody else's, and the group was stuck at the gate holding a link that
+ * had every file on it.
+ *
+ * The owner's decision (#37, D2 revised 2026-09-14) is that this was never a
+ * permission boundary: "it's for friends, we do not need to segregate during an
+ * event between members. We should have two buttons, show and show all." So
+ * anyone holding the invite capability URL reaches every ticket on the event,
+ * and `mine` is a convenience for finding yours quickly. There is no per-event
+ * toggle and no column — the widening is unconditional and deliberate.
+ *
+ * IT IS EXACTLY TICKETS. `documents` and the gallery keep the rule they had;
+ * loosening either of them for symmetry would be a decision nobody has made.
+ *
+ * AND THE EMAIL NEVER AUTHENTICATED ANYBODY. `?email=` is asserted by the
+ * caller and always was — anybody with the link can pass anybody's address —
+ * which is why it could never have been the thing holding tickets apart. What
+ * changes here is that the consequence is now explicit and owner-authorised
+ * rather than implied by a filter that looked like a gate.
  */
 export async function listMediaForViewer(eventId: string, viewerEmail: string | null): Promise<{
   gallery: MediaItemView[]
   documents: MediaItemView[]
-  tickets: MediaItemView[]
+  tickets: GuestTicketView[]
 }> {
   const db = useDb()
   const rows = await db
@@ -302,37 +368,54 @@ export async function listMediaForViewer(eventId: string, viewerEmail: string | 
     .where(and(eq(tables.media.eventId, eventId), eq(tables.media.status, 'ready')))
     .orderBy(desc(tables.media.takenAt), desc(tables.media.createdAt))
 
-  let myRsvpIds = new Set<string>()
-  if (viewerEmail) {
-    const myRsvps = await db
-      .select({ id: tables.rsvp.id })
-      .from(tables.rsvp)
-      .where(and(eq(tables.rsvp.eventId, eventId), eq(tables.rsvp.guestEmail, viewerEmail.toLowerCase())))
-    myRsvpIds = new Set(myRsvps.map(r => r.id))
-  }
+  const ticketRows = rows.filter(r => r.type === 'ticket')
+  const ticketIds = ticketRows.map(r => r.id)
 
+  // THE ASSIGNMENTS ARE READ FIRST AND THE PEOPLE SECOND, on purpose. The RSVP
+  // read is the LOOKUP side, and a lookup map built before the rows that point
+  // into it can be missing an entry a concurrent RSVP created in between —
+  // which would render somebody's name as a fallback for no reason anybody
+  // could reproduce. Reading it second makes the map a superset. (`loadBudget`
+  // had this exact bug the other way round and it cost somebody's balance.)
+  const assignments = await loadTicketAssignments(ticketIds)
+  const [details, people] = await Promise.all([
+    // EVERY ticket's detail now, where this used to look up only the viewer's.
+    // The seat travels with the ticket it belongs to: a screen that offers the
+    // whole group's tickets and withholds what is written on them is the half
+    // of #35 that matters at a barrier, withheld from the person actually
+    // standing at it.
+    loadTicketDetails(ticketIds),
+    db
+      .select({ id: tables.rsvp.id, name: tables.rsvp.guestName, email: tables.rsvp.guestEmail })
+      .from(tables.rsvp)
+      .where(eq(tables.rsvp.eventId, eventId))
+  ])
+
+  const nameByRsvpId = new Map(people.map(p => [p.id, p.name || 'Guest']))
   // THE MATCHING RULE (#36), and it is an intersection rather than an equality:
   // a ticket is this viewer's if they are ANY of its assignees. A pair fare
   // bought for two people is on both their screens, and neither of them has to
-  // be "the" assignee for it to be theirs. (#37 then shows the whole trip's
-  // tickets with the assignee named; this is the list that says which are
-  // YOURS, and it has to be right before that can build on it.)
-  const assignments = await loadTicketAssignments(rows.filter(r => r.type === 'ticket').map(r => r.id))
-  const mine = rows.filter(r => r.type === 'ticket'
-    && (assignments.get(r.id) ?? []).some(id => myRsvpIds.has(id)))
-  // Only the tickets this viewer may actually see are looked up: a detail row
-  // says where somebody is sitting, so it travels with the ticket it belongs to
-  // and never ahead of it.
-  const details = await loadTicketDetails(mine.map(r => r.id))
+  // be "the" assignee for it to be theirs.
+  const lower = viewerEmail?.toLowerCase() ?? null
+  const myRsvpIds = new Set(
+    lower ? people.filter(p => (p.email ?? '').toLowerCase() === lower).map(p => p.id) : []
+  )
 
   return {
     gallery: rows.filter(r => r.type === 'photo' || r.type === 'video').map(r => toView(r, null, [])),
     documents: rows.filter(r => r.type === 'document').map(r => toView(r, null, [])),
-    // The co-assignees travel with the ticket. Everybody named here is already
-    // holding the same file — that is what sharing a pair fare means — so the
-    // list widens nothing, and it is what lets a screen say "yours and Ben's"
-    // rather than making somebody guess why the seat count is two.
-    tickets: mine.map(r => toView(r, details.get(r.id), assignments.get(r.id) ?? []))
+    // BOTH NEW FIELDS ARE DERIVED FROM `assignedRsvpIds` AND NOT ASSEMBLED
+    // BESIDE IT. A ticket that is "mine" while naming nobody, or named for
+    // three people while listing two ids, would be one row answering the same
+    // question twice — the shape the single `assignedRsvpId` beside the list
+    // had, and the reason #36 removed it rather than keeping both.
+    tickets: ticketRows
+      .map(r => toView(r, details.get(r.id), assignments.get(r.id) ?? []))
+      .map(v => ({
+        ...v,
+        mine: v.assignedRsvpIds.some(id => myRsvpIds.has(id)),
+        assignedTo: v.assignedRsvpIds.map(id => ({ rsvpId: id, name: nameByRsvpId.get(id) ?? 'Guest' }))
+      }))
   }
 }
 

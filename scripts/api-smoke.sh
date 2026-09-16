@@ -400,6 +400,85 @@ ticket_assignees() {
     })' "$2"
 }
 
+# `guest_field <body> <bucket> <mediaId> <field>` — one field of one item in one
+# BUCKET of the invite link's media answer (#37), and the absences are kept
+# apart for the reason `ticket_field` keeps its three apart:
+#
+#   no-such-item   that bucket does not carry that media row at all
+#   no-field       the row is there and the field is not — the #78 shape, and
+#                  what a read that stopped projecting `mine` looks like
+#   null           the field is there and is null
+#   true / false   the value, as JSON spells it
+#
+# `no-field` IS THE ONE THAT EARNS THE HELPER. `mine: false` and "this surface
+# forgot to compute `mine`" are the same thing to any check that asks "is it
+# false?", and they are opposite findings: the first says the viewer is not on
+# the ticket, the second says nobody is ever on any ticket again. The invite
+# surface sends the domain view out as it is, so a dropped field drops the key.
+guest_field() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const list = b[process.argv[1]]
+      if (!Array.isArray(list)) return process.stdout.write("no-such-bucket")
+      const m = list.find(x => x && x.id === process.argv[2])
+      if (!m) return process.stdout.write("no-such-item")
+      if (!Object.hasOwn(m, process.argv[3])) return process.stdout.write("no-field")
+      const v = m[process.argv[3]]
+      process.stdout.write(v === null ? "null" : String(v))
+    })' "$2" "$3" "$4"
+}
+
+# `guest_bucket <body> <bucket>` — the SORTED ids in one bucket of the invite
+# link's media answer, comma-joined, or `none` when the bucket is empty.
+#
+# This is the helper that measures the widening itself (#37): "which tickets did
+# this viewer get" is a set, and a `contains` on one filename cannot tell a list
+# of two from a list of one that happens to include it.
+guest_bucket() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const list = b[process.argv[1]]
+      if (!Array.isArray(list)) return process.stdout.write("no-such-bucket")
+      const ids = list.map(x => x && x.id).filter(Boolean).sort()
+      process.stdout.write(ids.length === 0 ? "none" : ids.join(","))
+    })' "$2"
+}
+
+# `ticket_names <body> <mediaId>` — who a ticket is FOR, BY NAME (#37), sorted
+# and comma-joined, with the same four answers `ticket_assignees` gives:
+#
+#   no-such-item / no-field / none / Ana,Ben
+#
+# A SECOND HELPER RATHER THAN A FLAG ON THE FIRST, because the two answer
+# different questions and the #37 screen needs both: `assignedRsvpIds` is who it
+# is for, and `assignedTo` is what the guest page can actually PRINT — the
+# invite page's `attendees` list carries names and no RSVP ids at all, so an id
+# alone would render as a cuid2. Asserting them against each other is how the
+# two stay one answer rather than two.
+ticket_names() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const raw = Array.isArray(b) ? b : (b.tickets ?? b.media ?? [])
+      const list = Array.isArray(raw) ? raw : [raw]
+      const m = list.find(x => x && x.id === process.argv[1])
+      if (!m) return process.stdout.write("no-such-item")
+      if (!Object.hasOwn(m, "assignedTo")) return process.stdout.write("no-field")
+      const who = m.assignedTo
+      if (!Array.isArray(who)) return process.stdout.write("not-a-list")
+      const names = who.map(a => (a && a.name) ?? "?").sort()
+      process.stdout.write(names.length === 0 ? "none" : names.join(","))
+    })' "$2"
+}
+
 # `sorted_ids <id>...` — the same sort `ticket_assignees` applies, so an
 # expectation is built from the ids a test minted rather than typed out in
 # whatever order they were created in.
@@ -3158,9 +3237,12 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}
     body "${TDP[@]}" "${JSON[@]}" -X PATCH "$TDHOST" -d '{"timezone":"Europe/Lisbon"}' > /dev/null
     contains "the trip is in Lisbon for the reader"  "$(body "$BASE/api/invites/$TDTOK")" '"timezone":"Europe/Lisbon"'
 
-    # ACCEPTANCE 4: THE ATTENDEE READS IT NEXT TO THE DOWNLOAD — and nobody
-    # else does. A ticket is per-person; the detail says where somebody is
-    # sitting, so it travels with the ticket and never one row further.
+    # ACCEPTANCE 4: THE ATTENDEE READS IT NEXT TO THE DOWNLOAD. The detail
+    # travels WITH the ticket it belongs to and never one row further — which
+    # since #37 means everyone on the event reads it, because everyone on the
+    # event now reaches the ticket. A screen that offered the group's tickets
+    # and withheld what is written on them would take the half of this issue
+    # that matters at a barrier away from the person standing at it.
     TDEMAIL=$(body "${TDG[@]}" "$BASE/api/auth/get-session" | grep -o '"email":"[^"]*"' | head -1 | sed 's/^"email":"//;s/"$//')
     body "${JSON[@]}" -X POST "$BASE/api/invites/$TDTOK/rsvp" \
       -d "{\"status\":\"yes\",\"guestName\":\"CI Guest\",\"guestEmail\":\"$TDEMAIL\"}" > /dev/null
@@ -3172,12 +3254,15 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}
     equals "the attendee's own ticket carries the seat" "$(ticket_field "$TDGUEST" "$TDMID" seat)" "41A"
     equals "...and the coach beside it"             "$(ticket_field "$TDGUEST" "$TDMID" coach)" "12"
     contains "...alongside a SIGNED download URL"   "$TDGUEST" 'X-Amz-Signature='
-    # AND NO FURTHER. Somebody else holding the same forwarded link sees neither
-    # the ticket nor a seat number anywhere in the body.
+    # AND SO DOES ANYBODY ELSE ON THE LINK (#37). This used to assert the
+    # opposite — `no-such-item`, and the seat absent from the body — and the
+    # owner's decision reversed it: the person whose phone still has battery
+    # reads the others' seats off it. What is NOT here is a claim that they own
+    # the ticket; `mine` is asserted in the #37 block below.
     TDOTHER=$(body "$BASE/api/invites/$TDTOK/media?email=nobody@example.com")
-    equals "a stranger on the same link sees no ticket" "$(ticket_field "$TDOTHER" "$TDMID" seat)" "no-such-item"
-    excludes "...and no seat number anywhere in it" "$TDOTHER" '41A'
-    excludes "...nor the booking reference"         "$TDOTHER" 'XY7Q2M'
+    equals "a stranger on the same link reads the seat" "$(ticket_field "$TDOTHER" "$TDMID" seat)" "41A"
+    contains "...and the seat number is in the body"  "$TDOTHER" '41A'
+    contains "...and so is the booking reference"     "$TDOTHER" 'XY7Q2M'
 
     # ACCEPTANCE 2, THE EDIT HALF. A PUT REPLACES: what is not sent is cleared,
     # which is one meaning per request. The third line is the one that matters —
@@ -3391,7 +3476,8 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
     # THE SAME TICKET IS ON ALL THREE SCREENS. The guest read is the surface the
     # issue is actually about: one file, three people, each of whom sees it as
     # theirs. Read through the invite link, which is a third credential and a
-    # third projection.
+    # third projection. (Since #37 a fourth person sees the file too — what
+    # these three lines assert is that it names the right three.)
     TAGANA=$(body "$BASE/api/invites/$TATOK/media?email=ana-$SUFFIX@example.com")
     TAGBEN=$(body "$BASE/api/invites/$TATOK/media?email=ben-$SUFFIX@example.com")
     TAGCY=$(body "$BASE/api/invites/$TATOK/media?email=cy-$SUFFIX@example.com")
@@ -3400,13 +3486,18 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
     equals "...and so does the third"              "$(ticket_assignees "$TAGCY" "$TAMID")" "$TATHREE"
     contains "...each of them getting the file"    "$TAGANA" 'family.pdf'
     contains "...alongside a SIGNED download URL"  "$TAGANA" 'X-Amz-Signature='
-    # AND NO FURTHER. The fourth attendee is on the same trip, holding the same
-    # forwarded link, and is not on this ticket.
+    # AND THE FOURTH ATTENDEE SEES IT AND IS NOT ON IT — which since #37 is a
+    # different sentence from "sees nothing". The invite link reaches every
+    # ticket on the event now (the owner's decision, D2 revised), so what these
+    # two lines prove is the ASSIGNMENT SET rather than the visibility: the
+    # ticket names the three people it is for on the screen of somebody who is
+    # not one of them. `mine` is asserted in the #37 block below, where the
+    # fixture is built for it.
     TAGDEE=$(body "$BASE/api/invites/$TATOK/media?email=dee-$SUFFIX@example.com")
-    equals "the fourth attendee sees no ticket"    "$(ticket_assignees "$TAGDEE" "$TAMID")" "no-such-item"
-    excludes "...and not its filename either"      "$TAGDEE" 'family.pdf'
-    equals "a stranger on the link sees no ticket" \
-      "$(ticket_assignees "$(body "$BASE/api/invites/$TATOK/media?email=nobody@example.com")" "$TAMID")" "no-such-item"
+    equals "the fourth attendee sees whose it is"  "$(ticket_assignees "$TAGDEE" "$TAMID")" "$TATHREE"
+    contains "...and gets the file itself"         "$TAGDEE" 'family.pdf'
+    equals "a stranger on the link reads the same" \
+      "$(ticket_assignees "$(body "$BASE/api/invites/$TATOK/media?email=nobody@example.com")" "$TAMID")" "$TATHREE"
 
     # ADDING SOMEBODY ALREADY ON IT IS THE SAME STATE, not a 409 and not a
     # fourth row. This is the `(media_id, rsvp_id)` unique index doing the work,
@@ -3420,8 +3511,10 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
     TATWO=$(sorted_ids "$TAANA" "$TACY")
     equals "removing one leaves the other two"     "$(ticket_assignees "$TAREM" "$TAMID")" "$TATWO"
     equals "...on the machine surface as well"     "$(ticket_assignees "$(body "${AUTH[@]}" "$API/events/$TASLUG/media")" "$TAMID")" "$TATWO"
-    equals "...and the one removed loses the ticket" \
-      "$(ticket_assignees "$(body "$BASE/api/invites/$TATOK/media?email=ben-$SUFFIX@example.com")" "$TAMID")" "no-such-item"
+    # The one removed still HOLDS the link and still sees the file (#37); what
+    # he has lost is his place on it, which is what this reads.
+    equals "...and the one removed is off the list" \
+      "$(ticket_assignees "$(body "$BASE/api/invites/$TATOK/media?email=ben-$SUFFIX@example.com")" "$TAMID")" "$TATWO"
     equals "...while the first still has it, now for two" \
       "$(ticket_assignees "$(body "$BASE/api/invites/$TATOK/media?email=ana-$SUFFIX@example.com")" "$TAMID")" "$TATWO"
     # Idempotent in the same direction: removing somebody who is not on it is
@@ -3494,6 +3587,200 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
     # `upgrade` job reads this row.
   else
     echo "  skip  set S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT to run the assignment rows"
+  fi
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to run these"
+fi
+
+echo
+echo "== everyone's tickets, one phone between four (Bermos/zaeme#37) =="
+# `GET /api/invites/{token}/media?email=` used to FILTER the tickets by that
+# address, so the friend whose battery survived a day out could open their own
+# ticket and nobody else's while the group stood at the barrier holding a link
+# with every file on it. The owner's decision (D2, revised 2026-09-14) is that
+# this was never a permission boundary — "it's for friends, we do not need to
+# segregate during an event between members" — so the invite link reaches EVERY
+# ticket on the event and the email says which of them are yours.
+#
+# WHAT ONLY A RUNNING SERVER CAN SHOW, which is why these are here rather than
+# in `pnpm test`: the RSVP-to-assignee join that decides `mine`, the second join
+# that resolves each assignee's NAME (the guest page has names and no ids — an
+# unresolved id renders as a cuid2), and the event scoping, which is the one
+# thing a widening must not lose. `pnpm test` reads the source and runs no SQL.
+#
+# THE FIXTURE IS BUILT AROUND THE WRONG ANSWERS. Three people and two tickets:
+# a pair fare for two of them, and a spare assigned to NOBODY. The third person
+# is on the trip and on neither ticket, which is what stops "mark everything as
+# everybody's" passing — the widening is about what you can SEE, and `mine` is
+# still supposed to be true of exactly the right people. The spare is the
+# acceptance criterion that a ticket nobody has been given is under All and not
+# under Mine, and it is a real state: a planner uploads the group booking before
+# working out who is on what.
+#
+# AND IT IS EXACTLY TICKETS. A document and a photo are uploaded to the same
+# trip and asked for the `mine` field, which they must not have: `documents` and
+# the gallery keep the rule they had, and loosening either of them "for
+# symmetry" would be a decision nobody has made.
+#
+# The whole block is one fixture minted per run (`$SUFFIX`), because this script
+# re-runs against the previous run's rows.
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  TSP=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  TSSLUG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke show-all $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSSLUG/status" -d '{"status":"published"}' > /dev/null
+  TSTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSSLUG/invites" -d '{"label":"Show all smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  TSHOST="$BASE/api/host/events/$TSSLUG"
+  TSMEDIA="$BASE/api/invites/$TSTOK/media"
+  echo "  trip: $TSSLUG"
+
+  # THE CREDENTIAL DID NOT MOVE, and this is the half that needs no bucket. What
+  # a valid invite RETURNS changed; what counts as a valid invite did not, and
+  # the route still reads the token and nothing else.
+  check "the media read still needs a real token"  404 "$BASE/api/invites/not-a-token/media"
+  check "...and an owner cookie is not a way in"   404 "${TSP[@]}" "$BASE/api/invites/not-a-token/media"
+  check "...nor is the service token"              404 "${AUTH[@]}" "$BASE/api/invites/not-a-token/media"
+  check "a real invite needs no identity at all"   200 "$TSMEDIA"
+  # A MALFORMED IDENTITY IS STILL REFUSED. `email` stayed a validated optional
+  # parameter when it stopped being a filter — a 400 here says the schema is
+  # still reading it, which is what keeps `mine` from being decided by a string
+  # nobody parsed.
+  check "...but a malformed one is still a 400"    400 "$TSMEDIA?email=not-an-address"
+
+  if [ -n "${S3_BUCKET:-}${R2_BUCKET:-}" ]; then
+    TSPDF='%PDF-1.4 two seats, one barcode, four phones and one battery.'
+    TSSIZE=${#TSPDF}
+
+    # `upload_media <type> <fileName> <mimeType> <body>` — presign, PUT, confirm,
+    # printing the media id. Four uploads in this block and the dance is the same
+    # every time; a copy per upload is four places for a typo to read as a
+    # feature being broken.
+    upload_media() {
+      local pre mid
+      pre=$(body "${TSP[@]}" "${JSON[@]}" -X POST "$TSHOST/media/presign" \
+        -d "{\"type\":\"$1\",\"fileName\":\"$2\",\"mimeType\":\"$3\",\"sizeBytes\":${#4}}")
+      mid=$(json_field "$pre" mediaId)
+      curl -s -o /dev/null -X PUT -H "content-type: $3" --data-binary "$4" "$(json_field "$pre" upload.url)"
+      body "${TSP[@]}" "${JSON[@]}" -X POST "$TSHOST/media/confirm" -d "{\"mediaId\":\"$mid\"}" > /dev/null
+      printf '%s' "$mid"
+    }
+
+    TSPAIR=$(upload_media ticket pair.pdf application/pdf "$TSPDF")
+    TSSPARE=$(upload_media ticket spare.pdf application/pdf "$TSPDF")
+    TSDOC=$(upload_media document plan.pdf application/pdf "$TSPDF")
+    TSPHOTO=$(upload_media photo platform.png image/png 'eightbit')
+    equals "four uploads, four distinct media rows"  \
+      "$(printf '%s\n' "$TSPAIR" "$TSSPARE" "$TSDOC" "$TSPHOTO" | sort -u | wc -l | tr -d ' ')" "4"
+
+    for who in Ana Ben Cleo; do
+      body "${JSON[@]}" -X POST "$BASE/api/invites/$TSTOK/rsvp" \
+        -d "{\"status\":\"yes\",\"guestName\":\"$who\",\"guestEmail\":\"$(printf '%s' "$who" | tr 'A-Z' 'a-z')-show-$SUFFIX@example.com\"}" > /dev/null
+    done
+    TSRSVPS=$(body "${AUTH[@]}" "$API/events/$TSSLUG/rsvps")
+    TSANA=$(rsvp_id "$TSRSVPS" "ana-show-$SUFFIX@example.com")
+    TSBEN=$(rsvp_id "$TSRSVPS" "ben-show-$SUFFIX@example.com")
+    TSCLEO=$(rsvp_id "$TSRSVPS" "cleo-show-$SUFFIX@example.com")
+    equals "three people RSVP'd, and they are three" \
+      "$(printf '%s\n' "$TSANA" "$TSBEN" "$TSCLEO" | grep -c '^no-such-rsvp$')" "0"
+
+    # The pair fare is Ana's and Ben's. The spare is nobody's, and stays nobody's.
+    body "${TSP[@]}" "${JSON[@]}" -X POST "$TSHOST/media/$TSPAIR/assignees" -d "{\"rsvpId\":\"$TSANA\"}" > /dev/null
+    body "${TSP[@]}" "${JSON[@]}" -X POST "$TSHOST/media/$TSPAIR/assignees" -d "{\"rsvpId\":\"$TSBEN\"}" > /dev/null
+    body "${TSP[@]}" "${JSON[@]}" -X PUT "$TSHOST/media/$TSPAIR/detail" -d '{"seat":"41A","coach":"12"}' > /dev/null
+
+    TSBOTH=$(sorted_ids "$TSPAIR" "$TSSPARE")
+    TSANARES=$(body "$TSMEDIA?email=ana-show-$SUFFIX@example.com")
+    TSCLEORES=$(body "$TSMEDIA?email=cleo-show-$SUFFIX@example.com")
+    TSNONE=$(body "$TSMEDIA")
+    TSSTRANGER=$(body "$TSMEDIA?email=nobody-show-$SUFFIX@example.com")
+
+    # --- ACCEPTANCE: ALL SHOWS EVERY TICKET ON THE EVENT. Asserted as the SET,
+    #     because a `contains` on one filename cannot tell a list of two from a
+    #     list of one that happens to include it — and "one of the two" is
+    #     exactly what the old behaviour returned.
+    equals "the person on the ticket gets both"      "$(guest_bucket "$TSANARES" tickets)" "$TSBOTH"
+    equals "the person on NEITHER gets both"         "$(guest_bucket "$TSCLEORES" tickets)" "$TSBOTH"
+    equals "...and so does a viewer with no email"   "$(guest_bucket "$TSNONE" tickets)" "$TSBOTH"
+    equals "...and an address nobody RSVP'd with"    "$(guest_bucket "$TSSTRANGER" tickets)" "$TSBOTH"
+    contains "each of them signed, not just listed"  "$TSCLEORES" 'X-Amz-Signature='
+    contains "...and named"                          "$TSCLEORES" 'pair.pdf'
+
+    # --- ACCEPTANCE: MINE IS THE MARKER, AND IT IS STILL RIGHT. The widening is
+    #     about what you can SEE; `mine` still has to be true of exactly the two
+    #     people the ticket is for. `true`/`false` rather than present/absent —
+    #     and `no-field` is a fifth answer the helper keeps apart, because a
+    #     surface that stopped computing `mine` at all would otherwise read as
+    #     "not yours" on every screen.
+    equals "the pair fare is the first one's"        "$(guest_field "$TSANARES" tickets "$TSPAIR" mine)" "true"
+    equals "...and the second one's"                 \
+      "$(guest_field "$(body "$TSMEDIA?email=ben-show-$SUFFIX@example.com")" tickets "$TSPAIR" mine)" "true"
+    equals "...and NOT the third one's"              "$(guest_field "$TSCLEORES" tickets "$TSPAIR" mine)" "false"
+    equals "...nor a stranger's"                     "$(guest_field "$TSSTRANGER" tickets "$TSPAIR" mine)" "false"
+    equals "...nor anybody's with no email given"    "$(guest_field "$TSNONE" tickets "$TSPAIR" mine)" "false"
+    # THE ADDRESS IS MATCHED CASE-INSENSITIVELY, as every other email match in
+    # this app is: a person who typed their address with a capital is the same
+    # person, and telling them none of these is theirs is the empty-Mine screen
+    # for somebody who did everything right.
+    equals "...and a capitalised address is the same person" \
+      "$(guest_field "$(body "$TSMEDIA?email=ANA-SHOW-$SUFFIX@example.com")" tickets "$TSPAIR" mine)" "true"
+
+    # --- ACCEPTANCE: A TICKET ASSIGNED TO NOBODY IS UNDER ALL AND NOT UNDER MINE.
+    equals "the spare is on everybody's list"        "$(guest_field "$TSANARES" tickets "$TSSPARE" fileName)" "spare.pdf"
+    equals "...and is nobody's, not even the first one's" "$(guest_field "$TSANARES" tickets "$TSSPARE" mine)" "false"
+    equals "...carrying an empty assignee list"      "$(ticket_assignees "$TSANARES" "$TSSPARE")" "none"
+
+    # --- ACCEPTANCE: EVERY TICKET IS LABELLED WITH WHO IT IS FOR. Read on the
+    #     screen of the person it is NOT for, which is the one that needs it:
+    #     under All a ticket without a name against it is a file you cannot hand
+    #     to the right friend. The ids are asserted on the same row, so the
+    #     names and the ids stay ONE answer rather than two.
+    equals "the pair fare names both people"         "$(ticket_names "$TSCLEORES" "$TSPAIR")" "Ana,Ben"
+    equals "...by the same ids it lists"             "$(ticket_assignees "$TSCLEORES" "$TSPAIR")" "$(sorted_ids "$TSANA" "$TSBEN")"
+    equals "...and the spare names nobody"           "$(ticket_names "$TSCLEORES" "$TSSPARE")" "none"
+    # AND WHAT IS WRITTEN ON IT TRAVELS WITH IT (#35). The detail used to be
+    # looked up only for the viewer's own tickets, so widening the list without
+    # widening this would put a download button with no seat number in front of
+    # the person actually standing at the barrier.
+    equals "the seat is readable by the third one"   "$(ticket_field "$TSCLEORES" "$TSPAIR" seat)" "41A"
+    equals "...and by a viewer with no email"        "$(ticket_field "$TSNONE" "$TSPAIR" coach)" "12"
+
+    # --- EXACTLY TICKETS. `documents` and the gallery were already everybody's
+    #     and are unchanged; what these assert is that they did not quietly
+    #     become ticket views on the way past.
+    equals "a shared document is still everybody's"  "$(guest_field "$TSNONE" documents "$TSDOC" fileName)" "plan.pdf"
+    equals "...and carries no mine flag"             "$(guest_field "$TSNONE" documents "$TSDOC" mine)" "no-field"
+    equals "a gallery photo is still everybody's"    "$(guest_field "$TSNONE" gallery "$TSPHOTO" fileName)" "platform.png"
+    equals "...and carries no mine flag either"      "$(guest_field "$TSNONE" gallery "$TSPHOTO" mine)" "no-field"
+    equals "...and no assignee list"                 "$(ticket_names "$(body "$TSMEDIA")" "$TSPHOTO")" "no-such-item"
+
+    # --- THE WIDENING IS PER EVENT, WHICH IS THE ONE THING IT MUST NOT LOSE. A
+    #     link to a DIFFERENT trip reaches none of these — "every ticket" means
+    #     every ticket on this event, not every ticket on the instance, and the
+    #     difference is one dropped `where event_id`.
+    TSOTHER=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+      -d "{\"title\":\"Smoke show-all elsewhere $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+    body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSOTHER/status" -d '{"status":"published"}' > /dev/null
+    TSOTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$TSOTHER/invites" -d '{"label":"Elsewhere"}' \
+      | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    equals "another trip's link reaches none of them" \
+      "$(guest_bucket "$(body "$BASE/api/invites/$TSOTOK/media?email=ana-show-$SUFFIX@example.com")" tickets)" "none"
+
+    # --- AND THE OTHER TWO SURFACES DID NOT LEARN THIS PROJECTION. `mine` and
+    #     `assignedTo` are the invite link's; `/api/v1` is Enterprise's contract
+    #     (`docs/zaeme-api.openapi.yaml`, where neither field is declared) and
+    #     the host card answers the planner, for whom "is it mine" is not a
+    #     question. A field leaking into either is a shape change nobody asked
+    #     for — into `/api/v1`, one another repository generates tools from.
+    TSV1=$(body "${AUTH[@]}" "$API/events/$TSSLUG/media")
+    equals "the machine surface still lists the pair fare" "$(media_field "$TSV1" "$TSPAIR" fileName)" "pair.pdf"
+    excludes "...and gained no mine flag"            "$TSV1" '"mine"'
+    excludes "...nor an assignedTo list"             "$TSV1" 'assignedTo'
+    TSHOSTMEDIA=$(body "${TSP[@]}" "$TSHOST/media")
+    contains "the host card still lists it too"      "$TSHOSTMEDIA" 'pair.pdf'
+    excludes "...and gained no mine flag"            "$TSHOSTMEDIA" '"mine"'
+  else
+    echo "  skip  set S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT to run the show-all rows"
   fi
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to run these"

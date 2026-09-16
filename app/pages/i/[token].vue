@@ -48,12 +48,30 @@ interface MediaItem {
   ticket?: TicketDetailFields | null
   url: string
 }
-interface MediaBuckets { gallery: MediaItem[], documents: MediaItem[], tickets: MediaItem[] }
+/**
+ * EVERY ticket on the event (#37), each marked as the viewer's or not and
+ * labelled with who it is for. The `?email=` below no longer decides which come
+ * back, only which are `mine`.
+ */
+interface TicketItem extends MediaItem {
+  mine: boolean
+  assignedTo: Array<{ rsvpId: string, name: string }>
+}
+interface MediaBuckets { gallery: MediaItem[], documents: MediaItem[], tickets: TicketItem[] }
 const media = ref<MediaBuckets>({ gallery: [], documents: [], tickets: [] })
+/**
+ * WHAT THE LAST SUCCESSFUL READ WAS MADE WITH, which is not the same thing as
+ * what is typed in the box right now: a failed fetch leaves the previous list
+ * on screen, and labelling it with an address it was not fetched under would
+ * tell somebody "none of these is yours" about somebody else's answer.
+ */
+const mediaEmail = ref<string | null>(null)
 async function loadMedia() {
   try {
-    const email = identity.value.email ? `?email=${encodeURIComponent(identity.value.email)}` : ''
-    media.value = await $fetch<MediaBuckets>(`/api/invites/${token}/media${email}`)
+    const asked = identity.value.email || null
+    const query = asked ? `?email=${encodeURIComponent(asked)}` : ''
+    media.value = await $fetch<MediaBuckets>(`/api/invites/${token}/media${query}`)
+    mediaEmail.value = asked
   } catch { /* storage unconfigured (501) or transient — the card just stays empty */ }
 }
 onMounted(loadMedia)
@@ -369,6 +387,7 @@ const errorMessage = computed(() => {
         :gallery="media.gallery"
         :documents="media.documents"
         :tickets="media.tickets"
+        :viewer-email="mediaEmail"
         :timezone="page.event.timezone"
         :presign-url="`/api/invites/${token}/media/presign`"
         :confirm-url="`/api/invites/${token}/media/confirm`"
