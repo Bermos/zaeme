@@ -1164,7 +1164,11 @@ describe('what a ticket says is written by a planner, on the host surface only',
       expect(start, decl).toBeGreaterThan(-1)
       return src.slice(start, src.indexOf('\n}\n', start))
     }
-    for (const fn of ['assertMayAssign', 'deleteMedia', 'setTicketDetail']) {
+    // `setMediaTimelineItem` (#38) joined this list rather than getting its own
+    // looser gate: pinning a ticket to the 09:14 is an edit to the plan, and
+    // the itinerary's own writes (`addTimelineItem`, `moveTimelineItem`) take
+    // exactly this role set. `logistics` is excluded on both counts.
+    for (const fn of ['assertMayAssign', 'deleteMedia', 'setTicketDetail', 'setMediaTimelineItem']) {
       const decl = fn === 'assertMayAssign'
         ? `async function ${fn}(`
         : `export async function ${fn}(`

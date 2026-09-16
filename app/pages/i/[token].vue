@@ -44,6 +44,12 @@ interface MediaItem {
   mimeType: string
   fileName: string
   caption: string | null
+  /**
+   * The itinerary step this file is pinned to, or null (#38). It has been on
+   * the row since the transplant and on `/api/v1` since then too; this read is
+   * where it was dropped, which is why no screen ever showed it.
+   */
+  timelineItemId: string | null
   /** What the ticket says (#35) — null for every other type and for a bare PDF. */
   ticket?: TicketDetailFields | null
   url: string
@@ -76,6 +82,23 @@ async function loadMedia() {
 }
 onMounted(loadMedia)
 watch(() => identity.value.email, loadMedia)
+
+/**
+ * THE PAPERS THE ITINERARY DRAWS (#38) — the tickets and the documents as one
+ * list, with a document given the honest empty for the two fields only a ticket
+ * has (`mine`, `assignedTo`), because the #37 widening was exactly tickets.
+ *
+ * ONE CALL, AND THE NORMALISATION IS INSIDE IT. Writing the `.map` here would
+ * put `mine: false` one word from `mine: true` on a page nothing in this
+ * repository executes — and `true` there labels every reservation on the trip
+ * as the viewer's own, silently. `timelinePinnedMedia` is a value
+ * `test/pinned-media.test.ts` runs, and this line is pinned verbatim by it.
+ *
+ * It starts empty and fills in on mount, like the gallery below: media URLs are
+ * short-lived signatures, so the SSR'd itinerary carries the plan and the files
+ * arrive a moment later.
+ */
+const timelineMedia = computed(() => timelinePinnedMedia(media.value))
 
 /* ---- budget ---- */
 /**
@@ -341,6 +364,7 @@ const errorMessage = computed(() => {
         :timeline="page.timeline"
         :legs="page.legs"
         :places="page.places"
+        :media="timelineMedia"
         :timezone="page.event.timezone"
       />
 

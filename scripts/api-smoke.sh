@@ -479,6 +479,69 @@ ticket_names() {
     })' "$2"
 }
 
+# `pinned_step <body> <mediaId>` — WHICH STEP OF THE PLAN one media item is
+# pinned to (#38), and the three absences are kept apart for the reason
+# `ticket_field` keeps its three apart:
+#
+#   no-such-item   that surface does not carry that media row at all
+#   no-field       the row is there and `timelineItemId` is not — THE #78 SHAPE,
+#                  and exactly the bug this issue is about: the column has been
+#                  on the row since the transplant and on `/api/v1` since that
+#                  surface existed, and the two reads a PERSON looks at dropped
+#                  it before it reached a screen
+#   null           the field is there and this file is pinned to nothing
+#   <id>           the step
+#
+# `no-field` IS WHAT EARNS THE HELPER, and `media_field` beside it cannot give
+# it: that one prints `null` for a missing key AND for a null value, so "nothing
+# is pinned here" and "this surface stopped carrying the pin" would be the same
+# green tick — which is the entire defect wearing a passing check.
+pinned_step() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const raw = Array.isArray(b)
+        ? b
+        : [...(b.media ? (Array.isArray(b.media) ? b.media : [b.media]) : []),
+           ...(b.tickets ?? []), ...(b.documents ?? []), ...(b.gallery ?? [])]
+      const m = raw.find(x => x && x.id === process.argv[1])
+      if (!m) return process.stdout.write("no-such-item")
+      if (!Object.hasOwn(m, "timelineItemId")) return process.stdout.write("no-field")
+      process.stdout.write(m.timelineItemId === null ? "null" : String(m.timelineItemId))
+    })' "$2"
+}
+
+# `pinned_ids <body> <timelineItemId>` — the SORTED media ids pinned to one step,
+# comma-joined, or `none` when nothing is.
+#
+# A SET, NOT A `contains`, for the reason `guest_bucket` is one: "the ticket is
+# on the 09:14" is satisfied by a step that shows every file on the trip, and
+# "the 11:40 has nothing" is satisfied by a read that lost the field entirely.
+# Comparing the whole set at each step is what tells a pin from a smear, and a
+# MOVE — the pin leaving one step as it arrives at the other — is two set
+# assertions that no single `contains` can make.
+#
+# It reads every bucket the invite link answers AND a host `{media: [...]}` list,
+# so the same expectation can be made against both surfaces; and it ignores an
+# item with no `timelineItemId` key at all, which `pinned_step` above is the
+# thing that catches.
+pinned_ids() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const raw = Array.isArray(b)
+        ? b
+        : [...(b.media ? (Array.isArray(b.media) ? b.media : [b.media]) : []),
+           ...(b.tickets ?? []), ...(b.documents ?? []), ...(b.gallery ?? [])]
+      const ids = raw.filter(x => x && x.timelineItemId === process.argv[1]).map(x => x.id).sort()
+      process.stdout.write(ids.length === 0 ? "none" : ids.join(","))
+    })' "$2"
+}
+
 # `sorted_ids <id>...` — the same sort `ticket_assignees` applies, so an
 # expectation is built from the ids a test minted rather than typed out in
 # whatever order they were created in.
@@ -3823,6 +3886,194 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
     excludes "...and gained no mine flag"            "$TSHOSTMEDIA" '"mine"'
   else
     echo "  skip  set S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT to run the show-all rows"
+  fi
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to run these"
+fi
+
+echo
+echo "== a ticket on the step it belongs to (Bermos/zaeme#38) =="
+# `events_media.timeline_item_id` has pinned a ticket to "the 09:14 to Porto"
+# since the transplant. `/api/v1` has carried it that whole time; the two reads
+# a PERSON looks at dropped it before it reached a screen, so no itinerary has
+# ever said it back and nothing could SET it either — the three media writes
+# that existed are the assignees, the ticket detail and the delete.
+#
+# WHAT ONLY A RUNNING SERVER CAN SHOW, which is why these are here rather than
+# in `pnpm test`: that the column round-trips through a real UPDATE, that the
+# pin is scoped to its own trip in both directions (the media row and the step),
+# that a pin does not quietly clear the assignees or the seat written on the
+# same row, and that all three surfaces now agree about where a file is.
+# `pnpm test` reads the source and runs no SQL.
+#
+# THE FIXTURE IS BUILT AROUND THE WRONG ANSWERS. TWO steps and THREE files: a
+# ticket, a shared paper and a photograph. The second step exists so "pinned to
+# the 09:14" can be told from "pinned to everything" — a smear passes every
+# `contains` on the first step and fails the set on the second — and so a MOVE
+# can be asserted as the pin LEAVING one step while it arrives at the other,
+# which no single check can see. The photograph is the type refusal, and it is
+# on the same trip so the refusal cannot be confused with the trip being wrong.
+#
+# AND THE TICKET IS ASSIGNED AND HAS A SEAT before anything is pinned, because
+# "the pin did not disturb the row it was written on" is the failure a
+# `returning()` on the wrong columns produces, and it reads exactly like #36 or
+# #35 having been undone.
+#
+# The whole block is one fixture minted per run (`$SUFFIX`), because this script
+# re-runs against the previous run's rows.
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  PINP=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+  PINSLUG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke pinned $SUFFIX\",\"type\":\"trip\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PINSLUG/status" -d '{"status":"published"}' > /dev/null
+  PINTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PINSLUG/invites" -d '{"label":"Pinned smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  PINHOST="$BASE/api/host/events/$PINSLUG"
+  PINMEDIA="$BASE/api/invites/$PINTOK/media"
+  echo "  trip: $PINSLUG"
+
+  PINSTEP1=$(json_field "$(body "${PINP[@]}" "${JSON[@]}" -X POST "$PINHOST/timeline" \
+    -d '{"title":"09:14 to Porto","type":"transport"}')" item.id)
+  PINSTEP2=$(json_field "$(body "${PINP[@]}" "${JSON[@]}" -X POST "$PINHOST/timeline" \
+    -d '{"title":"Check in","type":"accommodation"}')" item.id)
+  equals "two steps on the plan, and they are two" \
+    "$(printf '%s\n' "$PINSTEP1" "$PINSTEP2" | grep -c '^..*$')" "2"
+
+  # A STEP ON A DIFFERENT TRIP, for the scoping refusal below. `$SLUG` is the
+  # machine surface's own event and already has an itinerary item on it.
+  PINOTHER=$(body "${AUTH[@]}" "$API/events/$SLUG/timeline" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)
+
+  # THE CREDENTIAL, and this half needs no bucket. The verb is a planner's, on
+  # the host surface, and none of the other two credentials is a way in — the
+  # media id is made up on purpose: authentication happens before the lookup, so
+  # a 401 here is about the credential and nothing else.
+  PINNOWHERE="$PINHOST/media/no-such-media-at-all/timeline-item"
+  check "pinning needs a session"                  401 "${JSON[@]}" -X PUT "$PINNOWHERE" -d '{"timelineItemId":null}'
+  check "...and a service token is not one"        401 "${AUTH[@]}" "${JSON[@]}" -X PUT "$PINNOWHERE" -d '{"timelineItemId":null}'
+  check "...nor is the invite token"               401 -H "Authorization: Bearer $PINTOK" "${JSON[@]}" -X PUT "$PINNOWHERE" -d '{"timelineItemId":null}'
+  check "the invite link has no such verb at all"  404 "${JSON[@]}" -X PUT "$BASE/api/invites/$PINTOK/media/whatever/timeline-item" -d '{"timelineItemId":null}'
+  # AN ABSENT FIELD IS NOT AN UN-PIN. `timelineItemId` is required AND nullable,
+  # so a client that forgets it fails loudly rather than silently un-pinning —
+  # which is the one outcome a planner cannot tell from "it did not save".
+  check "an absent timelineItemId is refused"      400 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINNOWHERE" -d '{}'
+  check "...and so is one that is not an id"       400 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINNOWHERE" -d '{"timelineItemId":42}'
+  check "an unknown media id"                      404 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINNOWHERE" -d '{"timelineItemId":null}'
+
+  if [ -n "${S3_BUCKET:-}${R2_BUCKET:-}" ]; then
+    PINPDF='%PDF-1.4 the 09:14 to Porto, coach 12, seat 41A.'
+    pin_upload() {
+      local pre mid
+      pre=$(body "${PINP[@]}" "${JSON[@]}" -X POST "$PINHOST/media/presign" \
+        -d "{\"type\":\"$1\",\"fileName\":\"$2\",\"mimeType\":\"$3\",\"sizeBytes\":${#4}}")
+      mid=$(json_field "$pre" mediaId)
+      curl -s -o /dev/null -X PUT -H "content-type: $3" --data-binary "$4" "$(json_field "$pre" upload.url)"
+      body "${PINP[@]}" "${JSON[@]}" -X POST "$PINHOST/media/confirm" -d "{\"mediaId\":\"$mid\"}" > /dev/null
+      printf '%s' "$mid"
+    }
+
+    PINTKT=$(pin_upload ticket porto.pdf application/pdf "$PINPDF")
+    PINDOC=$(pin_upload document hotel.pdf application/pdf "$PINPDF")
+    PINPHOTO=$(pin_upload photo platform.png image/png 'eightbit')
+    equals "three uploads, three distinct media rows" \
+      "$(printf '%s\n' "$PINTKT" "$PINDOC" "$PINPHOTO" | sort -u | wc -l | tr -d ' ')" "3"
+
+    body "${JSON[@]}" -X POST "$BASE/api/invites/$PINTOK/rsvp" \
+      -d "{\"status\":\"yes\",\"guestName\":\"Ana\",\"guestEmail\":\"ana-pin-$SUFFIX@example.com\"}" > /dev/null
+    PINANA=$(rsvp_id "$(body "${AUTH[@]}" "$API/events/$PINSLUG/rsvps")" "ana-pin-$SUFFIX@example.com")
+    body "${PINP[@]}" "${JSON[@]}" -X POST "$PINHOST/media/$PINTKT/assignees" -d "{\"rsvpId\":\"$PINANA\"}" > /dev/null
+    body "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINTKT/detail" -d '{"seat":"41A","coach":"12"}' > /dev/null
+
+    # --- THE FIELD IS THERE BEFORE ANYTHING IS PINNED, on every surface. This
+    #     is the bug itself, asserted directly: `null` is "pinned to nothing"
+    #     and `no-field` is "this read does not carry the pin", which is what
+    #     both human reads answered for the whole life of the column.
+    PIN0H=$(body "${PINP[@]}" "$PINHOST/media")
+    PIN0G=$(body "$PINMEDIA")
+    equals "the host read carries the pin, unpinned"   "$(pinned_step "$PIN0H" "$PINTKT")" "null"
+    equals "...and so does the invite link's ticket"   "$(pinned_step "$PIN0G" "$PINTKT")" "null"
+    equals "...and its shared paper"                   "$(pinned_step "$PIN0G" "$PINDOC")" "null"
+    equals "...and the machine surface, as it always did" \
+      "$(pinned_step "$(body "${AUTH[@]}" "$API/events/$PINSLUG/media")" "$PINTKT")" "null"
+
+    # --- PINNING, AND THE ANSWER SAYS WHERE IT WENT.
+    PINRES=$(body "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINTKT/timeline-item" \
+      -d "{\"timelineItemId\":\"$PINSTEP1\"}")
+    check "pinning the ticket to the 09:14"          200 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINTKT/timeline-item" -d "{\"timelineItemId\":\"$PINSTEP1\"}"
+    equals "the write answers with the step it set"   "$(pinned_step "$PINRES" "$PINTKT")" "$PINSTEP1"
+    # A PIN IS NOT AN EDIT OF THE ROW IT IS WRITTEN ON. A `returning()` over the
+    # wrong columns, or a view rebuilt without its loaders, reads here exactly
+    # like #36 and #35 having been undone by somebody moving a ticket.
+    equals "...with who it is for undisturbed"        "$(ticket_assignees "$PINRES" "$PINTKT")" "$PINANA"
+    equals "...and what is written on it"             "$(ticket_field "$PINRES" "$PINTKT" seat)" "41A"
+
+    PIN1H=$(body "${PINP[@]}" "$PINHOST/media")
+    PIN1G=$(body "$PINMEDIA")
+    equals "the host itinerary can see it there"      "$(pinned_step "$PIN1H" "$PINTKT")" "$PINSTEP1"
+    equals "...and so can anybody holding the link"   "$(pinned_step "$PIN1G" "$PINTKT")" "$PINSTEP1"
+    # THE SET, NOT A `contains`: "the ticket is on the 09:14" is also true of a
+    # read that put every file on every step.
+    equals "the 09:14 carries exactly that ticket"    "$(pinned_ids "$PIN1G" "$PINSTEP1")" "$PINTKT"
+    equals "...and the other step carries nothing"    "$(pinned_ids "$PIN1G" "$PINSTEP2")" "none"
+    # ACCEPTANCE: it appears on the step AND still in the Tickets section.
+    equals "...while the Tickets section still has it" "$(guest_bucket "$PIN1G" tickets)" "$PINTKT"
+
+    # --- A STEP CARRIES AS MANY AS THE PLANNER PUTS ON IT, unlike the receipt
+    #     pin (#29), which is one per expense and clears the previous one.
+    check "pinning the paper to the same step"       200 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINDOC/timeline-item" -d "{\"timelineItemId\":\"$PINSTEP1\"}"
+    PIN2G=$(body "$PINMEDIA")
+    equals "the 09:14 now carries both"               "$(pinned_ids "$PIN2G" "$PINSTEP1")" "$(sorted_ids "$PINTKT" "$PINDOC")"
+    equals "...and the paper is still a shared paper" "$(guest_bucket "$PIN2G" documents)" "$PINDOC"
+    check "re-pinning where it already is"           200 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINDOC/timeline-item" -d "{\"timelineItemId\":\"$PINSTEP1\"}"
+    equals "...changes nothing"                       "$(pinned_ids "$(body "$PINMEDIA")" "$PINSTEP1")" "$(sorted_ids "$PINTKT" "$PINDOC")"
+
+    # --- MOVING IS THE PIN LEAVING ONE STEP AS IT ARRIVES AT THE OTHER, which
+    #     is two assertions: an implementation that only ever ADDED would pass
+    #     the second and fail the first.
+    check "moving the ticket to the next step"       200 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINTKT/timeline-item" -d "{\"timelineItemId\":\"$PINSTEP2\"}"
+    PIN3G=$(body "$PINMEDIA")
+    equals "the 09:14 is left with just the paper"    "$(pinned_ids "$PIN3G" "$PINSTEP1")" "$PINDOC"
+    equals "...and the ticket is on the other step"   "$(pinned_ids "$PIN3G" "$PINSTEP2")" "$PINTKT"
+
+    # --- ACCEPTANCE: UN-PINNING LEAVES THE MEDIA ITEM INTACT. The pin comes
+    #     off; the file, its assignees and its seat do not.
+    check "un-pinning the ticket"                    200 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINTKT/timeline-item" -d '{"timelineItemId":null}'
+    PIN4G=$(body "$PINMEDIA")
+    equals "it is pinned to nothing again"            "$(pinned_step "$PIN4G" "$PINTKT")" "null"
+    equals "...and that step is empty again"          "$(pinned_ids "$PIN4G" "$PINSTEP2")" "none"
+    equals "...the file is still on the event"        "$(guest_bucket "$PIN4G" tickets)" "$PINTKT"
+    equals "...still assigned to the same person"     "$(ticket_names "$PIN4G" "$PINTKT")" "Ana"
+    equals "...and still saying which seat"           "$(ticket_field "$PIN4G" "$PINTKT" seat)" "41A"
+
+    # --- WHAT MAY NOT GO ON A STEP, and what may not be named as one.
+    PINBADTYPE=$(body "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINPHOTO/timeline-item" -d "{\"timelineItemId\":\"$PINSTEP1\"}")
+    check "a photograph does not go on a step"       422 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINPHOTO/timeline-item" -d "{\"timelineItemId\":\"$PINSTEP1\"}"
+    contains "...and the refusal says where it lives" "$PINBADTYPE" 'gallery'
+    # A 422 AND NOT A 400: the schema let the request through and the domain
+    # understood it and declined. The two are the same red in a `check … 4xx`
+    # and opposite findings.
+    equals "...and it really was not pinned"          "$(pinned_step "$(body "$PINMEDIA")" "$PINPHOTO")" "null"
+    check "a step belonging to another trip"         404 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINDOC/timeline-item" -d "{\"timelineItemId\":\"$PINOTHER\"}"
+    equals "...and the refusal moved nothing"         "$(pinned_ids "$(body "$PINMEDIA")" "$PINSTEP1")" "$PINDOC"
+    check "a step id that is nobody's"               404 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINDOC/timeline-item" -d '{"timelineItemId":"no-such-step"}'
+    # THE MEDIA ROW IS SCOPED TOO, and in the other direction: this planner owns
+    # both trips, so a lookup that forgot `where event_id` would answer 200 and
+    # pin a file onto an itinerary it is not on.
+    check "a media id from another trip"             404 "${PINP[@]}" "${JSON[@]}" -X PUT "$BASE/api/host/events/$SLUG/media/$PINDOC/timeline-item" -d '{"timelineItemId":null}'
+    # AN UPLOAD THAT NEVER LANDED cannot be pinned: a step pointing at bytes
+    # that may never exist is a download button that 404s at a barrier.
+    PINPEND=$(json_field "$(body "${PINP[@]}" "${JSON[@]}" -X POST "$PINHOST/media/presign" \
+      -d '{"type":"ticket","fileName":"never.pdf","mimeType":"application/pdf","sizeBytes":12}')" mediaId)
+    check "a pending upload cannot be pinned"        409 "${PINP[@]}" "${JSON[@]}" -X PUT "$PINHOST/media/$PINPEND/timeline-item" -d "{\"timelineItemId\":\"$PINSTEP1\"}"
+
+    # --- AND THE THREE SURFACES AGREE. `/api/v1` carried this field before any
+    #     of this and is unchanged; if the human reads and the machine one ever
+    #     disagree about where a file is, one of them is lying to somebody.
+    PINV1=$(body "${AUTH[@]}" "$API/events/$PINSLUG/media")
+    equals "the machine surface agrees about the paper" "$(pinned_step "$PINV1" "$PINDOC")" "$PINSTEP1"
+    equals "...and about the un-pinned ticket"          "$(pinned_step "$PINV1" "$PINTKT")" "null"
+    equals "...and the host read agrees with both"      "$(pinned_step "$(body "${PINP[@]}" "$PINHOST/media")" "$PINDOC")" "$PINSTEP1"
+  else
+    echo "  skip  set S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT to run the pinned rows"
   fi
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to run these"

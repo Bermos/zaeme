@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { PinnableMedia } from '#shared/utils/pinned-media'
+
 /**
  * The itinerary editor (host side) — the trip planner's core: transport,
  * accommodation, activities and meals, day by day. Also handy for the
@@ -6,6 +8,13 @@
  *
  * Items are editable in place (PATCH, restored in #8) and can be moved up and
  * down: a typo used to mean deleting the row and re-adding it at the end.
+ *
+ * AND SINCE #38 EACH STEP CARRIES ITS PAPERS. `events_media.timeline_item_id`
+ * has existed since the transplant with no way at all to set it, so pinning a
+ * ticket to "the 09:14 to Porto" was a thing the database could say and nobody
+ * could do. The pin and the un-pin are here, on the itinerary, because that is
+ * where a planner is when they think "this ticket is for that train" — the
+ * issue's words are "without a round trip to the media page".
  */
 interface TimelineItem {
   id: string
@@ -173,6 +182,89 @@ async function move(id: string, direction: 'up' | 'down') {
   }
 }
 
+/* ------------------- the papers pinned to each step (#38) ------------------ */
+
+/**
+ * ITS OWN READ, NOT A PROP, and that is the same choice `HostMediaCard` makes
+ * two cards down: media URLs are short-lived signatures, so the list cannot
+ * come down with the SSR'd page the way `timeline` and `places` do. `$fetch`
+ * into a ref rather than `useFetch` because two cards asking the same URL with
+ * auto-generated keys is a cache relationship that is invisible in both files;
+ * an explicit load is one request this card owns and can re-run after a write.
+ *
+ * A 501 (no object storage on this instance) or a transient failure leaves the
+ * list empty, and an empty list renders the itinerary exactly as it did before
+ * this existed — which is the right failure for a feature that is an addition
+ * to a screen somebody is using for something else.
+ */
+interface HostMediaItem extends PinnableMedia {
+  type: 'photo' | 'video' | 'document' | 'ticket'
+  fileName: string
+  caption: string | null
+}
+const media = ref<HostMediaItem[]>([])
+async function loadMedia() {
+  try {
+    const res = await $fetch<{ media: HostMediaItem[] }>(`/api/host/events/${props.slug}/media`)
+    media.value = res.media
+  } catch { /* storage unconfigured (501) or transient — the pins just stay hidden */ }
+}
+onMounted(loadMedia)
+
+/** Everything on the event that may go on a step — tickets and papers, never photos. */
+const pinnable = computed(() => pinnableToTimeline(media.value))
+/** What is pinned where — one grouping for the whole itinerary, not a scan per step. */
+const pinnedMedia = computed(() => pinnedMediaByTimelineItem(media.value))
+
+function pinnedFor(itemId: string): HostMediaItem[] {
+  return pinnedMedia.value.get(itemId) ?? []
+}
+
+function mediaLabel(m: HostMediaItem): string {
+  return `${m.type === 'ticket' ? '🎟️' : '📄'} ${m.caption || m.fileName}`
+}
+
+/**
+ * The picker for ONE step: everything pinnable that is not already on it. An
+ * item pinned to another step is still offered — moving a ticket from the 09:14
+ * to the 11:40 is one choice here, not an un-pin followed by a pin — and its
+ * label says where it is now, so nobody moves one by accident.
+ */
+function pinChoices(itemId: string) {
+  return pinnable.value
+    .filter(m => m.timelineItemId !== itemId)
+    .map(m => ({
+      label: m.timelineItemId ? `${mediaLabel(m)} (on another step)` : mediaLabel(m),
+      value: m.id
+    }))
+}
+
+/**
+ * ONE VERB IN BOTH DIRECTIONS (`PUT …/media/{id}/timeline-item`), because there
+ * is one nullable column being written: `null` is the un-pin. The answer is
+ * DISCARDED and the list re-read, for the reason `HostMediaCard` gives about
+ * assignment — the reply is a domain view carrying a storage key, and this card
+ * needs signed URLs, which a mutation is not the place to mint.
+ */
+const pinning = ref<string | null>(null)
+async function setPin(mediaId: string, timelineItemId: string | null) {
+  pinning.value = mediaId
+  try {
+    await $fetch(`/api/host/events/${props.slug}/media/${mediaId}/timeline-item`, {
+      method: 'PUT',
+      body: { timelineItemId }
+    })
+    await loadMedia()
+  } catch (e) {
+    toast.add({ title: (e as { data?: { message?: string } }).data?.message ?? 'Could not pin that', color: 'error' })
+    // The control renders the server's answer, so a failed call must not leave
+    // the screen showing a pin that did not take.
+    await loadMedia()
+  } finally {
+    pinning.value = null
+  }
+}
+
 function placeName(id: string): string | undefined {
   return props.places.find(p => p.id === id)?.name
 }
@@ -324,6 +416,50 @@ const zoneLine = computed(() => zoneNote(props.timezone))
               ✕
             </UButton>
           </div>
+        </div>
+
+        <!--
+          THE PAPERS ON THIS STEP (#38). Hidden entirely when the event has
+          nothing that could go on one — an itinerary on an instance with no
+          uploads, or a trip whose only media is photographs, renders exactly as
+          it did before this existed.
+
+          It is also hidden while this row is being EDITED. Pinning is not part
+          of editing the title — it is its own write, against the server, and a
+          planner who pins mid-edit would see it land while their unsaved title
+          sits in a form beside it looking equally saved. The form is short;
+          the papers come back when it closes.
+        -->
+        <div
+          v-if="editingId !== item.id && pinnable.length"
+          class="flex flex-col gap-1 mt-1"
+        >
+          <div
+            v-for="m in pinnedFor(item.id)"
+            :key="m.id"
+            class="flex items-center justify-between gap-2 text-muted"
+          >
+            <span class="truncate">📎 {{ mediaLabel(m) }}</span>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="ghost"
+              :loading="pinning === m.id"
+              aria-label="Unpin from this step"
+              @click="setPin(m.id, null)"
+            >
+              ✕
+            </UButton>
+          </div>
+          <USelect
+            v-if="pinChoices(item.id).length"
+            :items="pinChoices(item.id)"
+            :model-value="undefined"
+            size="xs"
+            class="w-full sm:w-72"
+            placeholder="Pin a ticket or document…"
+            @update:model-value="(v: string) => setPin(v, item.id)"
+          />
         </div>
       </div>
 
