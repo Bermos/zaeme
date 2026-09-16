@@ -1033,7 +1033,7 @@ async function onReceiptFile(event: Event) {
       body: { mediaId }
     })
     emit('updated', res.budget)
-    toast.add({ title: 'Receipt attached', color: 'success' })
+    toast.add({ title: 'Receipt attached — it is in the trip\'s shared gallery too', color: 'success' })
   } catch (e) {
     toast.add({
       title: (e as { data?: { message?: string } }).data?.message ?? 'Could not attach that receipt',
@@ -1160,9 +1160,17 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
                   rel="noopener"
                   :title="x.receipt.fileName"
                 >
+                  <!-- LAZY, like every other image in this app
+                       (`MediaGallery.vue`). There is no thumbnailing anywhere
+                       in this repository, so `src` is the ORIGINAL — up to 25
+                       MB by `MEDIA_TYPE_MAX_BYTES.photo` — drawn into a
+                       48-pixel square. Twenty phone photos of receipts is tens
+                       of megabytes to render twenty thumbnails, and the trip
+                       this feature is for is the one on hotel wifi abroad. -->
                   <img
                     :src="x.receipt.url"
                     :alt="`Receipt for ${x.title}`"
+                    loading="lazy"
                     class="h-12 w-12 rounded object-cover border border-default"
                   >
                 </a>
@@ -1225,6 +1233,21 @@ const payerItems = computed(() => payerOptions.value.map(p => ({ label: p.name, 
               </UButton>
             </div>
           </div>
+          <!-- SAID BEFORE THE DECISION IS MADE, not after it (#29 review).
+               Pinning a receipt widens nothing — every reader of one could
+               already fetch the same object from the trip's gallery — but
+               NOTHING ON SCREEN SAID SO. The button is a glyph and the only
+               place the word "gallery" appeared was the toast you get when you
+               take a receipt OFF. Somebody photographing a hotel folio is
+               thinking "evidence for my friends", not "publication", and the
+               lesson from #67 is a field labelled "Note (optional)" that said
+               nothing about who could read it. -->
+          <p
+            v-if="canAttachReceipt"
+            class="text-xs text-muted pt-1"
+          >
+            🧾 adds a photo of the receipt. It goes into the trip's shared gallery, where everyone with the link can see it.
+          </p>
         </div>
         <p
           v-else

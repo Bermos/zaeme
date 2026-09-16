@@ -483,6 +483,37 @@ describe('the account surface is a session, and the invite link never becomes on
     expect(media).toMatch(/export const RECEIPT_TYPES: readonly MediaType\[\] = \['photo', 'document'\]/)
   })
 
+  it('two people pinning to one expense queue on a row that EXISTS (#29 review)', () => {
+    // A TRANSACTION IS NOT A LOCK. Under READ COMMITTED the clear —
+    // `update events_media set expense_id = null where expense_id = <this one>`
+    // — matches no rows in the rival transaction's snapshot, because its row is
+    // still NULL as committed, so it takes no lock and both claimants go on to
+    // set their own. One expense, two receipts: the thumbnail flips between
+    // reads and `/api/v1` listMedia reports two items with the same
+    // `expenseId`. Reproduced on Postgres 16 with two sessions.
+    //
+    // WHAT THIS TEST IS AND IS NOT. It pins the MECHANISM — the lock is taken,
+    // inside the transaction, on the expense, before the clear — and it would
+    // go red if somebody removed it. It does not execute the interleaving:
+    // that needs two connections to a real database, and `pnpm test` has none.
+    // The interleaving was run by hand, both ways, and is reported in the PR.
+    const media = readFileSync(join(ROOT, 'server', 'domain', 'media.ts'), 'utf8')
+    const pin = media.slice(media.indexOf('export async function pinReceipt'), media.indexOf('export async function unpinReceipt'))
+
+    const lock = pin.indexOf('.for(\'update\')')
+    const txn = pin.indexOf('db.transaction(')
+    const clear = pin.indexOf('set({ expenseId: null })')
+    expect(lock).toBeGreaterThan(-1)
+    // Inside the transaction — a lock taken before `BEGIN` is released at once.
+    expect(lock).toBeGreaterThan(txn)
+    // …and before the clear it exists to serialise.
+    expect(clear).toBeGreaterThan(lock)
+    // On the row both claimants can see. `events_media` is the row that is NOT
+    // in the rival's snapshot, which is the whole reason locking it fails.
+    const locked = /\.from\(tables\.(\w+)\)[\s\S]{0,240}?\.for\('update'\)/.exec(pin)?.[1]
+    expect(locked).toBe('expense')
+  })
+
   it('every human handler that answers with a budget signs its receipts (#29)', () => {
     // `loadBudget` hands back a storage KEY; a media URL in this app is signed
     // and expires, always. A thumbnail missing from one budget handler is a bug
@@ -498,14 +529,25 @@ describe('the account surface is a session, and the invite link never becomes on
     // thing it returns is not a rule. So: start at `loadBudget`, close over
     // every exported domain function that calls something already in the set,
     // and require any human-surface handler that calls one to sign.
+    //
+    // BOTH SPELLINGS OF AN EXPORTED FUNCTION. `export function f` was the only
+    // one this matched at first, which left `export const f = async () => …`
+    // invisible — and a `/api/me` handler returning an unsigned budget through
+    // one passed all 61 tests in this file. Every domain function is written the
+    // first way today; the rule must not depend on that staying true.
+    //
+    // `readdirSync` is not recursive. `server/domain` is FLAT — no
+    // subdirectories — so this reads all of it; a domain that grows a folder
+    // needs this made recursive, or the closure silently stops at its edge.
     const DOMAIN = join(ROOT, 'server', 'domain')
+    expect(readdirSync(DOMAIN, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)).toEqual([])
     const bodies = new Map<string, string>()
     for (const file of readdirSync(DOMAIN).filter(f => f.endsWith('.ts'))) {
       const src = readFileSync(join(DOMAIN, file), 'utf8')
       const marks: Array<[string, number]> = []
-      const re = /^export (?:async )?function (\w+)/gm
+      const re = /^export (?:async )?function (\w+)|^export const (\w+)\s*=/gm
       let m: RegExpExecArray | null
-      while ((m = re.exec(src)) !== null) marks.push([m[1]!, m.index])
+      while ((m = re.exec(src)) !== null) marks.push([(m[1] ?? m[2])!, m.index])
       marks.forEach(([name, at], i) => {
         bodies.set(name, src.slice(at, i + 1 < marks.length ? marks[i + 1]![1] : src.length))
       })
@@ -525,7 +567,12 @@ describe('the account surface is a session, and the invite link never becomes on
     // …and did not swallow the whole domain: a delete answers `{removed:true}`.
     expect([...producers]).not.toContain('removeExpenseAsPlanner')
 
-    const answersWithABudget = [...guestHandlers, ...hostHandlers, ...accountHandlers].filter((f) => {
+    // EVERY HUMAN SURFACE, and `adminHandlers` is one of them. It was left out
+    // of this list on the grounds that no admin route answers with a budget —
+    // which is true today and is not a rule. `server/domain/admin.ts` is where
+    // cross-event reads are supposed to go, so an owner-facing money view is a
+    // plausible next issue, and it would have shipped unsigned.
+    const answersWithABudget = [...guestHandlers, ...hostHandlers, ...accountHandlers, ...adminHandlers].filter((f) => {
       const src = readFileSync(f, 'utf8')
       return [...producers].some(p => new RegExp(`\\b${p}\\s*\\(`).test(src))
     })

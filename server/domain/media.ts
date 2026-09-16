@@ -273,25 +273,37 @@ export const RECEIPT_TYPES: readonly MediaType[] = ['photo', 'document']
  * the object is one this event's readers may already see, and that an expense
  * ends up with at most one.
  *
- * REPLACING IS ONE STATEMENT, so it is one transaction: the previous receipt is
- * un-pinned and the new one pinned together, and a failure halfway through
- * leaves the expense with the receipt it had rather than with none.
+ * REPLACING IS ONE STATEMENT, so it is one transaction — and the transaction is
+ * NOT what makes it safe. A TRANSACTION IS NOT A LOCK. Under Postgres's default
+ * READ COMMITTED, two concurrent pins to the same expense each run
  *
- * IT TOUCHES NO COLUMN ON `events_expense`. Not `fx_rate_source`, not
- * `stated_amount_cents`, not `updated_at`. Those record that a PERSON stated a
- * figure and checked it (#59, #71); a photograph is evidence a reader can look
- * at, not a claim the instance may make on the uploader's behalf.
+ *     update events_media set expense_id = null where expense_id = <this one>
+ *
+ * against a snapshot in which the rival's row is still `NULL` as committed. The
+ * statement matches no rows, so it takes no lock at all, and both go on to set
+ * their own — leaving ONE EXPENSE WITH TWO RECEIPTS, which is exactly what the
+ * column's comment in `server/database/schema/events.ts` says cannot happen.
+ * Reproduced on Postgres 16 with two psql sessions before this line was written.
+ *
+ * THE FIX IS A ROW THAT EXISTS: the expense is selected `FOR UPDATE` inside the
+ * transaction, so the two claimants serialise on `events_expense`, which is
+ * there in both snapshots, and the second does its clear against what the first
+ * committed. A partial unique index would also hold the invariant and is
+ * declined for the reason given on the column — it would turn a replace into a
+ * two-statement dance around a constraint. A row lock has no such cost.
+ *
+ * IT STILL TOUCHES NO COLUMN ON `events_expense`. Not `fx_rate_source`, not
+ * `stated_amount_cents`, not `updated_at` — `SELECT … FOR UPDATE` locks a row,
+ * it does not write one. Those columns record that a PERSON stated a figure and
+ * checked it (#59, #71); a photograph is evidence a reader can look at, not a
+ * claim the instance may make on the uploader's behalf.
  */
 export async function pinReceipt(eventId: string, expenseId: string, mediaId: string): Promise<MediaItemView> {
   const db = useDb()
 
-  const [target] = await db
-    .select({ id: tables.expense.id })
-    .from(tables.expense)
-    .where(and(eq(tables.expense.id, expenseId), eq(tables.expense.eventId, eventId)))
-    .limit(1)
-  if (!target) throw createError({ statusCode: 404, message: 'Expense not found' })
-
+  // The media checks stay OUTSIDE the transaction: they are what turns a bad
+  // request into a 404/409/422, they need no lock, and holding one across them
+  // would widen the window for nothing.
   const [item] = await db
     .select()
     .from(tables.media)
@@ -311,6 +323,17 @@ export async function pinReceipt(eventId: string, expenseId: string, mediaId: st
   }
 
   return db.transaction(async (tx) => {
+    // THE LOCK, and the reason the expense lookup is in here rather than beside
+    // the media one above. See the header: this is the row both claimants can
+    // see, so it is the row they can queue on.
+    const [target] = await tx
+      .select({ id: tables.expense.id })
+      .from(tables.expense)
+      .where(and(eq(tables.expense.id, expenseId), eq(tables.expense.eventId, eventId)))
+      .limit(1)
+      .for('update')
+    if (!target) throw createError({ statusCode: 404, message: 'Expense not found' })
+
     await tx
       .update(tables.media)
       .set({ expenseId: null })
@@ -320,7 +343,11 @@ export async function pinReceipt(eventId: string, expenseId: string, mediaId: st
       .set({ expenseId })
       .where(and(eq(tables.media.id, item.id), eq(tables.media.eventId, eventId)))
       .returning()
-    return toView(pinned!)
+    // Zero rows is reachable: a planner may delete the photo between the read
+    // above and this write. A refusal, not a 500 — every other way this
+    // function declines is a status somebody can act on.
+    if (!pinned) throw createError({ statusCode: 404, message: 'Photo not found' })
+    return toView(pinned)
   })
 }
 
