@@ -21,6 +21,7 @@ Self-hostable. Open source. Built with love in Bern.
 - **Series** — a standing group for a recurring thing (the cinema night). Each new occurrence auto-invites every member.
 - **Calendar sync** — per-event `.ics` download and a live per-person iCal feed so confirmed events land in your calendar automatically.
 - **Admin** — the instance owner's cross-event view: every event, person, invite link, account and an audit of who did what.
+- **Installable** — add zäme to a home screen and it opens standalone, with its own icon, and updates itself when the instance is redeployed. Invite links keep server-rendering their preview card either way.
 
 Not built yet — see [ROADMAP.md](./ROADMAP.md): Fahrgemeinschaft (travel groups + SBB connections), to-do and pack lists, an in-app AI assistant.
 
@@ -39,6 +40,7 @@ Not built yet — see [ROADMAP.md](./ROADMAP.md): Fahrgemeinschaft (travel group
 | **Jobs**      | [Inngest](https://inngest.com) — invite, confirmation, reminder, cancellation and bring-list-nudge mail |
 | **IDs**       | [cuid2](https://github.com/paralleldrive/cuid2)                                           |
 | **Runtime**   | Node 22 (`engines.node`), built with buildpacks — no Dockerfile                           |
+| **Install**   | Web app manifest + a [`@vite-pwa/nuxt`](https://vite-pwa-org.netlify.app/frameworks/nuxt) service worker that precaches build assets only — navigations always go to the network, so SSR and Open Graph cards survive |
 
 zäme also publishes a versioned machine API (`/api/v1`) described by
 [`docs/zaeme-api.openapi.yaml`](docs/zaeme-api.openapi.yaml), served at
@@ -175,7 +177,8 @@ pnpm typecheck
 pnpm test
 
 # smoke tests (need a running server; only smoke:api runs in CI)
-pnpm smoke:api     # the whole /api/v1 surface, both sides of the credential wall
+pnpm smoke:api     # the whole /api/v1 surface, both sides of the credential wall,
+                   # and the shipped service worker, run and asked what it caches
 pnpm smoke:passkey # the real WebAuthn ceremony with a software authenticator
 
 # build
@@ -210,7 +213,9 @@ zaeme/
     utils/                  db, auth, admin gate, storage, mail status, …
   docs/
     zaeme-api.openapi.yaml  the machine API contract (source of truth)
-  scripts/                  migrate, API smoke, passkey smoke
+  public/
+    icons/                  home-screen icons (generated, committed)
+  scripts/                  migrate, API smoke, passkey smoke, icon + worker tools
   test/                     vitest — contract and boundary tests live here
   kitchen.json              build + runtime configuration
 ```

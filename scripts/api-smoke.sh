@@ -4699,6 +4699,92 @@ contains "...and is idempotent"                  "$AGAIN" '"alreadyDown":true'
 check "unpublishing something never announced"   404 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/concerts/unpublish" -d '{"sourceId":"never_announced_at_all"}'
 
 echo
+echo "== zäme on a home screen, and the worker that must not eat the HTML (#39) =="
+# WHAT THIS SUITE CAN AND CANNOT SEE. curl sends no service worker, so a 200 on
+# `/sw.js` is the whole of what an ordinary check here could say — and it is
+# true of a worker that answers every navigation out of its cache and silently
+# un-server-renders every invite link for anybody who has opened zäme before.
+# Grepping the worker is no better: it is a minified workbox bundle in which
+# `createHandlerBoundToURL` appears as a dead class method either way.
+#
+# So `scripts/sw-probe.mjs` EVALUATES the worker this server is serving, in a
+# stub ServiceWorkerGlobalScope, and dispatches real events at it. `network`
+# below means no route matched and the browser would go to this server for the
+# document; `worker` means a route did. Those are the browser's own answers, off
+# the artefact that ships, and they are the only executed evidence in this
+# repository that SSR survives the feature.
+#
+# STILL OUT OF REACH, and looked at by eye instead: the install prompt itself,
+# and what a launcher draws once it has masked the icon.
+SWPROBE="$(dirname "$0")/sw-probe.mjs"
+SWHDR=$(mktemp)
+SW=$(curl -s -D "$SWHDR" "$BASE/sw.js")
+MANHDR=$(mktemp)
+MAN=$(curl -s -D "$MANHDR" "$BASE/manifest.webmanifest")
+
+check "the built server serves the worker"       200 "$BASE/sw.js"
+check "...and the web manifest beside it"        200 "$BASE/manifest.webmanifest"
+contains "the manifest is typed as a manifest"   "$(tr -d '\r' < "$MANHDR")" 'application/manifest+json'
+# THE ONE HEADER A DEPLOY CANNOT AFFORD TO GET WRONG. Merging to `main` ships,
+# and a long-lived `sw.js` is the one artefact that cannot be reached afterwards.
+contains "sw.js revalidates rather than sticking" "$(tr -d '\r' < "$SWHDR")" 'max-age=0'
+contains "the app installs standalone"           "$MAN" '"display":"standalone"'
+contains "...opening on the home page"           "$MAN" '"start_url":"/"'
+contains "...with a maskable icon for Android"   "$MAN" '"purpose":"maskable"'
+check "the 192 icon is served"                   200 "$BASE/icons/icon-192.png"
+check "the 512 icon is served"                   200 "$BASE/icons/icon-512.png"
+check "the maskable 512 is served"               200 "$BASE/icons/icon-maskable-512.png"
+check "the apple-touch-icon is served"           200 "$BASE/icons/apple-touch-icon-180.png"
+contains "...as image/png, which is all iOS takes" \
+  "$(curl -sI "$BASE/icons/apple-touch-icon-180.png" | tr -d '\r')" 'image/png'
+
+# THE UPDATE FLOW, EXECUTED rather than read off a config. `activate` is
+# dispatched at the real worker: `skipWaiting` is what stops a new version
+# sitting in `waiting` until every tab is closed — an installed app has no tabs
+# to close — and `clientsClaim` is what puts it in charge of the page already
+# open. Without both, a deploy reaches a phone when the person reboots it.
+equals "a new worker takes over instead of waiting" \
+  "$(printf '%s' "$SW" | node "$SWPROBE" lifecycle)" "skipWaiting:yes clientsClaim:yes"
+
+# SSR, EXECUTED. Five fetch events dispatched at the shipped worker. The invite
+# token is a REAL one minted below, because "/i/<token>" and "/i/anything" are
+# the same question only while no route is pattern-matching the path.
+PWASLUG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+  -d "{\"title\":\"Smoke home screen $SUFFIX\",\"type\":\"party\"}" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PWASLUG/status" -d '{"status":"published"}' > /dev/null
+PWATOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$PWASLUG/invites" -d '{"label":"Home screen smoke"}' \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+
+equals "an invite navigation goes to the SERVER" \
+  "$(printf '%s' "$SW" | node "$SWPROBE" route "/i/$PWATOK")" "network"
+equals "...the home page too"                    "$(printf '%s' "$SW" | node "$SWPROBE" route /)" "network"
+equals "...a public event page too"              "$(printf '%s' "$SW" | node "$SWPROBE" route "/e/$PWASLUG")" "network"
+# NOT A GUARD, AND NOT A CACHE. A worker that redirected or answered a signed-in
+# navigation would be the global auth guard this app does not have.
+equals "...and a signed-in page, unguarded"      "$(printf '%s' "$SW" | node "$SWPROBE" route /host)" "network"
+equals "the worker never touches the API"        "$(printf '%s' "$SW" | node "$SWPROBE" route /api/me)" "network"
+# THE OTHER DIRECTION, or every `network` above is equally true of a worker that
+# caches nothing at all and this whole block passes with the feature missing.
+PWAASSET=$(printf '%s' "$SW" | node "$SWPROBE" an-asset)
+equals "a build asset IS served from the worker" \
+  "$(printf '%s' "$SW" | node "$SWPROBE" route "$PWAASSET")" "worker"
+# EXACT, so that #40 and #41 — which are where caching DATA gets its thinking —
+# have to come past this line rather than widening it by accident.
+equals "and it precaches the build assets, nothing else" \
+  "$(printf '%s' "$SW" | node "$SWPROBE" precache-kinds)" "_nuxt,favicon.svg,icons,manifest.webmanifest"
+
+# THE HEAD A PHONE READS, on the page most people actually arrive at. An invite
+# link is what gets forwarded into a group chat, so it is where zäme has to be
+# installable from — and its Open Graph card has to survive all of the above.
+PWAHTML=$(body "$BASE/i/$PWATOK")
+contains "the invite page still server-renders its card" "$PWAHTML" 'property="og:title"'
+contains "...and offers the manifest, so it installs from the link" "$PWAHTML" 'rel="manifest"'
+contains "...and names the colour the phone paints"      "$PWAHTML" 'name="theme-color"'
+contains "...and the PNG iOS needs, which will not be the SVG" "$PWAHTML" 'rel="apple-touch-icon"'
+contains "the vector favicon survives for desktop"       "$PWAHTML" 'href="/favicon.svg"'
+rm -f "$SWHDR" "$MANHDR"
+
+echo
 echo "== the content-addressed poster =="
 if [ -n "${S3_BUCKET:-}${R2_BUCKET:-}" ]; then
   IMG=$(mktemp); printf '\x89PNG\r\n\x1a\n' > "$IMG"; head -c 512 /dev/urandom >> "$IMG"
