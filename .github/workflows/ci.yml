@@ -496,11 +496,50 @@ concurrency:
 # `<script setup>` as well as in `<template>`, which is where the mutations that
 # survive a green pipeline actually live. 832 -> 879.
 #
+# AND 30 ARE THE BRING LIST LEARNING TO COUNT (#44), which is the first group
+# here that had almost nothing to grow from: every release before it touched the
+# potluck with exactly TWO checks, `addPotluckItem` and `listPotluck`, and never
+# claimed anything at all. So the guest half of that feature — the invite
+# capability URL, which is how a friend says "I'll bring the salad" — had no
+# coverage whatsoever, and the three columns this issue drops were read by
+# nothing any check could see.
+#
+# ELEVEN ARE THE COUNT ITSELF, and each `equals` is the whole state of one item
+# as one string (`bring_state`: needed/claimed/remaining/done/who). A `contains`
+# cannot do this twice over: "4 claimed, 2 to go" is a relationship between
+# three numbers, and this is a LIST, so a needle on `"quantityRemaining":2` is
+# satisfied by any other item on the event that happens to have two to go. The
+# three acceptance criteria are one `equals` each — three of six bottles leaves
+# three, two people at three each closes it, and releasing one reopens it at
+# three — plus a claimer raising their OWN number, which must adjust their row
+# rather than add a second.
+#
+# SEVEN ARE THE ITEM WITH NO COUNT, which is the criterion most likely to break in
+# silence: it has to behave exactly as every item did before this release, and
+# the obvious wrong implementation — a missing need read as a need of zero —
+# makes every free-text item on every list read as already brought, with nobody
+# bringing anything. `none` and `0` are different strings in `bring_state` for
+# precisely that reason, and 409 on a second claimer is the old behaviour
+# asserted rather than assumed.
+#
+# THE OTHER TWELVE are the shapes and the refusals: over-claiming is allowed and floors
+# the remainder at zero, a guest who states a count is bringing that many, a
+# host who states one is bringing none of it, zero is refused by both schemas
+# (400 from the guest's zod, 422 from the machine surface's), and the three
+# dropped fields are asserted ABSENT from `/api/v1` — the one change Enterprise
+# sees that the contract test's bijection is structurally blind to.
+#
+# WHAT THESE 30 CANNOT SEE is `BringList.vue` rendering any of it, for the
+# reason #38's group could not see a pin: this suite is curl and never loads a
+# Vue page. That half is `test/bring-list.test.ts` — the arithmetic executed,
+# and the call sites in `BringList.vue` and the host page pinned in
+# `<script setup>` as well as in `<template>`. 879 -> 909.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '879'
+  MIN_SMOKE_CHECKS: '909'
 
 jobs:
   ci:

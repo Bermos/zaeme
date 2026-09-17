@@ -323,24 +323,45 @@ export interface GuestIdentity {
 /** A guest adds a bring-list item via their invite link (optionally claiming it). */
 export async function guestAddContribution(
   token: string,
-  input: { title: string, category?: 'food' | 'drink' | 'other', quantity?: string | null, note?: string | null, claim?: boolean },
+  input: {
+    title: string
+    category?: 'food' | 'drink' | 'other'
+    quantity?: string | null
+    quantityNeeded?: number | null
+    unit?: string | null
+    note?: string | null
+    claim?: boolean
+    claimQuantity?: number
+  },
   identity: GuestIdentity
 ) {
   const { event: ev } = await resolveInviteToken(token)
   return addContribution(
     ev.id,
-    { title: input.title, category: input.category, quantity: input.quantity, note: input.note },
+    {
+      title: input.title,
+      category: input.category,
+      quantity: input.quantity,
+      quantityNeeded: input.quantityNeeded,
+      unit: input.unit,
+      note: input.note
+    },
     { guestName: identity.guestName, guestEmail: identity.guestEmail },
-    { claim: input.claim }
+    { claim: input.claim, claimQuantity: input.claimQuantity }
   )
 }
 
-/** A guest claims an unclaimed bring-list item. */
-export async function guestClaimContribution(token: string, contributionId: string, identity: GuestIdentity) {
+/** A guest claims some of a bring-list item (#44 — a number, not the whole thing). */
+export async function guestClaimContribution(
+  token: string,
+  contributionId: string,
+  identity: GuestIdentity & { quantity?: number }
+) {
   const { event: ev } = await resolveInviteToken(token)
   return claimContribution(ev.id, contributionId, {
     name: identity.guestName,
-    email: identity.guestEmail
+    email: identity.guestEmail,
+    quantity: identity.quantity
   })
 }
 

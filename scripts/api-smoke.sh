@@ -206,6 +206,63 @@ entry_order() {
     })' "$2"
 }
 
+# `bring_state <body> <title>` — the whole state of one bring-list item as a
+# single string: `needed/claimed/remaining/done-or-open/who`, e.g.
+# `6/4/2/open/ada@example.com` and `none/1/none/done/ada@example.com` for an
+# item that never stated a count.
+#
+# A `contains` CANNOT DO THIS (#44), for two reasons. The first is arithmetic:
+# "4 claimed, 2 to go" is a relationship between three numbers, and a needle on
+# any one of them passes on a list that has the other two wrong. The second is
+# that this is a LIST — a needle matches the payload, not the item, so
+# `'"quantityRemaining":2'` is satisfied by any other item on the event that
+# happens to have two to go.
+#
+# `none` and not `0` for a missing count, deliberately: the acceptance criterion
+# is that an item with no stated need behaves as it always did, and the wrong
+# implementation of that — treat a missing need as a need of zero — produces
+# `0/0/0/done` where the right one produces `none/0/none/open`. The two must not
+# print the same string. Sentinels (`unparseable`, `no-such-item`) rather than
+# an empty answer, so a dead server does not read as a clean bill of health.
+bring_state() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      // /api/v1 answers a bare array, the human surfaces wrap it, and a write
+      // answers the single item it touched.
+      const list = Array.isArray(b) ? b : (b.contributions ?? (b.contribution ? [b.contribution] : []))
+      const item = list.find(x => x && x.title === process.argv[1])
+      if (!item) return process.stdout.write("no-such-item")
+      const n = v => (v === null || v === undefined ? "none" : String(v))
+      const who = (item.claims ?? []).map(c => c.email).sort().join(",")
+      process.stdout.write([
+        n(item.quantityNeeded),
+        n(item.quantityClaimed),
+        n(item.quantityRemaining),
+        item.claimed ? "done" : "open",
+        who || "nobody"
+      ].join("/"))
+    })' "$2"
+}
+
+# `bring_id <body> <title>` — the id of the named bring-list item. A `sed` over
+# adjacent JSON keys would do it today and would silently start matching the
+# wrong thing the day a field is inserted between them; `no-such-item` rather
+# than an empty string, which would turn `…/contributions//claim` into a 404
+# that has nothing to do with what is being tested.
+bring_id() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const list = Array.isArray(b) ? b : (b.contributions ?? (b.contribution ? [b.contribution] : []))
+      process.stdout.write(list.find(x => x && x.title === process.argv[1])?.id ?? "no-such-item")
+    })' "$2"
+}
+
 # `expense_id <body> <title>` — the id of the named entry, from a budget or from
 # the single expense a /api/v1 write answers with. `no-such-entry` and not an
 # empty string, because an empty one turns `…/expenses/$ID` into `…/expenses/`,
@@ -987,6 +1044,102 @@ contains "...as the zäme planner, not an Enterprise-supplied name" "$CHAT" '"au
 check "readEventChat"                            200 "${AUTH[@]}" "$API/events/$SLUG/chat"
 check "readEventChat?afterId"                    200 "${AUTH[@]}" "$API/events/$SLUG/chat?afterId=nothing"
 check "inviteCoOrganizer"                        201 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SLUG/planner-invites" -d '{"role":"co_planner"}'
+
+echo
+echo "== the bring list counts (Bermos/zaeme#44) =="
+# WHAT THESE PROVE THAT NOTHING ELSE CAN. `pnpm test` runs no SQL, so the new
+# `events_contribution_claim` table, its unique `(contribution_id, email)` and
+# the `for update` that serialises two people claiming the last bottle are
+# proved here or nowhere. The three acceptance criteria are each one `equals`
+# over `bring_state`, which is arithmetic a needle cannot do.
+#
+# IT MINTS ITS OWN EVENT, because this suite re-runs against the rows the last
+# run left behind. An invite link only resolves on a LIVE event, so it publishes
+# first — a draft 403s for a reason that has nothing to do with bring lists.
+BL=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+  -d "{\"title\":\"Smoke potluck $SUFFIX\",\"type\":\"hosted\",\"startsAt\":\"2027-05-01T18:00:00+02:00\"}")
+BLSLUG=$(printf '%s' "$BL" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$BLSLUG/status" -d '{"status":"published"}' > /dev/null
+BLTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$BLSLUG/invites" -d '{"label":"Potluck smoke"}' \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+BLI="$BASE/api/invites/$BLTOK/contributions"
+BLV="$API/events/$BLSLUG/contributions"
+echo "  potluck: $BLSLUG"
+
+# ---- an item that says how many are wanted ----
+check "addPotluckItem takes a count"             201 "${AUTH[@]}" "${JSON[@]}" -X POST "$BLV" \
+  -d '{"title":"Bottles","category":"drink","quantityNeeded":6,"unit":"bottles"}'
+equals "...and six are wanted, none claimed"     "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Bottles')" "6/0/6/open/nobody"
+
+BLID=$(bring_id "$(body "${AUTH[@]}" "$BLV")" 'Bottles')
+check "a guest claims three of the six"          200 "${JSON[@]}" -X POST "$BLI/$BLID/claim" \
+  -d '{"guestName":"Ada","guestEmail":"ada-44@example.com","quantity":3}'
+equals "...and three are still to go"            "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Bottles')" "6/3/3/open/ada-44@example.com"
+
+check "a SECOND guest claims the other three"    200 "${JSON[@]}" -X POST "$BLI/$BLID/claim" \
+  -d '{"guestName":"Bo","guestEmail":"bo-44@example.com","quantity":3}'
+equals "...which closes it — two people, one item" "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Bottles')" "6/6/0/done/ada-44@example.com,bo-44@example.com"
+check "a third cannot claim what is spoken for"  409 "${JSON[@]}" -X POST "$BLI/$BLID/claim" \
+  -d '{"guestName":"Cy","guestEmail":"cy-44@example.com","quantity":1}'
+
+check "Bo releases their claim"                  200 "${JSON[@]}" -X POST "$BLI/$BLID/release" \
+  -d '{"guestEmail":"bo-44@example.com"}'
+equals "...and it reopens with the RIGHT remainder" "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Bottles')" "6/3/3/open/ada-44@example.com"
+
+check "Ada raises her own claim to all six"      200 "${JSON[@]}" -X POST "$BLI/$BLID/claim" \
+  -d '{"guestName":"Ada","guestEmail":"ada-44@example.com","quantity":6}'
+equals "...adjusting her row, not adding a second" "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Bottles')" "6/6/0/done/ada-44@example.com"
+
+# ---- an item with NO count, which must behave exactly as it did before #44 ----
+check "an item with no count at all"             201 "${AUTH[@]}" "${JSON[@]}" -X POST "$BLV" -d '{"title":"Crisps"}'
+equals "...is unclaimed and has no remainder"    "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Crisps')" "none/0/none/open/nobody"
+CRID=$(bring_id "$(body "${AUTH[@]}" "$BLV")" 'Crisps')
+check "one guest says they'll bring it"          200 "${JSON[@]}" -X POST "$BLI/$CRID/claim" \
+  -d '{"guestName":"Ada","guestEmail":"ada-44@example.com"}'
+equals "...and that alone finishes it, as before" "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Crisps')" "none/1/none/done/ada-44@example.com"
+check "a second guest is refused, as before"     409 "${JSON[@]}" -X POST "$BLI/$CRID/claim" \
+  -d '{"guestName":"Bo","guestEmail":"bo-44@example.com"}'
+check "the claimer releases it"                  200 "${JSON[@]}" -X POST "$BLI/$CRID/release" \
+  -d '{"guestEmail":"ada-44@example.com"}'
+equals "...and it is on offer again"             "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Crisps')" "none/0/none/open/nobody"
+
+# ---- bringing more than was asked for is a party, not an error ----
+check "two trays wanted"                         201 "${AUTH[@]}" "${JSON[@]}" -X POST "$BLV" \
+  -d '{"title":"Lasagne","category":"food","quantityNeeded":2,"unit":"trays"}'
+LAID=$(bring_id "$(body "${AUTH[@]}" "$BLV")" 'Lasagne')
+check "somebody brings ten"                      200 "${JSON[@]}" -X POST "$BLI/$LAID/claim" \
+  -d '{"guestName":"Cy","guestEmail":"cy-44@example.com","quantity":10}'
+equals "...and the remainder floors at zero"     "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Lasagne')" "2/10/0/done/cy-44@example.com"
+
+# ---- a guest stating a count IS bringing that many ----
+check "a guest adds six buns over the link"      200 "${JSON[@]}" -X POST "$BLI" \
+  -d '{"title":"Buns","category":"food","quantityNeeded":6,"unit":"buns","guestName":"Dee","guestEmail":"dee-44@example.com"}'
+equals "...and is bringing all six of them"      "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Buns')" "6/6/0/done/dee-44@example.com"
+
+# ---- the refusals, and the shape Enterprise now sees ----
+check "a claim of zero is refused"               400 "${JSON[@]}" -X POST "$BLI/$LAID/claim" \
+  -d '{"guestName":"Cy","guestEmail":"cy-44@example.com","quantity":0}'
+check "a count of zero is refused"               422 "${AUTH[@]}" "${JSON[@]}" -X POST "$BLV" \
+  -d '{"title":"Nothing","quantityNeeded":0}'
+# THE BREAKING CHANGE, asserted on the wire. Enterprise generates its client
+# from the contract and the contract test's bijection is over paths and methods,
+# so nothing else in this repository would notice these three coming back.
+POT=$(body "${AUTH[@]}" "$BLV")
+excludes "listPotluck no longer names one claimer" "$POT" '"claimedByEmail"'
+excludes "...nor their name"                       "$POT" '"claimedByName"'
+contains "...it answers a list of claims instead"  "$POT" '"claims":['
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  # THE SURFACE A PLANNER IS ACTUALLY ON. Seeding a count is the host's gesture
+  # and claiming is the guest's; a host add that claimed would make every item a
+  # planner typed read as already brought.
+  BLH="$BASE/api/host/events/$BLSLUG/contributions"
+  check "the host seeds a count"                   200 -H "Cookie: $ZAEME_TEST_SESSION_COOKIE" "${JSON[@]}" \
+    -X POST "$BLH" -d '{"title":"Salad","category":"food","quantityNeeded":4,"unit":"bowls"}'
+  equals "...wanted by four, brought by nobody"    "$(bring_state "$(body -H "Cookie: $ZAEME_TEST_SESSION_COOKIE" "$BASE/api/host/events/$BLSLUG")" 'Salad')" "4/0/4/open/nobody"
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
 
 echo
 echo "== re-ordering an itinerary, executed (Bermos/zaeme#8) =="

@@ -122,10 +122,15 @@ const HEADERS = {
  *       vacuum is the correct state and the assertion must not go missing
  *   1   every ticket is still for the same people (#36) — vacuous on this
  *       canary for the same reason, and counted for the same reason
+ *   2   everybody is still bringing what they claimed, and no count was
+ *       invented for an item that had none (#44) — vacuous on this canary,
+ *       which is written through `/api/v1` and has no bring list, and counted
+ *       for the reason the two ticket lines above are: the vacuum is the
+ *       correct state and the assertion must not go missing
  *   2   everybody who had a balance still has one; the balances still close
  *   4   the write block: readable, recorded, filed under Food, total moved
  *  ---
- *  25
+ *  27
  *
  * `snapshot` refuses to write a file unless the canary came back with both of
  * those expenses AND a category on each, so every one of the 25 is reachable —
@@ -140,7 +145,7 @@ const HEADERS = {
  * this deliberately does not depend on how many of those there are: that file
  * is free to change what it leaves behind.
  */
-const MIN_ASSERTIONS = 25
+const MIN_ASSERTIONS = 27
 
 /**
  * …and what the TICKET canary adds when there is one (#36), which is the case
@@ -149,22 +154,50 @@ const MIN_ASSERTIONS = 25
  * It is a second guaranteed EVENT, so it contributes a full pass of the
  * per-event assertions before its own three:
  *
- *   7   the per-event set, on a trip with no expenses: the budget loads, the
+ *   9   the per-event set, on a trip with no expenses: the budget loads, the
  *       trip settles in what it settled in, no display zone was invented,
  *       nothing was written on its ticket, every ticket is still for the same
  *       people (NOT vacuous here — this is the assertion the canary exists
- *       for), everybody with a balance still has one, the balances close
+ *       for), nobody stopped bringing what they claimed and no count was
+ *       invented (#44 — vacuous here, this trip has no bring list), everybody
+ *       with a balance still has one, the balances close
  *   3   the named block: the ticket survived, it is still for the same person,
  *       and the field is a LIST rather than the scalar it replaced
  *  ---
- *  10
+ *  12
  *
  * Added to the floor only when the snapshot carries one, so a person running
  * this by hand with no cookie is not failed for a canary they could not mint —
  * and `ticketCanary` aborts rather than returning null whenever the ingredients
  * ARE there, so "no ticket canary" can never be how a CI run goes quiet.
  */
-const TICKET_CANARY_ASSERTIONS = 10
+const TICKET_CANARY_ASSERTIONS = 12
+
+/**
+ * …and what the POTLUCK canary adds (#44). Unlike the ticket canary it needs no
+ * cookie and no bucket — claiming happens over the invite capability URL, which
+ * carries its own credential — so `snapshot` always mints one and this is
+ * always part of the floor.
+ *
+ * It is a third guaranteed EVENT, so it contributes a full pass of the
+ * per-event assertions before its own four:
+ *
+ *   9   the per-event set, on an event with no expenses: the budget loads, it
+ *       settles in what it settled in, no display zone was invented, nothing
+ *       was written on its tickets and every ticket is still for the same
+ *       people (both vacuous — it has no media), everybody is still bringing
+ *       what they claimed and no count was invented (NOT vacuous here — these
+ *       two are the assertions this canary exists for), everybody with a
+ *       balance still has one, the balances close
+ *   4   the named block: the item survived, it is still claimed by the same
+ *       person, the field is a LIST rather than the three scalars it replaced,
+ *       and the item is still FINISHED with no count — which is the issue's
+ *       first acceptance criterion asserted on a row written before the
+ *       migration existed
+ *  ---
+ *  13
+ */
+const POTLUCK_CANARY_ASSERTIONS = 13
 
 let pass = 0
 let fail = 0
@@ -447,6 +480,127 @@ async function ticketCanary(stamp) {
   return { slug, mediaId: pre.mediaId, rsvpId, assignees: seen.assignees }
 }
 
+/**
+ * WHO HAS CLAIMED A BRING-LIST ITEM, IN WHICHEVER SHAPE THE RELEASE SPEAKS
+ * (#44). Both normalise to a SORTED LIST of `email:quantity` strings, so the
+ * two releases either side of the migration can be compared at all:
+ *
+ *   `claims`           the release has the join table — the list, as given.
+ *   `claimedByEmail`   the release has the three columns — `[]` or
+ *                      `[theOne:1]`, because a single claim was always for the
+ *                      whole item and the backfill writes exactly 1.
+ *   neither            `'no-field'`, a fact about that release and not a value
+ *                      in its database.
+ *
+ * `[]` and `[one]` are different strings, so "claimed by nobody" and "claimed
+ * by one person" can never compare equal.
+ */
+function claimants(c) {
+  if (Object.hasOwn(c, 'claims')) {
+    return Array.isArray(c.claims)
+      ? c.claims.map(x => `${(x.email ?? '').toLowerCase()}:${x.quantityClaimed}`).sort()
+      : 'not-a-list'
+  }
+  if (Object.hasOwn(c, 'claimedByEmail')) return c.claimedByEmail ? [`${c.claimedByEmail.toLowerCase()}:1`] : []
+  return 'no-field'
+}
+
+/**
+ * THE POTLUCK CANARY (#44): a bring-list item somebody has CLAIMED, minted
+ * through the previous release before the three columns holding that claim are
+ * dropped.
+ *
+ * It exists for the same reason the ticket canary does, and here the gap was
+ * not hypothetical: `scripts/api-smoke.sh` on every release before #44 touched
+ * the bring list exactly twice, with `addPotluckItem` and `listPotluck`, and
+ * claimed nothing at all. So the previous release leaves NO claimed item
+ * behind, the backfill would have been verified against an empty set, and this
+ * job would have reported a pass having proved nothing about the one statement
+ * in the migration that can lose somebody's data.
+ *
+ * IT NEEDS NO COOKIE AND NO BUCKET, unlike the ticket canary: claiming happens
+ * over the invite capability URL, which carries its own credential in the path.
+ * So it is always minted, and `snapshot` aborts rather than returning null if
+ * any step refuses — "no potluck canary" must never be how a CI run goes quiet.
+ */
+async function potluckCanary(stamp) {
+  const guest = async (path, body) => {
+    const res = await fetch(`${BASE}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    const text = await res.text()
+    return { status: res.status, text }
+  }
+
+  const created = await api('POST', '/events', { title: `Upgrade potluck canary ${stamp}`, type: 'hosted' })
+  if (created.status !== 201 || !created.json?.slug) {
+    abort(`the previous release refused the potluck canary event (${created.status}): ${created.text.slice(0, 300)}`)
+  }
+  const slug = created.json.slug
+  // Published, or the invite token does not resolve — `resolveInviteToken`
+  // refuses a draft, and claiming is the whole point of this canary.
+  const live = await api('POST', `/events/${slug}/status`, { status: 'published' })
+  if (live.status !== 200) abort(`the potluck canary event would not publish (${live.status}): ${live.text.slice(0, 300)}`)
+  const invite = await api('POST', `/events/${slug}/invites`, { label: 'Potluck canary' })
+  if (invite.status !== 201 || !invite.json?.token) {
+    abort(`the potluck canary got no invite token (${invite.status}): ${invite.text.slice(0, 300)}`)
+  }
+  const item = await api('POST', `/events/${slug}/contributions`, { title: 'Canary tiramisu', category: 'food' })
+  if (item.status !== 201 || !item.json?.id) {
+    abort(
+      `the previous release refused the potluck canary item (${item.status}): ${item.text.slice(0, 300)}\n`
+      + 'If POST /api/v1/events/{slug}/contributions has changed shape, this script speaks the OLD contract here.'
+    )
+  }
+  const email = `potluck-canary-${stamp}@example.com`
+  const claimed = await guest(`/api/invites/${invite.json.token}/contributions/${item.json.id}/claim`, {
+    guestName: 'Canary Claimer',
+    guestEmail: email
+  })
+  if (claimed.status !== 200) {
+    abort(`the potluck canary item would not be claimed (${claimed.status}): ${claimed.text.slice(0, 300)}`)
+  }
+
+  // Read back through `/api/v1`, so what is recorded is what that release SAYS,
+  // in the shape `verify` will compare against — not what was just posted.
+  const seen = (await potluckClaim(slug)).find(c => c.id === item.json.id)
+  if (!seen) abort('the potluck canary item is not in the previous release\'s bring list')
+  if (!Array.isArray(seen.claimants) || seen.claimants.length !== 1) {
+    abort(
+      `the potluck canary came back claimed by ${JSON.stringify(seen.claimants)} rather than by exactly one person — `
+      + 'there would be nothing for the migration to carry across, so this job would prove nothing about the backfill.'
+    )
+  }
+  console.log(`  note  potluck canary: ${slug} — ${item.json.id} claimed by ${seen.claimants[0]}`)
+  return { slug, contributionId: item.json.id, claimants: seen.claimants, quantityNeeded: seen.quantityNeeded }
+}
+
+/**
+ * WHAT THIS RELEASE SAYS ABOUT EVERY ITEM ON AN EVENT'S BRING LIST (#44).
+ *
+ * `quantityNeeded` is the #31-shaped half: the column is new and NULL for every
+ * item that already exists, because an item nobody put a number on genuinely
+ * has no number and a migration that reached for one — the free-text
+ * `quantity`, a 1 — would put a count on every potluck item nobody chose and
+ * silently change which of them read as finished. `'no-field'` for a release
+ * that has no such property, normalised by `verify` to "the only honest fill is
+ * null".
+ */
+async function potluckClaim(slug) {
+  const res = await api('GET', `/events/${slug}/contributions`)
+  if (res.status !== 200 || !Array.isArray(res.json)) return []
+  return res.json
+    .filter(c => c?.id)
+    .map(c => ({
+      id: c.id,
+      title: c.title ?? null,
+      quantityNeeded: Object.hasOwn(c, 'quantityNeeded') ? (c.quantityNeeded ?? null) : 'no-field',
+      claimants: claimants(c)
+    }))
+}
+
 async function snapshot(file) {
   const stamp = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`
   const created = await api('POST', '/events', { title: `Upgrade canary ${stamp}`, type: 'trip' })
@@ -461,6 +615,7 @@ async function snapshot(file) {
   // BEFORE the event list is read below, so the ticket canary's own trip is in
   // it and its media is snapshotted like everybody else's.
   const ticket = await ticketCanary(stamp)
+  const potluck = await potluckCanary(stamp)
 
   for (const expense of canaryExpenses(stamp)) {
     const wrote = await api('POST', `/events/${canarySlug}/expenses`, expense)
@@ -499,6 +654,7 @@ async function snapshot(file) {
       slug,
       timezone,
       media: await mediaClaim(slug),
+      contributions: await potluckClaim(slug),
       currency: budget.json.currency ?? null,
       totalCents: budget.json.totalCents ?? null,
       expenses: expenses.map(e => ({
@@ -558,11 +714,20 @@ async function snapshot(file) {
     )
   }
 
+  // …and for the potluck canary (#44), which needs no cookie and no bucket and
+  // is therefore never absent — so "it is not here" is a failure, not a skip.
+  if (!events.some(e => e.slug === potluck.slug)) {
+    abort(
+      `the potluck canary's event ${potluck.slug} is not in the snapshot — GET /api/v1/events or its budget read `
+      + 'did not answer for it, so the claim backfill would be verified against nothing.'
+    )
+  }
+
   const money = events.reduce((n, e) => n + e.expenses.length, 0)
-  writeFileSync(file, JSON.stringify({ canarySlug, ticket, events }, null, 2))
+  writeFileSync(file, JSON.stringify({ canarySlug, ticket, potluck, events }, null, 2))
   console.log(
     `[upgrade-check] snapshot: ${events.length} event(s) holding ${money} expense(s), canary ${canarySlug}`
-    + `${ticket ? `, ticket canary ${ticket.slug}` : ', no ticket canary'} -> ${file}`
+    + `${ticket ? `, ticket canary ${ticket.slug}` : ', no ticket canary'}, potluck canary ${potluck.slug} -> ${file}`
   )
 }
 
@@ -823,6 +988,65 @@ async function verify(file) {
         .join('; ')
     )
 
+    /*
+     * AND NOBODY STOPPED BRINGING WHAT THEY SAID THEY WOULD (#44). The second
+     * DESTRUCTIVE migration in this chain: it drops the three columns that held
+     * a bring-list claim and replaces them with rows in
+     * `events_contribution_claim`. The backfill is what carries the existing
+     * claims across, and without it every item anybody had claimed silently
+     * becomes unclaimed — a party where four friends re-buy four things that
+     * were already bought.
+     *
+     * Compared against the SNAPSHOT and normalised through `claimants` on both
+     * sides, so the single column the previous release answered with and the
+     * list this one answers with are the same sorted array. A release from
+     * before either shape reads `'no-field'`, which is the one case where there
+     * is nothing to carry across.
+     *
+     * It also catches an item that VANISHED, which a migration adding a unique
+     * index over the primary key cannot do — and which would be the worst thing
+     * it could do if it did.
+     */
+    const potluckNow = new Map((await potluckClaim(before.slug)).map(c => [c.id, c]))
+    const lostClaims = (before.contributions ?? []).filter((was) => {
+      if (was.claimants === 'no-field') return false
+      const now = potluckNow.get(was.id)
+      if (!now) return true
+      return JSON.stringify(now.claimants) !== JSON.stringify(was.claimants)
+    })
+    assert(
+      `${before.slug}: everybody is still bringing what they claimed`,
+      lostClaims.length === 0,
+      lostClaims
+        .map(w => `${w.id} (${w.title}) was claimed by ${JSON.stringify(w.claimants)}, now `
+          + `${potluckNow.has(w.id) ? JSON.stringify(potluckNow.get(w.id).claimants) : 'GONE'}`)
+        .join('; ')
+    )
+
+    /*
+     * …AND INVENTED NO COUNT FOR AN ITEM THAT NEVER HAD ONE. The #31-shaped
+     * half of the same migration: `quantity_needed` is a new nullable column
+     * and NULL is the truth about every item that already exists. A backfill
+     * that reached for a number — parsing the free-text `quantity`, defaulting
+     * to 1 — would put a count on every potluck item nobody chose, and since
+     * "is this item finished" is arithmetic over that count, it would change
+     * which items read as done. Against the snapshot, never against a constant.
+     */
+    const wrongCount = (before.contributions ?? []).filter((was) => {
+      const now = potluckNow.get(was.id)
+      if (!now) return false // already reported as GONE above
+      const expected = was.quantityNeeded === 'no-field' ? null : was.quantityNeeded
+      return (now.quantityNeeded ?? null) !== expected
+    })
+    assert(
+      `${before.slug}: the migration invented no count for an item that had none`,
+      wrongCount.length === 0,
+      wrongCount
+        .map(w => `${w.id} (${w.title}) was ${JSON.stringify(w.quantityNeeded)}, now `
+          + `${JSON.stringify(potluckNow.get(w.id).quantityNeeded)}`)
+        .join('; ')
+    )
+
     const nowBalances = new Map((after.balances ?? []).map(b => [b.email, b.netCents]))
     const lost = before.balances.map(b => b.email).filter(email => !nowBalances.has(email))
     assert(
@@ -873,6 +1097,50 @@ async function verify(file) {
   }
 
   /*
+   * THE POTLUCK CANARY, NAMED (#44). The loop above already compared it along
+   * with everything else; this says the same thing about the one item the job
+   * GUARANTEES rather than about whatever the list happened to contain — a
+   * filter over an empty array reports no discrepancies just as loudly as a
+   * filter over a matching one.
+   *
+   * The third assertion is about the SHAPE and not the value, and it is the one
+   * that says the field actually MOVED: the first two would both pass if the new
+   * release still answered a single `claimedByEmail`, because `claimants`
+   * normalises the old shape on purpose so the comparison can straddle the
+   * migration.
+   */
+  if (snap.potluck) {
+    const list = await potluckClaim(snap.potluck.slug)
+    const row = list.find(c => c.id === snap.potluck.contributionId)
+    assert(
+      'the potluck canary survived the migration',
+      Boolean(row),
+      `the bring list of ${snap.potluck.slug} does not carry ${snap.potluck.contributionId}`
+    )
+    assert(
+      'the potluck canary is still claimed by the person who claimed it',
+      Boolean(row) && JSON.stringify(row.claimants) === JSON.stringify(snap.potluck.claimants),
+      `was ${JSON.stringify(snap.potluck.claimants)}, now ${row ? JSON.stringify(row.claimants) : 'GONE'}`
+    )
+    const raw = await api('GET', `/events/${snap.potluck.slug}/contributions`)
+    const item = (Array.isArray(raw.json) ? raw.json : []).find(c => c?.id === snap.potluck.contributionId)
+    assert(
+      '…and answers it as a LIST of claims, which is what #44 moved it to',
+      Boolean(item) && Array.isArray(item.claims),
+      item
+        ? `claims is ${JSON.stringify(item.claims)} and claimedByEmail is ${JSON.stringify(item.claimedByEmail)}`
+        : 'the item is gone'
+    )
+    assert(
+      '…still finished, because an item with no count is done when somebody has it',
+      Boolean(item) && item.claimed === true && (item.quantityNeeded ?? null) === null,
+      item
+        ? `claimed is ${JSON.stringify(item.claimed)} with quantityNeeded ${JSON.stringify(item.quantityNeeded)}`
+        : 'the item is gone'
+    )
+  }
+
+  /*
    * The write. Everything above reads; a chart of accounts the migration failed
    * to seed is only FELT when the next expense has to land in one — and it is
    * the failure that reaches a person as "I cannot record this", days after the
@@ -919,7 +1187,9 @@ async function verify(file) {
     console.error(`::error::[upgrade-check] ${fail} assertion(s) failed against rows the previous release wrote`)
     process.exit(1)
   }
-  const floor = MIN_ASSERTIONS + (snap.ticket ? TICKET_CANARY_ASSERTIONS : 0)
+  const floor = MIN_ASSERTIONS
+    + (snap.ticket ? TICKET_CANARY_ASSERTIONS : 0)
+    + (snap.potluck ? POTLUCK_CANARY_ASSERTIONS : 0)
   if (pass < floor) {
     console.error(
       `::error::[upgrade-check] ${pass} assertions ran, fewer than the ${floor} the canaries alone account `

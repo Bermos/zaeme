@@ -246,21 +246,39 @@ async function removeRsvp(id: string) {
 /* ---- bring list ---- */
 const itemTitle = ref('')
 const itemCategory = ref<'food' | 'drink' | 'other'>('food')
+const itemCount = ref<number | null>(null)
+const itemUnit = ref('')
 const addingItem = ref(false)
+/**
+ * SEEDING, NOT CLAIMING (#44). A count typed here says how many are WANTED and
+ * claims nothing — the host surface is where a planner writes "6 bottles" and
+ * the guests' invite pages are where those six get taken. Leave the count empty
+ * and the item behaves exactly as every item did before this issue.
+ */
 async function addItem() {
   if (!itemTitle.value) return
   addingItem.value = true
   try {
     await $fetch(`/api/host/events/${slug}/contributions`, {
       method: 'POST',
-      body: { title: itemTitle.value, category: itemCategory.value }
+      body: {
+        title: itemTitle.value,
+        category: itemCategory.value,
+        quantityNeeded: itemCount.value || null,
+        unit: itemUnit.value || null
+      }
     })
     itemTitle.value = ''
+    itemCount.value = null
+    itemUnit.value = ''
     await refresh()
   } finally {
     addingItem.value = false
   }
 }
+/** The same sentence the guest list draws, from the same rule. */
+const itemCountLine = (c: { quantityNeeded: number | null, unit: string | null, claims: Array<{ quantityClaimed: number }> }) =>
+  remainderLine(c.quantityNeeded, c.unit, c.claims)
 async function removeItem(id: string) {
   await $fetch(`/api/host/events/${slug}/contributions/${id}`, { method: 'DELETE' })
   await refresh()
@@ -774,21 +792,29 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
             :key="c.id"
             class="flex items-center justify-between gap-2 py-2 border-b border-default last:border-b-0"
           >
-            <p class="font-medium">
-              {{ CATEGORY_ICONS[c.category] }} {{ c.title }}
-              <span
-                v-if="c.claimed"
-                class="text-sm text-muted font-normal"
-              >— {{ c.claimedByName }}</span>
-              <UBadge
-                v-else
-                color="neutral"
-                variant="subtle"
-                size="sm"
+            <div class="min-w-0">
+              <p class="font-medium">
+                {{ CATEGORY_ICONS[c.category] }} {{ c.title }}
+                <span
+                  v-if="c.claims.length"
+                  class="text-sm text-muted font-normal"
+                >— {{ c.claims.map(x => x.name).join(', ') }}</span>
+                <UBadge
+                  v-else
+                  color="neutral"
+                  variant="subtle"
+                  size="sm"
+                >
+                  unclaimed
+                </UBadge>
+              </p>
+              <p
+                v-if="itemCountLine(c)"
+                class="text-sm text-muted"
               >
-                unclaimed
-              </UBadge>
-            </p>
+                {{ itemCountLine(c) }}
+              </p>
+            </div>
             <UButton
               size="xs"
               color="neutral"
@@ -815,6 +841,18 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
               v-model="itemTitle"
               placeholder="Needed: big bowl of popcorn"
               class="flex-1"
+            />
+            <UInput
+              v-model.number="itemCount"
+              type="number"
+              :min="1"
+              placeholder="How many?"
+              class="w-28"
+            />
+            <UInput
+              v-model="itemUnit"
+              placeholder="bottles"
+              class="w-28"
             />
             <UButton
               type="submit"
