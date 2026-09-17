@@ -1,6 +1,7 @@
 import { and, eq, isNotNull } from 'drizzle-orm'
 import { inngest, EventPublishedEvent } from '../client'
 import { tables, useDb } from '../../domain/db'
+import { bringListNudgeAt } from '../../domain/contributions'
 import { guestUser } from '../../database/schema/auth'
 import { renderInviteEmail, sendEmail } from '../../emails/index'
 
@@ -11,7 +12,11 @@ const DAY_MS = 24 * 60 * 60 * 1000
  * email address. Shareable (email-less) links are skipped: those are handed
  * out by the host out-of-band.
  *
- * Then schedule the 48h reminder, if the event starts more than 48h out.
+ * Then schedule the two things that arrive later: the 48h reminder, if the
+ * event starts more than 48h out, and the bring-list nudge (#46) at 18:00 the
+ * evening before on the event's own clock. Both are ordinary signals with a
+ * future `ts`, and both decide whether they have anything to say when they
+ * land rather than now.
  */
 export const eventPublished = inngest.createFunction(
   {
@@ -75,6 +80,23 @@ export const eventPublished = inngest.createFunction(
           ts: reminderTs
         })
       }
+    }
+
+    // THE BRING-LIST NUDGE (#46), and it is NOT the 48h offset again: it is
+    // 18:00 the evening before ON THE EVENT'S OWN CLOCK, because a nudge to go
+    // and buy bread is only useful while the shops are open. That is why this
+    // is a separate calculation and not `startsAt - 24h` — see
+    // `bringListNudgeAt`. Whether there is anything to nudge ABOUT is decided
+    // when the signal lands and not now, because at publication the answer is
+    // not yet knowable: the list is usually empty and nobody has had the link
+    // long enough to claim anything on it.
+    const nudgeTs = bringListNudgeAt(ev.startsAt, ev.timezone)?.getTime()
+    if (nudgeTs && nudgeTs > Date.now()) {
+      await step.sendEvent('schedule-bring-list-nudge', {
+        name: 'events/bring-list.nudge',
+        data: { eventId: ev.id },
+        ts: nudgeTs
+      })
     }
 
     return { sent }

@@ -352,7 +352,7 @@ and served at `/api/inngest`. Without `INNGEST_EVENT_KEY` the client runs in dev
 mode; delivery is fire-and-forget (`server/utils/dispatch.ts`) and a failure to
 dispatch is logged, never allowed to fail the user's request.
 
-Four functions exist:
+Five functions exist:
 
 | Job                | Trigger                             | Does                                           |
 |--------------------|-------------------------------------|------------------------------------------------|
@@ -360,6 +360,16 @@ Four functions exist:
 | `events/event.published` | Event status → published      | Send invite emails                             |
 | `events/event.reminder`  | Scheduled 48h before the event by `event.published` | Send reminder emails                           |
 | `events/event.cancelled` | Event status → cancelled      | Notify everyone who answered                   |
+| `events/bring-list.nudge` | Scheduled by `event.published` for 18:00 the evening before, on the event's own clock | Tell the yes-RSVPs what is still unclaimed on the bring list — nothing if it is complete, empty, or the instance has no mail transport |
+
+The count is not decoration: `scripts/api-smoke.sh` reads `function_count` off
+the running server and pins it, so a sixth job has to come past this table too.
+
+The two scheduled ones (`event.reminder`, `bring-list.nudge`) are signals sent
+with a future `ts`, and NOTHING CANCELS OR RESCHEDULES ONE. Cancelling an event
+does not withdraw its reminder; moving an event does not move either job. Each
+function re-reads the event when it lands and decides for itself whether to say
+anything, which is where "a cancelled party sends nothing" actually lives.
 
 The `events/` prefix is kept from the monorepo era so no persisted scheduled run
 is orphaned.

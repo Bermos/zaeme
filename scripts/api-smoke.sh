@@ -1514,6 +1514,31 @@ else
 fi
 
 echo
+echo "== the background jobs the BUILT server actually serves (Bermos/zaeme#46) =="
+# TWO CHECKS, AND IT IS WORTH SAYING EXACTLY WHAT THEY PROVE, because it is
+# less than it looks and more than a grep.
+#
+# The night-before bring-list nudge is an Inngest function delivered by a signal
+# with a future `ts`. There is no HTTP route to curl it with and no Inngest
+# server in CI to deliver one, so this suite CANNOT execute it: its arithmetic,
+# its recipients, its timing and every one of its refusals are executed by
+# `test/bring-list-nudge.test.ts` instead, which is where to look when one of
+# them breaks.
+#
+# What these two do prove is the thing vitest cannot: that the BUILT server
+# boots with the job registered. `server/inngest/index.ts` is a hand-written
+# array, and a function that is written but never added to it is served by
+# nothing — while `server/domain/contributions.ts` and the new email template
+# are pulled in through it, so a module that resolves at build time and fails at
+# boot turns this route into a 500. `function_count` is the manifest, read off
+# the running process.
+#
+# The count is EXACT on purpose: a sixth function must come past this line and
+# past the person who wrote it, the same way the smoke floor works.
+check "GET /api/inngest answers"                 200 "$BASE/api/inngest"
+contains "...and serves all five jobs"           "$(body "$BASE/api/inngest")" '"function_count":5'
+
+echo
 echo "== re-ordering an itinerary, executed (Bermos/zaeme#8) =="
 # The ONLY evidence `applyTimelineItemMove` computes the right thing. Every
 # static check it has passes just as happily when the statement does the

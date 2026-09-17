@@ -36,7 +36,7 @@ Not built yet — see [ROADMAP.md](./ROADMAP.md): Fahrgemeinschaft (travel group
 | **Auth**      | [Better Auth](https://better-auth.com) — magic link + passkey, no passwords               |
 | **Files**     | Any S3-compatible object store — presigned uploads via [aws4fetch](https://github.com/mhart/aws4fetch) |
 | **Email**     | Proton Bridge via the mail relay, or [Resend](https://resend.com); [React Email](https://react.email) templates |
-| **Jobs**      | [Inngest](https://inngest.com) — invite, confirmation, reminder and cancellation mail     |
+| **Jobs**      | [Inngest](https://inngest.com) — invite, confirmation, reminder, cancellation and bring-list-nudge mail |
 | **IDs**       | [cuid2](https://github.com/paralleldrive/cuid2)                                           |
 | **Runtime**   | Node 22 (`engines.node`), built with buildpacks — no Dockerfile                           |
 

@@ -34,6 +34,16 @@ export const EventCancelledEvent = eventType('events/event.cancelled', {
   schema: staticSchema<{ eventId: string, reason?: string | null }>()
 })
 
+/**
+ * The night-before bring-list nudge (#46). Scheduled with a future `ts` by
+ * `event.published`, exactly like the 48h reminder beside it, and carrying the
+ * event id alone — everything else is re-read when it lands, which is what
+ * makes a cancelled event send nothing.
+ */
+export const BringListNudgeEvent = eventType('events/bring-list.nudge', {
+  schema: staticSchema<{ eventId: string }>()
+})
+
 export const inngest = new Inngest({
   id: 'zaeme',
   eventKey: process.env.INNGEST_EVENT_KEY,

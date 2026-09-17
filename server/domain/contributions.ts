@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, lte, ne, or, sql } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { contributionTally } from '../../shared/utils/bring-list'
+import { isoFromZonedInput, zoneDayKey } from '../../shared/utils/timezone'
 import type { SuggestedItem, SuggestionCategory } from '../../shared/utils/bring-list-suggestions'
 import {
   attendingHeadcount,
@@ -9,6 +10,7 @@ import {
   suggestBringListItems,
   suggestionsFor
 } from '../../shared/utils/bring-list-suggestions'
+import { guestUser } from '../database/schema/auth'
 import { tables, useDb } from './db'
 import { assertPlanner, loadEventBySlug } from './permissions'
 
@@ -560,4 +562,362 @@ export async function applyBringListSuggestion(
     }
   })
   return { added, skipped, contributions: await listContributions(ev.id) }
+}
+
+/* -------------------- the night before, what is missing -------------------- */
+
+/**
+ * NOBODY LOOKS AT THE BRING LIST AGAIN (#46).
+ *
+ * A list is only complete if somebody checks it, and nobody does — so the party
+ * has three desserts and no bread. This half of the file answers the two
+ * questions the nudge needs and nothing else: WHAT IS STILL MISSING, and WHO
+ * SHOULD HEAR ABOUT IT. `server/inngest/functions/bring-list-nudge.ts` is the
+ * thin part that sends it.
+ *
+ * ── ONE OPINION ABOUT COUNTS ───────────────────────────────────────────────
+ *
+ * Whether an item is finished is `contributionTally` in
+ * `shared/utils/bring-list.ts` (#44) and is not re-decided here. `gapLine`
+ * calls it and branches on its answer; there is no second arithmetic in this
+ * file, no `remaining > 0` written out by hand, and in particular no
+ * `quantityNeeded ?? 0`, which would make every free-text item on every list
+ * read as finished the moment it was created.
+ */
+
+/** One person who said yes, and the link that takes them back to the list. */
+export interface BringListNudgeRecipient {
+  /** The step id the send is recorded under, so a retry does not re-send. */
+  rsvpId: string
+  /** Lowercased — it is also the dedupe key. */
+  email: string
+  name: string | null
+  inviteToken: string | null
+}
+
+/** Everything the nudge needs, and everything it needs to decide NOT to send. */
+export interface BringListNudgePlan {
+  eventId: string
+  /** Re-read at send time; see the cancellation note on the Inngest function. */
+  status: string
+  title: string
+  slug: string
+  startsAt: Date | null
+  endsAt: Date | null
+  timezone: string | null
+  location: string | null
+  /**
+   * How many items the list holds AT ALL. Zero is "there is no bring list",
+   * which is a different answer from "the list is finished" and earns the same
+   * silence for a different reason — an event with no list is not a party that
+   * forgot, it is a party that did not want one.
+   */
+  itemCount: number
+  /** One line per still-missing item, in list order. Empty means complete. */
+  gaps: string[]
+  recipients: BringListNudgeRecipient[]
+}
+
+/**
+ * WHAT ONE STILL-MISSING ITEM READS AS — or null when it is not missing.
+ *
+ * The nudge names THE GAPS AND NOT THE LIST. A message that repeats all
+ * fourteen items is the bring list with extra steps, and the person reading it
+ * on a phone the evening before has to diff it themselves, which is exactly the
+ * work nobody was doing.
+ *
+ * Two shapes, because the list has two kinds of item and #44 is emphatic about
+ * the difference:
+ *
+ *  - WITH A STATED NEED, the remainder is the news — "Wine — 2 of 6 bottles
+ *    still to go". `unit` is optional free text and the line reads without it.
+ *  - WITHOUT ONE there is no remainder to state and never was: the item is
+ *    missing when nobody has claimed it, and the useful thing to add is the
+ *    free-text amount the host typed — "Bread — two loaves". That column is
+ *    where most of a real bring list says how much (#45 lost it in a copy, and
+ *    the loss was invisible to the host because the host page does not render
+ *    it), so a gap line that dropped it would be the same omission again.
+ */
+export function gapLine(
+  item: Pick<ContributionView, 'title' | 'quantity' | 'unit' | 'quantityNeeded' | 'claims'>
+): string | null {
+  const { remaining, done } = contributionTally(item.quantityNeeded, item.claims)
+  if (done) return null
+  // `remaining` is null exactly when nobody stated a need — the branch
+  // `contributionTally` documents, read off its answer rather than re-derived
+  // from `quantityNeeded` here.
+  if (remaining == null) return item.quantity ? `${item.title} — ${item.quantity}` : item.title
+  return `${item.title} — ${remaining} of ${item.quantityNeeded}${item.unit ? ` ${item.unit}` : ''} still to go`
+}
+
+/** The still-missing items, in the order the list shows them. */
+export function bringListGaps(
+  items: readonly Pick<ContributionView, 'title' | 'quantity' | 'unit' | 'quantityNeeded' | 'claims'>[]
+): string[] {
+  return items.map(gapLine).filter((line): line is string => line !== null)
+}
+
+/**
+ * THE PEOPLE WHO SAID YES, and only them.
+ *
+ * `summariseRsvps().headcount` in `server/domain/events-data.ts` is NOT reused,
+ * for the reason `attendingHeadcount` gives next door: it counts `cheering`,
+ * which is "cheering from afar" and means somebody is NOT coming. Mailing them
+ * a list of food to bring is the plainest possible version of that bug
+ * (Bermos/zaeme#87 is the count itself; this file does not fix it).
+ *
+ * `maybe` is left out too, and that is the narrower of the two readings. A
+ * maybe has not committed to being in the room and a nudge is a request to go
+ * shopping, so the conservative answer is to ask the people who said they would
+ * be there. Widening it later is additive; un-widening after it ships is not.
+ *
+ * DEDUPED ON THE LOWERCASED ADDRESS, because one person can hold an account
+ * RSVP and a guest RSVP on the same event and must not get two mails.
+ *
+ * THE PRECEDENCE IS WITHIN A ROW, NOT ACROSS ROWS, and the difference is worth
+ * being exact about because an earlier version of this sentence was not. WITHIN
+ * a row the account's address wins over the typed one (`user?.email ??
+ * guestEmail`), which is what every other send in this app does. ACROSS rows it
+ * is FIRST SEEN WINS, and `loadBringListNudge` reads the RSVPs with no
+ * `ORDER BY` — so when one person holds both rows, which of the two supplies
+ * the greeting name and the invite token is not ranked by anything here.
+ *
+ * That is left unranked deliberately rather than frozen by an `ORDER BY`: one
+ * mail goes out either way, so the acceptance criterion does not depend on it,
+ * and neither row is the better one to prefer (the account row carries the name
+ * better-auth knows, the guest row usually carries the invite the link wants).
+ * Picking one by sort order would look like a decision while being an arbitrary
+ * choice about which of two correct addresses to greet. When somebody has a
+ * reason to prefer one, that reason goes here and the query gets its order.
+ */
+export function nudgeRecipients(
+  rows: readonly {
+    rsvp: Pick<typeof tables.rsvp.$inferSelect, 'id' | 'status' | 'guestName' | 'guestEmail'>
+    user: Pick<typeof guestUser.$inferSelect, 'name' | 'email'> | null
+    invite: Pick<typeof tables.invite.$inferSelect, 'token'> | null
+  }[]
+): BringListNudgeRecipient[] {
+  const out: BringListNudgeRecipient[] = []
+  const seen = new Set<string>()
+  for (const r of rows) {
+    if (r.rsvp.status !== 'yes') continue
+    const address = r.user?.email ?? r.rsvp.guestEmail
+    if (!address) continue
+    const email = address.toLowerCase()
+    if (seen.has(email)) continue
+    seen.add(email)
+    out.push({
+      rsvpId: r.rsvp.id,
+      email,
+      name: r.user?.name ?? r.rsvp.guestName ?? null,
+      inviteToken: r.invite?.token ?? null
+    })
+  }
+  return out
+}
+
+/** What the nudge needs in order to decide; `BringListNudgePlan` satisfies it. */
+export interface BringListNudgeFacts {
+  status: string
+  /** A `Date` from the database, or the ISO string a serialised step hands back. */
+  startsAt: Date | string | null
+  /** Read with `startsAt`, because together they say when this nudge was due. */
+  timezone: string | null
+  itemCount: number
+  gaps: readonly string[]
+  recipients: readonly BringListNudgeRecipient[]
+}
+
+/**
+ * HOW LATE — OR HOW EARLY — A NUDGE MAY STILL BE DELIVERED, and the number is
+ * chosen from an arithmetic rather than picked as a round one.
+ *
+ * The signal's `ts` is fixed when the event is published and NOTHING
+ * reschedules it, so the rung below asks whether this delivery is still the
+ * right one for the event as it now stands: is `now` near what
+ * `bringListNudgeAt` says today? That needs a window, and the window has to
+ * separate two things.
+ *
+ * WHAT IT MUST ABSORB: a late delivery. A queue backlog, an outage, or a run
+ * that failed its first attempts and retried can put hours between the due
+ * instant and this code running. A tight window would turn every one of those
+ * into silence, on the one night the feature exists for.
+ *
+ * WHAT IT MUST CATCH: a moved event. And the separation is wide, because
+ * `bringListNudgeAt` reads the event's local calendar DAY and not its clock
+ * time — 18:00 the evening before, whatever hour the party starts. So moving a
+ * party from 20:00 to 10:00 on the same local day does not move the nudge AT
+ * ALL, and any move that does change the answer changes the local day, which
+ * moves it by a whole day: ~23 hours at the narrowest, that being a 24-hour day
+ * with a spring-forward inside it. `test/bring-list-nudge.test.ts` executes
+ * that claim over a year of days in four zones rather than leaving it as
+ * reasoning.
+ *
+ * Six hours sits between the two with room on both sides: four times longer
+ * than any plausible delivery delay, and a quarter of the smallest real move.
+ *
+ * WHAT IT DOES NOT SEPARATE, said plainly rather than left to be discovered: a
+ * change of ZONE alone, by six hours or less, moves the answer by less than the
+ * window — so the nudge still goes out at the old instant, up to six hours off
+ * the new local 18:00. A trip relabelled from Zürich to New York is exactly
+ * that case, and it lands near midnight local instead of at six. That is a
+ * worse hour, not a wrong party, and it is the side of the trade worth taking.
+ */
+export const NUDGE_DELIVERY_WINDOW_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Whether to send, and why not. The counts ride along either way, so an
+ * instance that declines to send still reports what it would have said.
+ */
+export type BringListNudgeDecision
+  = | { send: false, reason: string, gaps: number, recipients: number }
+    | { send: true, reason: null, gaps: number, recipients: number }
+
+/**
+ * THE WHOLE LADDER, AS A PURE FUNCTION — every reason this job says nothing.
+ *
+ * It lives here rather than inside the Inngest handler because four of the five
+ * acceptance criteria on #46 are refusals, and a refusal written inline in a
+ * background job is reachable by nothing: there is no HTTP route to curl and no
+ * Inngest server in CI. Here a test executes each rung, and the handler is what
+ * it is supposed to be — load, decide, send.
+ *
+ * THE ORDER IS PART OF THE ANSWER:
+ *
+ *  - `status !== 'published'` FIRST, because it is the cancellation check and a
+ *    cancelled party must not be told about bread whatever else is true of it.
+ *  - `already-started` next: the start can be moved after publication and
+ *    nothing reschedules the signal, so a nudge really can arrive for a party
+ *    that has happened.
+ *  - `rescheduled` is that same fact in the OTHER DIRECTION, and it is here
+ *    because leaving it out inverted the whole feature. An event published for
+ *    1 July and moved to 1 September keeps its 30 June signal: on 30 June every
+ *    yes-RSVP was told what was unclaimed for a party two months away — with
+ *    the mail's own `When:` line correctly reading September, so it arrives as
+ *    an obvious mistake — and on 31 August, the night this exists for, nothing
+ *    was sent at all. The promise exactly inverted, in both halves. So this
+ *    rung asks whether the delivery is still the right one for the event as it
+ *    NOW stands (`NUDGE_DELIVERY_WINDOW_MS` above says how near is near), and a
+ *    delivery that is not gets silence.
+ *
+ *    ITS CONSEQUENCE IS WORTH STATING: a moved event now gets NO nudge rather
+ *    than a wrong one, because nothing reschedules the signal. That is the
+ *    better half of a bad pair and not a fix — the 48h reminder has the same
+ *    shape, and Bermos/zaeme#91 is the pair of them together.
+ *  - NO LIST and COMPLETE LIST are two refusals and not one, because they are
+ *    two different facts that happen to earn the same silence. An event with no
+ *    bring list is not a party that forgot.
+ *  - `nobody-said-yes` before the transport, because there is no message to
+ *    send rather than no way to send it.
+ *  - THE TRANSPORT LAST. An instance on the dry run no-ops QUIETLY either way —
+ *    nothing is sent, nothing throws, nothing is logged — but asking last keeps
+ *    the decision visible on an instance with no mail, which is every instance
+ *    between "it builds" and "email works", and is what CI runs against.
+ */
+export function bringListNudgeDecision(
+  plan: BringListNudgeFacts,
+  opts: { now: number, mailConfigured: boolean }
+): BringListNudgeDecision {
+  const counts = { gaps: plan.gaps.length, recipients: plan.recipients.length }
+  const no = (reason: string): BringListNudgeDecision => ({ send: false, reason, ...counts })
+
+  if (plan.status !== 'published') return no(`status-${plan.status}`)
+  if (!plan.startsAt) return no('no-start')
+  if (new Date(plan.startsAt).getTime() <= opts.now) return no('already-started')
+  // The same `startsAt` this ladder has been reading, asked the other question:
+  // not "has it happened" but "is this still when it was due". A `startsAt` that
+  // no longer resolves to a day at all lands here too, which is the same silence
+  // for a reason nobody can act on either.
+  const due = bringListNudgeAt(plan.startsAt, plan.timezone)?.getTime()
+  if (due === undefined || Math.abs(opts.now - due) > NUDGE_DELIVERY_WINDOW_MS) return no('rescheduled')
+  if (plan.itemCount === 0) return no('no-bring-list')
+  if (plan.gaps.length === 0) return no('list-complete')
+  if (plan.recipients.length === 0) return no('nobody-said-yes')
+  if (!opts.mailConfigured) return no('no-mail-transport')
+  return { send: true, reason: null, ...counts }
+}
+
+/** The hour the nudge lands on, on the event's own wall clock. */
+export const NUDGE_HOUR_LOCAL = 18
+
+/**
+ * WHEN THE NUDGE GOES OUT: 18:00 IN THE EVENT'S ZONE, THE DAY BEFORE.
+ *
+ * A fixed offset from the start would put it at 03:00 local for anything that
+ * begins in the morning, and a nudge at 03:00 is worse than no nudge — read too
+ * late to act on, and it wakes somebody up to tell them about bread. So this is
+ * a WALL CLOCK and not a subtraction: the calendar day before the event's own
+ * local day, at 18:00 on that day's clock, which is an evening somebody can
+ * still get to a shop in.
+ *
+ * `zoneDayKey` and `isoFromZonedInput` (#31) do the conversion, so the
+ * daylight-saving cases are already decided and already pinned by
+ * `test/event-timezone.test.ts` rather than re-guessed here: a wall time the
+ * spring shift skips resolves forwards, and one the autumn shift repeats
+ * resolves to the second of the two.
+ *
+ * IT IS ALWAYS BEFORE THE EVENT and needs no clamp to say so: 18:00 on the
+ * local day before is earlier than 00:00 on the local day of, which is not
+ * later than the start. An offset that moved between the two instants changes
+ * that by an hour, never by six.
+ *
+ * Null when there is no start to count back from. A zone `Intl` refuses is not
+ * a second null: both helpers fall back to the viewer's own zone, which on the
+ * server is the container's — the same thing a null zone does, and the same
+ * thing every screen did before #31.
+ */
+export function bringListNudgeAt(
+  startsAt: Date | string | null | undefined,
+  timezone: string | null | undefined
+): Date | null {
+  const day = zoneDayKey(startsAt, timezone)
+  if (!day) return null
+  const [y, m, d] = day.split('-').map(Number)
+  // Through `Date.UTC` rather than string arithmetic, so the first of the month
+  // — and the first of January — roll back properly.
+  const before = new Date(Date.UTC(y!, m! - 1, d! - 1))
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const wall = `${before.getUTCFullYear()}-${pad(before.getUTCMonth() + 1)}-${pad(before.getUTCDate())}`
+    + `T${pad(NUDGE_HOUR_LOCAL)}:00`
+  const iso = isoFromZonedInput(wall, timezone)
+  return iso ? new Date(iso) : null
+}
+
+/**
+ * Everything the nudge needs, in three reads.
+ *
+ * THE EVENT IS RE-READ HERE rather than trusted from the signal, because the
+ * signal was scheduled when the event was published and arrives however many
+ * weeks later — by which time it may have been cancelled, completed or moved.
+ * That re-read is the whole of "cancelling the event cancels the nudge"; the
+ * Inngest function that calls this says why there is nothing else.
+ *
+ * Null only when the event has been deleted out from under the schedule.
+ */
+export async function loadBringListNudge(eventId: string): Promise<BringListNudgePlan | null> {
+  const db = useDb()
+  const [ev] = await db.select().from(tables.event).where(eq(tables.event.id, eventId)).limit(1)
+  if (!ev) return null
+
+  const items = await listContributions(ev.id)
+  const rows = await db
+    .select({ rsvp: tables.rsvp, user: guestUser, invite: tables.invite })
+    .from(tables.rsvp)
+    .leftJoin(guestUser, eq(tables.rsvp.userId, guestUser.id))
+    .leftJoin(tables.invite, eq(tables.rsvp.inviteId, tables.invite.id))
+    .where(eq(tables.rsvp.eventId, ev.id))
+
+  return {
+    eventId: ev.id,
+    status: ev.status,
+    title: ev.title,
+    slug: ev.slug,
+    startsAt: ev.startsAt,
+    endsAt: ev.endsAt,
+    timezone: ev.timezone,
+    location: ev.location,
+    itemCount: items.length,
+    gaps: bringListGaps(items),
+    recipients: nudgeRecipients(rows)
+  }
 }
