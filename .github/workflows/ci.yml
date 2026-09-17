@@ -644,10 +644,23 @@ concurrency:
 # executes something other than an HTTP request. Twelve are ordinary: the
 # manifest and the four icons are served, the manifest is typed
 # `application/manifest+json` rather than as JSON, the apple-touch-icon is a
-# PNG (iOS takes nothing else), and `sw.js` comes back
-# `max-age=0, must-revalidate` — the one header a deploy cannot afford to get
-# wrong, because merging to `main` ships and a long-lived worker script is the
-# single artefact that cannot be reached once it is on somebody's home screen.
+# PNG (iOS takes nothing else), and `sw.js` comes back `no-store` — the one
+# header a deploy cannot afford to get wrong, because merging to `main` ships
+# and a long-lived worker script is the single artefact that cannot be reached
+# once it is on somebody's home screen.
+#
+# `no-store` RATHER THAN A REVALIDATING VALUE, and the difference is the whole
+# reason that check is worth a line. h3 answers a conditional GET 304 when
+# `If-Modified-Since` is satisfied even though the `If-None-Match` it was sent
+# does NOT match — RFC 9110 §13.1.3 says the date must be ignored when an etag
+# is present — and Chrome sends both headers on a worker update check. So a
+# revalidating `sw.js` can be answered off a stale copy and freeze on a phone
+# nobody can reach. Nothing stored means no conditional request, which puts that
+# bug out of reach for the one file where it would hurt. The h3 behaviour itself
+# is server-wide, affects every public asset, is NOT fixed here and is filed
+# separately; reproducing it needs a far-future `If-Modified-Since` (a date the
+# server honours on its own), because the resource's exact `Last-Modified`
+# returns 200 either way and a test built on it proves nothing.
 #
 # EIGHT RUN THE WORKER. curl sends no service worker, so an ordinary check here
 # cannot tell a correct one from a worker that answers every navigation out of
@@ -680,6 +693,14 @@ concurrency:
 # `navigateFallback` is present-and-undefined, which is the one-character edit
 # that turns all of this off with no build error — is `test/pwa-install.test.ts`,
 # which imports the real config object rather than grepping the file. 970 -> 995.
+#
+# THE `no-store` FIX ADDED NO CHECK and the floor did not move for it: it changed
+# what one of the twelve above asserts (`max-age=0` -> `no-store`) rather than
+# adding a thirteenth. A conditional-GET probe WAS considered and rejected —
+# asserting the 304 would pin an h3 bug and go red the day somebody fixes it,
+# and asserting the RFC-correct 200 would be red today. What no check here can
+# see is Kitchen's edge: this suite talks to Nitro directly, so a proxy that
+# rewrote `Cache-Control` would be invisible to it and was measured by hand.
 #
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation

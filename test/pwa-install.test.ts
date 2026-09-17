@@ -48,6 +48,9 @@ const head = config.app?.head as {
   meta?: { name?: string, content?: string }[]
 }
 
+const routeRules = config.nitro?.routeRules as
+  Record<string, { headers?: Record<string, string> }> | undefined
+
 /** The width and height a PNG declares in its IHDR, or `null` if it is not one. */
 function pngSize(file: string): { width: number, height: number } | null {
   const bytes = readFileSync(file)
@@ -108,11 +111,33 @@ describe('a deploy reaches a phone that has zäme on its home screen', () => {
     expect(pwa.client?.periodicSyncForUpdates).toBeGreaterThan(0)
   })
 
-  it('serves sw.js and the manifest with a revalidating Cache-Control', () => {
-    // The module only writes those route rules when this is on. Without them
-    // `sw.js` inherits whatever Nitro gives an unhashed public file, and a
-    // long-lived worker script is the one artefact a deploy cannot reach.
-    expect(pwa.registerWebManifestInRouteRules).toBe(true)
+  it('serves sw.js no-store, so no conditional request is ever made for it', () => {
+    // NOT BELT-AND-BRACES. h3 answers a conditional GET 304 when
+    // `If-Modified-Since` is satisfied even though the `If-None-Match` it was
+    // sent does not match (RFC 9110 §13.1.3 says the recipient MUST ignore the
+    // date when an etag is present), measured through the production edge as
+    // well as locally. Chrome sends both on a worker update check, so a
+    // CACHEABLE sw.js can be frozen on a phone that cannot be reached. With
+    // `no-store` nothing is stored, so no conditional request is made, so the
+    // precedence bug is unreachable for the one file where it would hurt.
+    //
+    // A revalidating value here is NOT good enough and that is the whole point:
+    // `must-revalidate` is what sends the conditional request in the first
+    // place. Asserted as an exact string for that reason.
+    expect(routeRules?.['/sw.js']?.headers?.['Cache-Control']).toBe('no-store')
+  })
+
+  it('writes both route rules by hand rather than letting the module do it', () => {
+    // The module's own rules (`registerWebManifestInRouteRules`) would give
+    // sw.js `public, max-age=0, must-revalidate`. Turning that option back on
+    // without removing the rules above is the edit this pins: the module
+    // assigns over the whole entry, so the hand-written `no-store` would be
+    // replaced and nothing else here would notice.
+    expect(pwa.registerWebManifestInRouteRules).toBe(false)
+    // The manifest keeps its own type; it is served by the same two rules, and
+    // losing this makes the app silently uninstallable on Android.
+    expect(routeRules?.['/manifest.webmanifest']?.headers?.['Content-Type'])
+      .toBe('application/manifest+json')
   })
 })
 

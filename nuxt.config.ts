@@ -72,7 +72,56 @@ export default defineNuxtConfig({
      */
     serverAssets: [
       { baseName: 'contract', dir: '../docs' }
-    ]
+    ],
+
+    /**
+     * THE TWO FILES A PHONE FETCHES BEFORE IT TRUSTS ANYTHING (#39).
+     *
+     * `@vite-pwa/nuxt` will write both of these rules itself when
+     * `registerWebManifestInRouteRules` is on, which is why that option is
+     * explicitly OFF below: it would give `sw.js` `public, max-age=0,
+     * must-revalidate`, and that is one revalidation short of safe here.
+     *
+     * `no-store` ON THE WORKER, and this is not belt-and-braces. h3 answers a
+     * conditional GET **304 when `If-Modified-Since` is satisfied even if the
+     * `If-None-Match` it was sent does not match** — RFC 9110 §13.1.3 says a
+     * recipient MUST ignore `If-Modified-Since` when `If-None-Match` is present,
+     * and this was measured end to end through the production edge, not only
+     * against a local build:
+     *
+     *     wrong etag + far-future If-Modified-Since  ->  304   (RFC says 200)
+     *
+     * Chrome sends BOTH headers on a worker update check, so a cacheable
+     * `sw.js` can be frozen on a phone with no way to reach it. `no-store`
+     * removes the whole class rather than the symptom: nothing is stored, so no
+     * conditional request is ever made, so the precedence bug is unreachable for
+     * the one file where it would hurt. The cost is an unconditional ~18 KB on
+     * registration and once an hour, against 1.13 MiB this already precaches.
+     *
+     * The h3 behaviour itself is NOT fixed here. It is server-wide, it affects
+     * every public asset, and it is filed separately. Today its blast radius is
+     * small because the worker holds only content-addressed build assets — but
+     * #40 and #41 add data caching, and on that day a frozen worker stops being
+     * cosmetic. This is the cheapest moment to close it: the PR that introduces
+     * `sw.js` at all.
+     *
+     * `test/pwa-install.test.ts` reads these two rules back out of this object,
+     * and `scripts/api-smoke.sh` asserts the header on the wire — a route rule
+     * that names a path Nitro never matches is silent, not loud.
+     */
+    routeRules: {
+      '/sw.js': {
+        headers: { 'Cache-Control': 'no-store' }
+      },
+      '/manifest.webmanifest': {
+        headers: {
+          'Content-Type': 'application/manifest+json',
+          // The manifest is precached and re-read on install; revalidating is
+          // right for it, and it is not the file the update flow turns on.
+          'Cache-Control': 'public, max-age=0, must-revalidate'
+        }
+      }
+    }
   },
 
   eslint: {
@@ -115,11 +164,17 @@ export default defineNuxtConfig({
    *    client half reloads the page when it sees the new one take control.
    *    `periodicSyncForUpdates` re-checks hourly, which matters for exactly the
    *    case this issue exists for: an installed app that is never fully closed
-   *    and so never re-registers.
+   *    and so never re-registers. The THIRD half of that flow is a header and
+   *    not an option — `sw.js` is served `no-store`, for the reason written out
+   *    at `nitro.routeRules` above, and without it the update check Chrome makes
+   *    can be answered 304 off a stale copy.
    */
   pwa: {
     registerType: 'autoUpdate',
-    registerWebManifestInRouteRules: true,
+    // OFF on purpose: the module's own rules would give `sw.js` a revalidating
+    // Cache-Control, and it needs `no-store`. Both rules are written by hand in
+    // `nitro.routeRules` above, where the reasoning lives.
+    registerWebManifestInRouteRules: false,
     manifest: {
       name: 'zäme — plan it with your people',
       short_name: 'zäme',

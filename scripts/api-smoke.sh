@@ -4727,7 +4727,14 @@ check "...and the web manifest beside it"        200 "$BASE/manifest.webmanifest
 contains "the manifest is typed as a manifest"   "$(tr -d '\r' < "$MANHDR")" 'application/manifest+json'
 # THE ONE HEADER A DEPLOY CANNOT AFFORD TO GET WRONG. Merging to `main` ships,
 # and a long-lived `sw.js` is the one artefact that cannot be reached afterwards.
-contains "sw.js revalidates rather than sticking" "$(tr -d '\r' < "$SWHDR")" 'max-age=0'
+# `no-store` and not merely a revalidating value: h3 answers a conditional GET
+# 304 when `If-Modified-Since` is satisfied even though the `If-None-Match` it
+# was sent does not match (RFC 9110 §13.1.3 says the date MUST be ignored when
+# an etag is present), and Chrome sends both on a worker update check — so a
+# REVALIDATING sw.js can be answered off a stale copy and freeze on a phone.
+# Nothing stored means no conditional request, which puts that bug out of reach
+# for this one file. The h3 behaviour is server-wide and is filed separately.
+contains "sw.js is never stored, so never revalidated" "$(tr -d '\r' < "$SWHDR")" 'no-store'
 contains "the app installs standalone"           "$MAN" '"display":"standalone"'
 contains "...opening on the home page"           "$MAN" '"start_url":"/"'
 contains "...with a maskable icon for Android"   "$MAN" '"purpose":"maskable"'

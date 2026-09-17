@@ -624,9 +624,27 @@ and by `scripts/api-smoke.sh`, which runs the generated worker through
 
 **It updates itself.** `registerType: 'autoUpdate'` puts `skipWaiting` and
 `clientsClaim` in the worker and a reload-on-activate listener in the client
-bundle, and `sw.js` is served `max-age=0, must-revalidate`. Merging to `main`
-deploys, and a worker that would not update is the one artefact nobody can reach
-once it is on a friend's home screen.
+bundle. Merging to `main` deploys, and a worker that would not update is the one
+artefact nobody can reach once it is on a friend's home screen.
+
+**`sw.js` is served `Cache-Control: no-store`**, and that is a deliberate step
+past "revalidating". h3 answers a conditional GET **304 when `If-Modified-Since`
+is satisfied even though the `If-None-Match` it was sent does not match**, where
+RFC 9110 §13.1.3 requires the date to be ignored whenever an etag is present.
+Chrome sends both headers on a worker update check, so a cacheable `sw.js` can be
+answered off a stale copy and frozen on a phone. `no-store` means nothing is
+stored, so no conditional request is ever made, so the precedence bug is
+unreachable for that one file — the cost is an unconditional ~18 KB on
+registration and once an hour. Note the fix is about the browser never asking:
+the server still answers such a request 304, because **the h3 behaviour is not
+fixed here.** It is server-wide, affects every public asset, and is tracked
+separately. To reproduce it you need a *far-future* `If-Modified-Since` — a date
+the server honours on its own — because the resource's own `Last-Modified` yields
+200 either way and a test built on that value proves nothing.
+
+Both that rule and the manifest's `application/manifest+json` are written by hand
+in `nitro.routeRules`; `@vite-pwa/nuxt`'s `registerWebManifestInRouteRules` is
+off, because it would assign its own revalidating value over the top.
 
 **A plain HTTP client is unaffected by any of it.** A service worker exists only
 inside a browser that registered it; `curl` sends none, so `curl /` and
