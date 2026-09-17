@@ -217,7 +217,10 @@ provenance headers in one reviewable document.
 - [ ] Self-hosting documentation beyond `README.md` / `ARCHITECTURE.md`
 - [ ] Database backup guidance
 - [ ] Generated OG images (today the event's own poster is used)
-- [ ] PWA manifest + a mobile-optimised RSVP flow
+- [x] PWA manifest, icons and a service worker — installable to a home screen, and
+      it updates itself on a deploy (#39). The worker precaches build assets only;
+      every navigation still goes to the network, so invite pages stay SSR'd.
+- [ ] A mobile-optimised RSVP flow (the other half of the old "PWA" line)
 - [ ] i18n foundation (DE / EN / FR — Swiss multilingual)
 
 **Dropped.** A production `Dockerfile` and a `compose.prod.yml` with a reverse-proxy

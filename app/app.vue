@@ -34,6 +34,14 @@ async function handleSignOut() {
 
 <template>
   <UApp>
+    <!--
+      Emits `<link rel="manifest">` into the SSR'd head, on every page. It is
+      here rather than in `nuxt.config.ts` so the href names the manifest THIS
+      BUILD wrote rather than a path repeated by hand, and it is on every page
+      rather than only the home page: most people meet zäme on an invite link,
+      and that is where they would install it from.
+    -->
+    <NuxtPwaManifest />
     <div class="min-h-screen flex flex-col">
       <header class="border-b border-default">
         <div class="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
