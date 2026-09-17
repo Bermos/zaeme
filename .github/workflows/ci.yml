@@ -624,11 +624,27 @@ concurrency:
 # and the call sites in `BringListSuggest.vue` and the host page pinned in
 # `<script setup>` as well as in `<template>`. 911 -> 968.
 #
+# AND 2 ARE THE BACKGROUND JOBS THE BUILT SERVER SERVES (#46). They are the
+# whole of what this suite can say about the night-before bring-list nudge, and
+# the shortfall is structural rather than an omission: the nudge is an Inngest
+# function delivered by a signal with a future `ts`, so there is no route to
+# curl and no Inngest server in CI to deliver one. Its arithmetic, its
+# recipients, its timing and all seven of its refusals — the cancelled event
+# among them — are executed by `test/bring-list-nudge.test.ts` instead.
+#
+# What the two DO prove is the half vitest cannot reach: `GET /api/inngest`
+# answers, and the running process reports `"function_count":5`. That is the
+# manifest read off the built server — a job written but never added to the
+# hand-written array in `server/inngest/index.ts` is served by nothing, and the
+# domain and email modules it pulls in are only proved to RESOLVE AT BOOT by
+# booting. The count is exact so that a sixth function has to come past this
+# line. 968 -> 970.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '968'
+  MIN_SMOKE_CHECKS: '970'
 
 jobs:
   ci:

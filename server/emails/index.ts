@@ -4,6 +4,7 @@ import { InviteEmail, type InviteEmailProps } from './templates/invite'
 import { RsvpConfirmationEmail, type RsvpConfirmationEmailProps } from './templates/rsvp-confirmation'
 import { EventReminderEmail, type EventReminderEmailProps } from './templates/event-reminder'
 import { EventCancelledEmail, type EventCancelledEmailProps } from './templates/event-cancelled'
+import { BringListNudgeEmail, type BringListNudgeEmailProps } from './templates/bring-list-nudge'
 import { MagicLinkEmail, type MagicLinkEmailProps } from './templates/magic-link'
 
 /**
@@ -22,6 +23,7 @@ export type {
   RsvpConfirmationEmailProps,
   EventReminderEmailProps,
   EventCancelledEmailProps,
+  BringListNudgeEmailProps,
   MagicLinkEmailProps
 }
 
@@ -41,6 +43,10 @@ export function renderEventReminderEmail(props: EventReminderEmailProps): Render
 
 export function renderEventCancelledEmail(props: EventCancelledEmailProps): Rendered {
   return renderEmail(React.createElement(EventCancelledEmail, props))
+}
+
+export function renderBringListNudgeEmail(props: BringListNudgeEmailProps): Rendered {
+  return renderEmail(React.createElement(BringListNudgeEmail, props))
 }
 
 export function renderMagicLinkEmail(props: MagicLinkEmailProps): Rendered {
