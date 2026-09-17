@@ -74,5 +74,10 @@ batch of issues through subagents; the roles it dispatches — `implementer`,
 in `.claude/agent-memory/<name>/MEMORY.md`, which is checked in and grows with each
 run. It is adapted from the same skill in `Bermos/Kitchen`, with the parts that are
 this repo's own: merging to `main` deploys (there is no release to hold), a `/api/v1`
-change is unfinished until Enterprise's vendored spec has moved, and the two smoke
-scripts run nowhere but a person's terminal.
+change is unfinished until Enterprise's vendored spec has moved, and `pnpm
+smoke:passkey` runs nowhere but a person's terminal. **`pnpm smoke:api` is not in
+that category and has not been since #63/#64** — CI runs it in the `api` job and
+twice more in `upgrade`, against a built server on a real Postgres, and enforces
+`MIN_SMOKE_CHECKS` as an exact floor. Saying otherwise understates what a green
+PR has already proved, which is the kind of mistake that makes an agent trust the
+suite less than it has earned.
