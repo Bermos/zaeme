@@ -862,6 +862,18 @@ const TYPE_BADGES: Record<string, string> = { party: '🥳 party', trip: '🧳 t
               Add
             </UButton>
           </form>
+
+          <!--
+            NOBODY KNOWS WHAT A POTLUCK FOR TWELVE NEEDS (#45). It opens by
+            itself while the list is empty or thin and sits behind a button
+            afterwards; the panel decides that from `itemCount`, which is why
+            the count is passed rather than a boolean computed here.
+          -->
+          <BringListSuggest
+            :slug="slug"
+            :item-count="data.contributions.length"
+            @updated="() => refresh()"
+          />
         </div>
       </UCard>
 

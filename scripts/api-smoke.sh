@@ -263,6 +263,138 @@ bring_id() {
     })' "$2"
 }
 
+# `bring_copies <body> <title>` — HOW MANY items on the list carry that title
+# (#45). `bring_state` cannot answer this: it finds the FIRST match, so a list
+# holding two Wines reads exactly like a list holding one, and "applying twice
+# does not duplicate" is the acceptance criterion that failure mode is aimed at.
+# `unparseable` rather than `0`, so a dead server does not read as a clean list.
+bring_copies() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const list = Array.isArray(b) ? b : (b.contributions ?? (b.contribution ? [b.contribution] : []))
+      process.stdout.write(String(list.filter(x => x && x.title === process.argv[1]).length))
+    })' "$2"
+}
+
+# `suggest_state <body>` — the whole envelope of a bring-list SUGGESTION as one
+# string: `source/headcount/itemCount/reason-or-none` (#45), e.g.
+# `static/12/6/none` for a party of twelve and `static/0/0/reason` for a gig.
+#
+# One `equals` rather than four `contains`, for the reason `bring_state` exists:
+# a needle on `"headcount":12` says nothing about whether any item was scaled by
+# it, and a needle on `"reason":` is satisfied by `"reason":null`. The fourth
+# field is the rule the whole feature rests on — ITEMS OR A REASON, NEVER
+# NEITHER — so `0/none` is the shape of a dead control and no type may print it.
+suggest_state() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const g = b.suggestion
+      if (!g) return process.stdout.write("no-suggestion")
+      process.stdout.write([
+        g.source,
+        g.headcount,
+        (g.items ?? []).length,
+        g.reason ? "reason" : "none"
+      ].join("/"))
+    })'
+}
+
+# `source_items <body> <slug>` — how many bring-list items the named event
+# offers to be copied from, or `no-such-source` when it is not offered at all
+# (#45). A `contains` on `"itemCount":2` is satisfied by ANY source with two
+# items, which on a re-run is every previous run's fixture; this ties the number
+# to the event whose number is being asserted, and answers the negative half —
+# "an upcoming party is not one you have run" — with a string that cannot also
+# mean "the list came back empty".
+source_items() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const hit = (b.sources ?? []).find(x => x && x.slug === process.argv[1])
+      process.stdout.write(hit ? String(hit.itemCount) : "no-such-source")
+    })' "$2"
+}
+
+# `bring_quantity <body> <title>` / `suggest_quantity <body> <title>` — the
+# FREE-TEXT amount on a named item, on a written list and on a preview (#45).
+#
+# `bring_state` cannot answer this and that is exactly how a review found the
+# copy dropping the column: it reports `quantity_needed`, the COUNT, and the
+# free text beside it ("two big bowls", "for 8 people") is a different column
+# that most real bring lists carry instead. The original copy fixture held one
+# item with a count and one with neither, so the two cases where the free text
+# is empty anyway — green over a column that never arrived.
+#
+# `none` for null and `no-such-item` for absent, because "this item has no
+# free-text amount" and "this item is not on the list" are the two answers a
+# dropped column can wear.
+bring_quantity() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const list = Array.isArray(b) ? b : (b.contributions ?? (b.contribution ? [b.contribution] : []))
+      const item = list.find(x => x && x.title === process.argv[1])
+      if (!item) return process.stdout.write("no-such-item")
+      process.stdout.write(item.quantity === null || item.quantity === undefined ? "none" : String(item.quantity))
+    })' "$2"
+}
+
+suggest_quantity() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const item = (b.suggestion?.items ?? []).find(x => x && x.title === process.argv[1])
+      if (!item) return process.stdout.write("no-such-item")
+      process.stdout.write(item.quantity === null || item.quantity === undefined ? "none" : String(item.quantity))
+    })' "$2"
+}
+
+# `suggest_body <body>` — a preview turned into the POST body that applies it,
+# VERBATIM (#45). The copy check applies what the server actually offered rather
+# than a hand-written stand-in, and the difference is the whole point: a
+# hand-written body cannot carry a field the preview should never have had, so
+# "the copy brings the claims across" would leave it green while the claims
+# rode through. Anything the preview leaks is posted here, and whether it lands
+# is then the schema's answer and the domain's, asserted afterwards.
+suggest_body() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("{\"items\":[]}") }
+      process.stdout.write(JSON.stringify({ items: b.suggestion?.items ?? [] }))
+    })'
+}
+
+# `suggest_count <body> <title>` — the count proposed for one named line of a
+# suggestion. `none` for a line that proposes no count at all (a copied
+# free-text item), which must not print the same string as a count of zero.
+suggest_count() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const item = (b.suggestion?.items ?? []).find(x => x && x.title === process.argv[1])
+      if (!item) return process.stdout.write("no-such-item")
+      process.stdout.write(item.quantityNeeded === null || item.quantityNeeded === undefined
+        ? "none"
+        : String(item.quantityNeeded))
+    })' "$2"
+}
+
 # `expense_id <body> <title>` — the id of the named entry, from a budget or from
 # the single expense a /api/v1 write answers with. `no-such-entry` and not an
 # empty string, because an empty one turns `…/expenses/$ID` into `…/expenses/`,
@@ -1151,6 +1283,234 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   equals "...wanted by four, brought by nobody"    "$(bring_state "$(body -H "Cookie: $ZAEME_TEST_SESSION_COOKIE" "$BASE/api/host/events/$BLSLUG")" 'Salad')" "4/0/4/open/nobody"
 else
   echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
+
+echo
+echo "== suggesting a whole bring list (Bermos/zaeme#45) =="
+# NOBODY KNOWS WHAT A POTLUCK FOR TWELVE NEEDS. One tap on an empty list, a
+# static set scaled to the yes-RSVPs, edited before it is applied — and a copy
+# of a past event of the same type, which brings the items and NOT the claims.
+#
+# THE WHOLE FEATURE IS ON THE HOST SURFACE, so every check here needs the
+# planner's cookie: `/api/v1` gained no verb for this (Enterprise generates its
+# tools from the contract, and a suggestion is a person's gesture, not a
+# machine's), and the invite link must not be able to reach it at all.
+#
+# WHAT THESE PROVE THAT VITEST CANNOT. `test/bring-list-suggestions.test.ts`
+# executes the arithmetic and the duplicate rule as pure functions — that is
+# where "four people and twelve do not get the same list" lives. What it cannot
+# see is a handler that ignores the body it was sent, a second apply that writes
+# a second Wine, or a copy that carries somebody else's name across. Those need
+# rows in Postgres and are proved here or nowhere.
+#
+# IT MINTS EVERY EVENT IT USES, because this suite re-runs against the rows the
+# last run left behind, and a suggestion's counts are exact.
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
+  HOST_COOKIE=(-H "Cookie: $ZAEME_TEST_SESSION_COOKIE")
+
+  # ---- a party of twelve, which is the issue's own example ----
+  SGP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke suggest party $SUFFIX\",\"type\":\"party\",\"startsAt\":\"2027-08-14T20:00:00+02:00\"}")
+  SGSLUG=$(printf '%s' "$SGP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGSLUG/status" -d '{"status":"published"}' > /dev/null
+  SGTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGSLUG/invites" -d '{"label":"Suggest smoke"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  SGGET="$BASE/api/host/events/$SGSLUG/contributions/suggestions"
+  echo "  party: $SGSLUG"
+
+  # TWELVE HEADS, as six friends each bringing somebody — so a scaler that
+  # counted RSVP ROWS rather than people would answer 6 and every count below
+  # would halve.
+  for i in 1 2 3 4 5 6; do
+    body "${JSON[@]}" -X POST "$BASE/api/invites/$SGTOK/rsvp" \
+      -d "{\"status\":\"yes\",\"plusOne\":true,\"plusOneName\":\"Plus $i\",\"guestName\":\"Yes $i\",\"guestEmail\":\"yes$i-45-$SUFFIX@example.com\"}" > /dev/null
+  done
+  # AND THREE WHO ARE NOT EATING, each with a +1 of their own so that counting
+  # them would be visible rather than marginal: a maybe is a judgement the host
+  # makes, a no is a no, and "cheering from afar" is somebody who is not in the
+  # room. `summariseRsvps().headcount` counts the last of those and is
+  # deliberately not what this feature asks.
+  for s in maybe no cheering; do
+    body "${JSON[@]}" -X POST "$BASE/api/invites/$SGTOK/rsvp" \
+      -d "{\"status\":\"$s\",\"plusOne\":true,\"guestName\":\"Not $s\",\"guestEmail\":\"$s-45-$SUFFIX@example.com\"}" > /dev/null
+  done
+
+  SUG=$(body "${HOST_COOKIE[@]}" "$SGGET")
+  equals "a party of twelve, from the yes-RSVPs alone" "$(suggest_state "$SUG")" "static/12/6/none"
+  equals "...wants six bottles of wine"            "$(suggest_count "$SUG" 'Wine')" "6"
+  equals "...twenty-four beers"                    "$(suggest_count "$SUG" 'Beer')" "24"
+  equals "...three bags of ice"                    "$(suggest_count "$SUG" 'Ice')" "3"
+  equals "...and eighteen cups"                    "$(suggest_count "$SUG" 'Cups')" "18"
+  excludes "nothing is written by looking"         "$(body "${HOST_COOKIE[@]}" "$BASE/api/host/events/$SGSLUG")" '"title":"Wine"'
+
+  # ---- THE TYPES THE ISSUE LEFT OUT, which include the DEFAULT ----
+  # `hosted` is what an event created without a type is, and what every showing
+  # of a series is (`scheduleOccurrence` inserts it). Under the issue as written
+  # — party, series and trip named, `hosted` and `concert` not — the commonest
+  # event on any instance would get a one-tap button that does nothing.
+  HSLUG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke suggest hosted $SUFFIX\",\"startsAt\":\"2027-08-15T19:00:00+02:00\"}" \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  HSUG=$(body "${HOST_COOKIE[@]}" "$BASE/api/host/events/$HSLUG/contributions/suggestions")
+  equals "the DEFAULT type suggests a real list"   "$(suggest_state "$HSUG")" "static/0/4/none"
+  equals "...at each line's minimum while nobody has said yes" "$(suggest_count "$HSUG" 'Something sweet')" "4"
+
+  # A gig gets a SENTENCE, not an empty box: there is nothing to bring, and
+  # `0/none` — no items and no reason — is the shape of a dead control.
+  CSLUG=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke suggest gig $SUFFIX\",\"type\":\"concert\",\"startsAt\":\"2027-08-16T20:00:00+02:00\"}" \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  CSUG=$(body "${HOST_COOKIE[@]}" "$BASE/api/host/events/$CSLUG/contributions/suggestions")
+  equals "a gig has no items AND says why not"     "$(suggest_state "$CSUG")" "static/0/0/reason"
+  contains "...in words a screen can show"         "$CSUG" 'nothing to bring to a gig'
+
+  # ---- a trip, and the item that does not scale ----
+  SGTRIP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke suggest trip $SUFFIX\",\"type\":\"trip\",\"startsAt\":\"2020-02-11T09:00:00+01:00\"}" \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  TSUG=$(body "${HOST_COOKIE[@]}" "$BASE/api/host/events/$SGTRIP/contributions/suggestions")
+  equals "a trip suggests breakfast and a corkscrew" "$(suggest_state "$TSUG")" "static/0/5/none"
+  equals "...one corkscrew, which is not per person" "$(suggest_count "$TSUG" 'A corkscrew')" "1"
+  check "the trip takes a bring-list item"         201 "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGTRIP/contributions" \
+    -d '{"title":"Hiking snacks","category":"food"}'
+
+  # ---- applying it, editing it, and applying it AGAIN ----
+  # THE BODY IS THE HOST'S, not the suggestion's: two of the six lines, one of
+  # them at a count the GET never proposed. A handler that re-derived the
+  # suggestion instead of writing what it was sent passes every check above and
+  # fails these.
+  APP=$(body "${HOST_COOKIE[@]}" "${JSON[@]}" -X POST "$SGGET" \
+    -d '{"items":[{"title":"Wine","category":"drink","unit":"bottles","quantityNeeded":4},{"title":"Ice","category":"other","unit":"bags","quantityNeeded":3}]}')
+  contains "the host applies the two lines they kept" "$APP" '"added":2'
+  equals "...at the count THEY typed, not the suggested six" "$(bring_state "$APP" 'Wine')" "4/0/4/open/nobody"
+  equals "...and the other four lines were not written" "$(bring_state "$APP" 'Beer')" "no-such-item"
+
+  # APPLYING TWICE MUST NOT DUPLICATE — an acceptance criterion, and the one
+  # `bring_state` alone cannot see: it finds the first match, so two Wines read
+  # exactly like one. `bring_copies` counts them.
+  APP2=$(body "${HOST_COOKIE[@]}" "${JSON[@]}" -X POST "$SGGET" \
+    -d '{"items":[{"title":"Wine","category":"drink","unit":"bottles","quantityNeeded":6},{"title":"Ice","category":"other","unit":"bags","quantityNeeded":3}]}')
+  contains "applying the same list again adds nothing" "$APP2" '"added":0'
+  contains "...and says which lines it left alone"  "$APP2" '"skipped":["Wine","Ice"]'
+  equals "...there is still exactly ONE Wine"       "$(bring_copies "$APP2" 'Wine')" "1"
+  equals "...and its count is the host's 4, not re-stated as 6" "$(bring_state "$APP2" 'Wine')" "4/0/4/open/nobody"
+
+  # The same thing typed differently is the same thing to ask somebody for.
+  APP3=$(body "${HOST_COOKIE[@]}" "${JSON[@]}" -X POST "$SGGET" \
+    -d '{"items":[{"title":"  wine  ","quantityNeeded":99},{"title":"Crisps and nuts","category":"food","unit":"bowls","quantityNeeded":6}]}')
+  contains "a differently-typed title is a duplicate" "$APP3" '"skipped":["  wine  "]'
+  equals "...so there is still one Wine, at four"   "$(bring_copies "$APP3" 'Wine')" "1"
+  equals "...while the genuinely new line lands"    "$(bring_state "$APP3" 'Crisps and nuts')" "6/0/6/open/nobody"
+
+  # ---- copying a past party: THE ITEMS, AND NOT THE CLAIMS ----
+  SGPASTBODY=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke last party $SUFFIX\",\"type\":\"party\",\"startsAt\":\"2020-03-07T20:00:00+01:00\"}")
+  SGPAST=$(printf '%s' "$SGPASTBODY" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGPAST/status" -d '{"status":"published"}' > /dev/null
+  PTOK=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGPAST/invites" -d '{"label":"Last party"}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGPAST/contributions" \
+    -d '{"title":"Sangria","category":"drink","quantityNeeded":4,"unit":"jugs"}' > /dev/null
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGPAST/contributions" -d '{"title":"Candles","category":"other"}' > /dev/null
+  # THE ITEM MOST REAL BRING LISTS ARE MADE OF, and the one this fixture was
+  # missing: a FREE-TEXT amount and no count at all. Sangria has a count and
+  # Candles has neither, so both were cases where `quantity` is empty anyway —
+  # which is how a copy that dropped the column stayed green over it.
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGPAST/contributions" \
+    -d '{"title":"Olives","category":"food","quantity":"two big bowls"}' > /dev/null
+  SAID=$(bring_id "$(body "${AUTH[@]}" "$API/events/$SGPAST/contributions")" 'Sangria')
+  check "somebody claimed the sangria last time"   200 "${JSON[@]}" -X POST "$BASE/api/invites/$PTOK/contributions/$SAID/claim" \
+    -d "{\"guestName\":\"Ada\",\"guestEmail\":\"ada-45-$SUFFIX@example.com\",\"quantity\":4}"
+  equals "...so that list is a claimed one"         "$(bring_state "$(body "${AUTH[@]}" "$API/events/$SGPAST/contributions")" 'Sangria')" "4/4/0/done/ada-45-$SUFFIX@example.com"
+
+  # A PARTY THAT HAS NOT HAPPENED YET, with a list on it, so that "a host who
+  # has RUN a party before" is asserted against a fixture where the wrong answer
+  # differs from the right one. Without this the past filter is unfalsifiable:
+  # every other event in this block is excluded by its type or by being this one.
+  SGUP=$(body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events" \
+    -d "{\"title\":\"Smoke next party $SUFFIX\",\"type\":\"party\",\"startsAt\":\"2031-06-06T20:00:00+02:00\"}" \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGUP/contributions" -d '{"title":"Fireworks"}' > /dev/null
+
+  SGSRC=$(body "${HOST_COOKIE[@]}" "$SGGET")
+  equals "the past party is offered, with its size"  "$(source_items "$SGSRC" "$SGPAST")" "3"
+  equals "a party that has not happened yet is not"  "$(source_items "$SGSRC" "$SGUP")" "no-such-source"
+  equals "...nor is a TRIP with a list on it"        "$(source_items "$SGSRC" "$SGTRIP")" "no-such-source"
+  equals "...nor this event itself"                  "$(source_items "$SGSRC" "$SGSLUG")" "no-such-source"
+
+  # THE FIXTURE ITSELF, PINNED. Every assertion below about the free text is
+  # satisfied by "the source never had any", so the source is asserted first.
+  equals "last year's list carried a free-text amount" "$(bring_quantity "$(body "${AUTH[@]}" "$API/events/$SGPAST/contributions")" 'Olives')" "two big bowls"
+
+  COPY=$(body "${HOST_COOKIE[@]}" "$SGGET?from=$SGPAST")
+  equals "copying it previews that evening's items" "$(suggest_state "$COPY")" "event/12/3/none"
+  equals "...with the count that was on them"       "$(suggest_count "$COPY" 'Sangria')" "4"
+  equals "...and a free-text item stays free text"  "$(suggest_count "$COPY" 'Candles')" "none"
+  # …AND THE FREE TEXT COMES WITH IT. "Brings the items" is not "brings the
+  # titles": on a list made of "Crisps — two big bowls" this column is where the
+  # amount lives, and dropping it produced a column of bare nouns that only the
+  # GUESTS could see — `BringList.vue` renders it, the host page does not.
+  equals "...and the free-text AMOUNT comes across"  "$(suggest_quantity "$COPY" 'Olives')" "two big bowls"
+  equals "...while a scaled line states a number instead" "$(suggest_quantity "$SUG" 'Wine')" "none"
+  excludes "...and NOT the person who claimed it"   "$COPY" "ada-45-$SUFFIX"
+  excludes "...nor a claims array at all"           "$COPY" '"claims"'
+
+  # THE PREVIEW IS APPLIED VERBATIM, not re-typed here: a hand-written body
+  # cannot carry a field the preview should never have had, so a leak would ride
+  # through it invisibly.
+  CAP=$(body "${HOST_COOKIE[@]}" "${JSON[@]}" -X POST "$SGGET" -d "$(suggest_body "$COPY")")
+  contains "the copy lands as ordinary items"       "$CAP" '"added":3'
+  equals "...and the sangria arrives UNCLAIMED"     "$(bring_state "$CAP" 'Sangria')" "4/0/4/open/nobody"
+  equals "...and the free-text item has no count"   "$(bring_state "$CAP" 'Candles')" "none/0/none/open/nobody"
+  # WRITTEN, not merely previewed — the half a preview assertion cannot reach.
+  equals "...and the amount is on the WRITTEN row"  "$(bring_quantity "$CAP" 'Olives')" "two big bowls"
+  # …and it did not become a count on the way: the two columns are not the same
+  # answer, and a free-text amount silently read as a number would make "two big
+  # bowls" an item somebody has to finish.
+  equals "...and did not turn into a count"         "$(bring_state "$CAP" 'Olives')" "none/0/none/open/nobody"
+  equals "...while LAST year's list still has its claim" "$(bring_state "$(body "${AUTH[@]}" "$API/events/$SGPAST/contributions")" 'Sangria')" "4/4/0/done/ada-45-$SUFFIX@example.com"
+
+  # ---- the refusals ----
+  check "a trip's list does not fit a party"       422 "${HOST_COOKIE[@]}" "$SGGET?from=$SGTRIP"
+  check "...nor does this event's own list"        422 "${HOST_COOKIE[@]}" "$SGGET?from=$SGSLUG"
+  check "...nor a slug that is not an event"       404 "${HOST_COOKIE[@]}" "$SGGET?from=no-such-event-at-all"
+  check "an empty list of items is refused"        400 "${HOST_COOKIE[@]}" "${JSON[@]}" -X POST "$SGGET" -d '{"items":[]}'
+  check "a count of zero is refused"               400 "${HOST_COOKIE[@]}" "${JSON[@]}" -X POST "$SGGET" -d '{"items":[{"title":"Nothing","quantityNeeded":0}]}'
+  check "an item with no title is refused"         400 "${HOST_COOKIE[@]}" "${JSON[@]}" -X POST "$SGGET" -d '{"items":[{"quantityNeeded":2}]}'
+
+  # ---- and the credential, in both directions ----
+  # A suggestion is a planner's gesture on the host session. The service token
+  # has no verb for it (nothing was added to `/api/v1`), and the capability URL
+  # — which any guest holds — must not reach a route that writes a whole list.
+  check "the service token cannot suggest"         401 "${AUTH[@]}" "$SGGET"
+  check "...nor apply"                             401 "${AUTH[@]}" "${JSON[@]}" -X POST "$SGGET" -d '{"items":[{"title":"X"}]}'
+  check "no credential at all is 401"              401 "$SGGET"
+  check "the invite link has no such route"        404 "$BASE/api/invites/$SGTOK/contributions/suggestions"
+else
+  echo "  skip  set ZAEME_TEST_SESSION_COOKIE to the planner's session to run these"
+fi
+
+if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ] && [ -n "${ZAEME_TEST_GUEST_COOKIE:-}" ]; then
+  # COPYING IS A READ OF SOMEBODY ELSE'S EVENT, so the planner has to be a
+  # planner THERE too. Without that check any slug on the instance would hand
+  # over its bring list to anybody who could name it — and a bring list carries
+  # what a group eats, drinks and has trouble with.
+  #
+  # The direction matters: an event created through `/api/host/events` attaches
+  # the INSTANCE OWNER as a co-planner (ADR-0019 §4), so the owner legitimately
+  # reaches the other account's events. The party minted above through `/api/v1`
+  # has exactly one planner, and the second account is not it.
+  OGP=$(body -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "${JSON[@]}" -X POST "$BASE/api/host/events" \
+    -d "{\"title\":\"Smoke other party $SUFFIX\",\"type\":\"party\",\"startsAt\":\"2027-09-02T20:00:00+02:00\"}")
+  OGSLUG=$(printf '%s' "$OGP" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+  OGGET="$BASE/api/host/events/$OGSLUG/contributions/suggestions"
+  check "another host suggests on their OWN party" 200 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "$OGGET"
+  check "...but cannot copy a list they do not plan" 403 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "$OGGET?from=$SGSLUG"
+  check "...and cannot suggest on somebody else's" 403 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "$SGGET"
+  check "...nor apply to it"                       403 -H "Cookie: $ZAEME_TEST_GUEST_COOKIE" "${JSON[@]}" \
+    -X POST "$SGGET" -d '{"items":[{"title":"Uninvited"}]}'
+else
+  echo "  skip  set both ZAEME_TEST_SESSION_COOKIE and ZAEME_TEST_GUEST_COOKIE to run these"
 fi
 
 echo
