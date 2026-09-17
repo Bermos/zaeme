@@ -31,7 +31,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { contributionTally, remainderLine } from '../shared/utils/bring-list'
+import { claimFieldDefault, claimFieldMax, contributionTally, remainderLine } from '../shared/utils/bring-list'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 const ROOT = join(HERE, '..')
@@ -125,8 +125,84 @@ describe('the sentence a screen puts under the title', () => {
   })
 })
 
+describe('the number field beside an item', () => {
+  /**
+   * THE BUG THIS BLOCK EXISTS FOR, caught in review and destructive on the
+   * guest surface. The same button creates a claim and edits one, so seeding
+   * the field with the REMAINDER for somebody who already holds a claim turns
+   * "Change" into "silently give some of it back".
+   *
+   * Six bottles, Ada 3, Bo 2 — remaining 1. Ada's badge says "You (3)". If the
+   * field says 1, one tap on a button labelled "Change" takes her to 1 and two
+   * bottles the party is counting on vanish, with no confirmation and no undo.
+   */
+  it('starts at the viewer\'s OWN claim, not at what is left', () => {
+    expect(claimFieldDefault(1, 3)).toBe(3)
+    // …and the tap is therefore a no-op, which is what a control that says
+    // "Change" must be when nothing was changed.
+    expect(claimFieldDefault(1, 3)).not.toBe(1)
+  })
+
+  it('starts at the remainder for somebody who holds no claim', () => {
+    // The original behaviour, and still right for the person this field was
+    // designed for: one tap finishes an item off.
+    expect(claimFieldDefault(2, undefined)).toBe(2)
+  })
+
+  it('starts at 1 when there is nothing left and nothing held', () => {
+    expect(claimFieldDefault(0, undefined)).toBe(1)
+    expect(claimFieldDefault(null, undefined)).toBe(1)
+  })
+
+  it('offers a claimer their own claim back on a FINISHED item', () => {
+    // Remaining is 0 once the need is met, and lowering her own number is the
+    // only way to re-open the item without releasing it outright.
+    expect(claimFieldDefault(0, 6)).toBe(6)
+  })
+
+  it('lets a claimer raise themselves back up to what nobody else holds', () => {
+    // THE SAME MISTAKE IN THE OTHER DIRECTION. The remainder EXCLUDES the
+    // viewer's own claim, so capping the field at it refused Ada 3 -> 4 while
+    // the server accepted it happily. Six wanted, Bo holds 2: her ceiling is 4.
+    expect(claimFieldMax(1, 3)).toBe(4)
+  })
+
+  it('caps a non-claimer at the remainder', () => {
+    expect(claimFieldMax(2, undefined)).toBe(2)
+  })
+
+  it('never returns a maximum below the minimum of 1', () => {
+    // `:min="1"` is on the same input, and a max under it is a field nobody can
+    // satisfy.
+    expect(claimFieldMax(0, undefined)).toBe(1)
+    expect(claimFieldMax(null, undefined)).toBe(1)
+  })
+})
+
 /* ------------------------ the screens that render it ---------------------- */
 
+/**
+ * WHAT EVERY ASSERTION BELOW IS, SAID PLAINLY: a string match over source text.
+ * Nothing in this repository executes a `.vue` file — there is no component
+ * runner, no jsdom, no browser — so **no test here covers the rendered screen**,
+ * and none of these can fail because something looked wrong. They prove a line
+ * is WRITTEN. What executes it is a person's browser.
+ *
+ * That is a real limit and it has been measured rather than guessed: a reviewer
+ * landed three mutations against an earlier version of this block and all three
+ * left the suite green — `@update:model-value="amount[c.id] = 0"` (the number
+ * field becomes decorative and every claim is the remainder whatever is typed),
+ * `countLine` returning null once anybody claims, and `myClaim` short-circuited
+ * to false. Each survived because the assertion matched a SUBSTRING that the
+ * mutation left intact.
+ *
+ * Two things changed in response. The pre-fill and the cap moved into
+ * `shared/utils/bring-list.ts`, where the block above EXECUTES them — that is
+ * the only real coverage of the rule most likely to be got wrong. And the
+ * matches below pin WHOLE one-line definitions, anchored to the end of the
+ * line, so a mutation that adds a condition to one no longer matches. That
+ * closes those three; it does not turn a grep into a test.
+ */
 const sfc = (...parts: string[]) => readFileSync(join(ROOT, 'app', ...parts), 'utf8')
 const template = (src: string) => /<template>([\s\S]*)<\/template>/.exec(src)?.[1] ?? ''
 const script = (src: string) =>
@@ -139,11 +215,14 @@ describe('the guest bring list', () => {
     const body = script(sfc('components', 'BringList.vue'))
     expect(body, 'BringList has a <script setup> block to read').not.toBe('')
 
-    // PINNED VERBATIM, because every wrong version of this line type-checks.
-    // `remainderLine(c.quantityNeeded, c.unit, [])` renders "0 claimed, 6 to
-    // go" over an item four people are already bringing, and leaves eslint,
-    // `nuxt typecheck` and the whole suite green.
-    expect(body).toMatch(/remainderLine\(c\.quantityNeeded, c\.unit, c\.claims\)/)
+    // THE WHOLE DEFINITION, anchored to the end of the line. Matching the
+    // `remainderLine(...)` call alone was not enough: a reviewer's mutation
+    // made this `c.claims.length ? null : remainderLine(...)` — the count
+    // disappears the moment anybody claims, which is when it starts mattering —
+    // and the substring was still there, so the suite stayed green.
+    expect(body).toMatch(
+      /^const countLine = \(c: Contribution\) => remainderLine\(c\.quantityNeeded, c\.unit, c\.claims\)$/m
+    )
     // …and the screen does NOT do the arithmetic a second time beside it. Two
     // copies of this rule is two screens able to disagree about one row.
     expect(body).not.toMatch(/quantityNeeded\s*-\s*/)
@@ -155,10 +234,24 @@ describe('the guest bring list', () => {
     // number field decorative: every claim is for one whatever it says, so six
     // bottles needs six taps and the field lies about what it did.
     expect(body).toMatch(/quantity: wanted\(c\)/)
-    // The default is the remainder — one tap finishes an item off — and it
-    // falls back to 1 for an item with no count, which is what a claim there
-    // has always been.
-    expect(body).toMatch(/amount\[c\.id\] \|\| c\.quantityRemaining \|\| 1/)
+    // THE PRE-FILL IS THE SHARED FUNCTION AND NOT AN EXPRESSION HERE, which is
+    // what makes the rule testable at all — the version this replaced,
+    // `amount[c.id] || c.quantityRemaining || 1`, seeded an existing claimer's
+    // field with the REMAINDER and turned one tap on "Change" into a silent
+    // partial release. The arithmetic is executed in the block above; this pins
+    // that the screen asks for it, and passes the viewer's own claim in.
+    expect(body).toMatch(
+      /^const wanted = \(c: Contribution\) => amount\[c\.id\] \|\| claimFieldDefault\(c\.quantityRemaining, myClaim\(c\)\?\.quantityClaimed\)$/m
+    )
+    expect(body).toMatch(
+      /^const maxFor = \(c: Contribution\) => claimFieldMax\(c\.quantityRemaining, myClaim\(c\)\?\.quantityClaimed\)$/m
+    )
+    // AND THE FIELD WRITES WHAT WAS TYPED. `amount[c.id] = 0` here makes the
+    // input decorative — every claim falls through to the default whatever the
+    // person enters — and it is one of the three mutations that survived an
+    // earlier version of this block, because nothing pinned the handler.
+    expect(template(sfc('components', 'BringList.vue')))
+      .toMatch(/@update:model-value="amount\[c\.id\] = Number\(\$event\) \|\| 1"/)
     // AND THE ADD FORM CARRIES THE COUNT. Dropping this one property leaves the
     // field on screen writing nothing to the database.
     expect(body).toMatch(/quantityNeeded: newCount\.value \|\| null/)
@@ -166,10 +259,31 @@ describe('the guest bring list', () => {
 
   it('knows which claim is the viewer\'s own by email, among several', () => {
     const body = script(sfc('components', 'BringList.vue'))
-    // `.find` over the LIST. `c.claims[0]` would offer Release to whoever
-    // claimed first regardless of who is looking, and hide it from everybody
-    // else on an item they are genuinely bringing half of.
-    expect(body).toMatch(/c\.claims\.find\(x => x\.email === identity\.value\.email\)/)
+    // THE WHOLE DEFINITION, for the reason `countLine` above carries: matching
+    // the `.find(...)` alone left `myClaim` short-circuitable to false — every
+    // claim looks like somebody else's, nobody is offered Release or the
+    // pre-fill of their own number — and the substring survived it.
+    // `c.claims[0]` is the other wrong version: it would offer Release to
+    // whoever claimed first regardless of who is looking.
+    expect(body).toMatch(
+      /^const myClaim = \(c: Contribution\) => c\.claims\.find\(x => x\.email === identity\.value\.email\)$/m
+    )
+  })
+
+  it('tells "may I take some" apart from "may I change what I said"', () => {
+    const body = script(sfc('components', 'BringList.vue'))
+    // ONE CONTROL ANSWERED BOTH QUESTIONS and that is how the destructive edit
+    // got in: `v-if="!c.claimed"` on a button whose label flips to "Change".
+    // Pinned whole, because a mutation collapsing either back into the other
+    // restores it.
+    expect(body).toMatch(/^const canClaim = \(c: Contribution\) => !c\.claimed && !myClaim\(c\)$/m)
+    expect(body).toMatch(
+      /^const canAdjust = \(c: Contribution\) => c\.quantityRemaining !== null && !!myClaim\(c\)$/m
+    )
+    // `canAdjust` does NOT exclude a finished item: lowering 6 to 3 is the only
+    // way to re-open one without releasing it outright, and it is the single
+    // caller of the branch `claimContribution` keeps for exactly this.
+    expect(body).not.toMatch(/const canAdjust = [^\n]*!c\.claimed/)
   })
 
   it('shows the count and everybody who is bringing some, in the template', () => {
@@ -181,10 +295,15 @@ describe('the guest bring list', () => {
     // EVERY claimant, not the first. `claims[0].name` renders "Ada brings this"
     // over an item Ada and Bo are splitting.
     expect(body).toMatch(/\{\{ claimantLine\(c\) \}\}/)
-    // The number field exists, is capped by what is left, and appears only for
-    // an item that HAS a count — an item with none must render as it always did.
-    expect(body).toMatch(/v-if="!c\.claimed && c\.quantityRemaining !== null"/)
-    expect(body).toMatch(/:max="c\.quantityRemaining"/)
+    // The number field appears only where there is a count to pick — an item
+    // with none must render exactly as it always did — and its ceiling admits
+    // the viewer's OWN claim. `:max="c.quantityRemaining"` refused Ada 3 -> 4
+    // on six bottles that Bo held two of, which the server accepts happily.
+    expect(body).toMatch(/v-if="canPickNumber\(c\)"/)
+    expect(body).toMatch(/:max="maxFor\(c\)"/)
+    expect(body, 'the cap excludes the viewer\'s own claim again').not.toMatch(/:max="c\.quantityRemaining"/)
+    // The button serves both verbs and says which one it is doing.
+    expect(body).toMatch(/v-if="canClaim\(c\) \|\| canAdjust\(c\)"/)
     // Release is offered on the viewer's OWN claim, not on "the item is
     // claimed" — which on a shared item would offer everybody the same button.
     expect(body).toMatch(/v-if="myClaim\(c\)"/)

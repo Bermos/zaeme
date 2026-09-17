@@ -496,7 +496,7 @@ concurrency:
 # `<script setup>` as well as in `<template>`, which is where the mutations that
 # survive a green pipeline actually live. 832 -> 879.
 #
-# AND 30 ARE THE BRING LIST LEARNING TO COUNT (#44), which is the first group
+# AND 32 ARE THE BRING LIST LEARNING TO COUNT (#44), which is the first group
 # here that had almost nothing to grow from: every release before it touched the
 # potluck with exactly TWO checks, `addPotluckItem` and `listPotluck`, and never
 # claimed anything at all. So the guest half of that feature — the invite
@@ -504,7 +504,7 @@ concurrency:
 # coverage whatsoever, and the three columns this issue drops were read by
 # nothing any check could see.
 #
-# ELEVEN ARE THE COUNT ITSELF, and each `equals` is the whole state of one item
+# THIRTEEN ARE THE COUNT ITSELF, and each `equals` is the whole state of one item
 # as one string (`bring_state`: needed/claimed/remaining/done/who). A `contains`
 # cannot do this twice over: "4 claimed, 2 to go" is a relationship between
 # three numbers, and this is a LIST, so a needle on `"quantityRemaining":2` is
@@ -512,7 +512,12 @@ concurrency:
 # three acceptance criteria are one `equals` each — three of six bottles leaves
 # three, two people at three each closes it, and releasing one reopens it at
 # three — plus a claimer raising their OWN number, which must adjust their row
-# rather than add a second.
+# rather than add a second, and LOWERING it on an item that is already full,
+# which is the one branch of `claimContribution`'s refusal that every other
+# check leaves unwalked: each of those claims is made while the item still has
+# room, so only the "…and the caller holds no claim" half is exercised. Lowering
+# your own number is also the only way to re-open a finished item without
+# releasing it outright and telling the party nobody is bringing the thing.
 #
 # SEVEN ARE THE ITEM WITH NO COUNT, which is the criterion most likely to break in
 # silence: it has to behave exactly as every item did before this release, and
@@ -533,13 +538,16 @@ concurrency:
 # reason #38's group could not see a pin: this suite is curl and never loads a
 # Vue page. That half is `test/bring-list.test.ts` — the arithmetic executed,
 # and the call sites in `BringList.vue` and the host page pinned in
-# `<script setup>` as well as in `<template>`. 879 -> 909.
+# `<script setup>` as well as in `<template>`, and the pre-fill and the cap
+# EXECUTED as shared functions — the review found a mutation that made the
+# number field decorative and left a source-text assertion green, so the rule
+# most likely to be got wrong now lives where vitest can run it. 879 -> 911.
 #
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '909'
+  MIN_SMOKE_CHECKS: '911'
 
 jobs:
   ci:

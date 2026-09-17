@@ -194,7 +194,18 @@ export async function addContribution(
  * A CLAIMER ADJUSTING THEIR OWN NUMBER IS NOT REFUSED, on a done item either:
  * `(contribution_id, email)` is unique, so this upserts, and dropping from six
  * to three has to be possible or an item can never be re-opened except by
- * releasing it entirely.
+ * releasing it entirely — which tells the whole party, for as long as it takes
+ * to claim it again, that nobody is bringing the thing.
+ *
+ * `BringList.vue` REACHES THIS, and that sentence is load-bearing rather than
+ * decorative: its `canAdjust` offers the number field and the button to a
+ * claimer on an item that is already done, which is the only caller that walks
+ * this branch (`/api/v1` has no claim verb at all, and the invite route is the
+ * only other way in). An earlier revision of this comment argued for the branch
+ * while both controls were hidden behind `!c.claimed` — live on the wire and
+ * dead from the product, which is a paragraph defending a path nobody could
+ * walk. If the screen ever stops offering it, delete the branch or say here
+ * that it is unreachable; do not leave this paragraph standing over nothing.
  *
  * OVER-CLAIMING IS NOT REFUSED. Ten of six bottles is a party, not an error;
  * `contributionTally` clamps the remainder at zero.

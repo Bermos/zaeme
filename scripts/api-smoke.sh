@@ -1090,6 +1090,18 @@ check "Ada raises her own claim to all six"      200 "${JSON[@]}" -X POST "$BLI/
   -d '{"guestName":"Ada","guestEmail":"ada-44@example.com","quantity":6}'
 equals "...adjusting her row, not adding a second" "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Bottles')" "6/6/0/done/ada-44@example.com"
 
+# THE ONE BRANCH `claimContribution` KEEPS FOR A FINISHED ITEM, walked. Every
+# claim above was made while the item still had room, so the refusal's second
+# half — "…and the caller holds no claim on it" — was the only part exercised.
+# Lowering your own number on a DONE item is the sole way to re-open one without
+# releasing it outright, which would tell the party nobody is bringing the thing
+# for as long as it takes to claim again. `BringList.vue`'s `canAdjust` is what
+# offers it; without these two the domain comment describing it is a claim no
+# check can falsify.
+check "Ada can lower her own claim on a FULL item" 200 "${JSON[@]}" -X POST "$BLI/$BLID/claim" \
+  -d '{"guestName":"Ada","guestEmail":"ada-44@example.com","quantity":3}'
+equals "...which re-opens it at the right remainder" "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Bottles')" "6/3/3/open/ada-44@example.com"
+
 # ---- an item with NO count, which must behave exactly as it did before #44 ----
 check "an item with no count at all"             201 "${AUTH[@]}" "${JSON[@]}" -X POST "$BLV" -d '{"title":"Crisps"}'
 equals "...is unclaimed and has no remainder"    "$(bring_state "$(body "${AUTH[@]}" "$BLV")" 'Crisps')" "none/0/none/open/nobody"

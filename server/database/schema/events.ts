@@ -731,8 +731,8 @@ export const dateVote = pgTable('events_date_vote', {
  *
  * WHO HAS CLAIMED IT IS `events_contribution_claim`, not three columns here.
  * `claimed_by_name`/`claimed_by_email`/`claimed_at` were dropped by
- * `0014_broad_speed_demon.sql`; they could hold exactly one claimer, so two
- * friends could not split the salad and four of six bottles was not a state.
+ * `0014_petite_dust.sql`; they could hold exactly one claimer, so two friends
+ * could not split the salad and four of six bottles was not a state.
  */
 export const contribution = pgTable('events_contribution', {
   id: text('id').primaryKey(),

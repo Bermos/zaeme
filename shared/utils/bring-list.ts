@@ -84,6 +84,45 @@ export function contributionTally(
 }
 
 /**
+ * WHAT THE NUMBER FIELD BESIDE AN ITEM STARTS AT, AND WHAT IT MAY REACH.
+ *
+ * These two exist as functions rather than as expressions in `BringList.vue`
+ * for one reason: the wrong version of the first one DESTROYS PART OF AN
+ * EXISTING CLAIM, and nothing in this repository executes a `.vue` file, so
+ * written inline it would be guarded by a string match and nothing else.
+ *
+ * THE BUG THEY WERE EXTRACTED FOR, because it shipped in review and is the
+ * whole reason the rule is stated here. The field used to seed itself with the
+ * REMAINDER for everybody, including somebody who already held a claim — and
+ * the same button creates and edits. Six bottles, Ada takes 3, Bo takes 2:
+ * remaining is 1, so Ada's field showed **1** beside a button reading "Change"
+ * and a badge reading "You (3)". One tap, no confirmation, and the 3 she told
+ * the party she was bringing became 1. Seeding with HER OWN CLAIM makes that
+ * tap a no-op, which is what a control that says "Change" must be when nothing
+ * was changed.
+ *
+ * `claimFieldMax` is the same mistake in the other direction: the remainder
+ * EXCLUDES the viewer's own claim, so capping at it left Ada unable to raise
+ * herself from 3 back to 4 — a refusal the server does not make. Her ceiling is
+ * everything not already spoken for by SOMEBODY ELSE, which is the remainder
+ * plus what she is holding.
+ *
+ * Neither is a rule about what the server accepts: over-claiming is allowed
+ * (`contributionTally` clamps) and the field is a courtesy, not a gate.
+ */
+export function claimFieldDefault(remaining: number | null, ownClaim: number | undefined): number {
+  // The viewer's own claim wins whenever they have one, on a finished item too.
+  if (ownClaim != null) return ownClaim
+  // Otherwise the remainder, so one tap finishes an item off — and 1 when there
+  // is nothing left to take, since the field is never shown in that state.
+  return remaining && remaining > 0 ? remaining : 1
+}
+
+export function claimFieldMax(remaining: number | null, ownClaim: number | undefined): number {
+  return Math.max(1, (remaining ?? 0) + (ownClaim ?? 0))
+}
+
+/**
  * The sentence a screen puts under the item's title — "6 bottles needed, 4
  * claimed, 2 to go" — or `null` when there is no count to talk about, in which
  * case the item renders exactly as it did before this issue.

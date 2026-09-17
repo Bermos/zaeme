@@ -54,12 +54,31 @@ const claimantLine = (c: Contribution) => c.claims
   .join(', ')
 
 /**
- * How many the claim button will take. Seeded with the remainder, so the common
- * case — one person finishing the item off — is a single tap, and the field is
- * there to say "just two of them".
+ * WHO MAY DO WHAT TO AN ITEM, as two predicates rather than as `!c.claimed`
+ * twice — because those are different questions and one control answered both.
+ *
+ * `canAdjust` is the viewer changing a number they already said, and it is TRUE
+ * ON A FINISHED ITEM: lowering 6 to 3 is the only way to re-open one without
+ * releasing it entirely, which would tell the party nobody is bringing the
+ * thing. It is false where there is no count, because a claim on such an item
+ * is one by definition and there is nothing to adjust — that item keeps exactly
+ * the controls it had before this issue.
+ */
+const canClaim = (c: Contribution) => !c.claimed && !myClaim(c)
+const canAdjust = (c: Contribution) => c.quantityRemaining !== null && !!myClaim(c)
+/** A number field is worth showing only where there is a count to pick. */
+const canPickNumber = (c: Contribution) => c.quantityRemaining !== null && (canClaim(c) || canAdjust(c))
+
+/**
+ * How many the button will take, and how high the field goes. Both are
+ * `shared/utils/bring-list.ts`, where `test/bring-list.test.ts` EXECUTES them —
+ * seeding this field with the remainder for somebody who already holds a claim
+ * silently destroys part of it, and a string match over this file is not enough
+ * to hold a rule with that failure mode.
  */
 const amount = reactive<Record<string, number>>({})
-const wanted = (c: Contribution) => amount[c.id] || c.quantityRemaining || 1
+const wanted = (c: Contribution) => amount[c.id] || claimFieldDefault(c.quantityRemaining, myClaim(c)?.quantityClaimed)
+const maxFor = (c: Contribution) => claimFieldMax(c.quantityRemaining, myClaim(c)?.quantityClaimed)
 
 const busy = ref<string | null>(null)
 
@@ -191,18 +210,18 @@ async function add() {
             {{ claimantLine(c) }}
           </UBadge>
           <UInput
-            v-if="!c.claimed && c.quantityRemaining !== null"
+            v-if="canPickNumber(c)"
             :model-value="wanted(c)"
             type="number"
             :min="1"
-            :max="c.quantityRemaining"
+            :max="maxFor(c)"
             size="xs"
             class="w-16"
             aria-label="How many will you bring?"
             @update:model-value="amount[c.id] = Number($event) || 1"
           />
           <UButton
-            v-if="!c.claimed"
+            v-if="canClaim(c) || canAdjust(c)"
             size="xs"
             variant="outline"
             :loading="busy === c.id"
