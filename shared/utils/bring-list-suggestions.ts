@@ -319,6 +319,24 @@ export function headcountLine(headcount: number): string {
  * tapping a second time is meant to change nothing, and a screen that answers
  * "Added 0 items" reads like a failure rather than like the guarantee it is.
  */
+/**
+ * WHAT AN EMPTIED COUNT FIELD MEANS: no stated count, which is a real thing to
+ * say about a bring-list item and is what `quantityNeeded: null` has meant
+ * since #44 ("some crisps").
+ *
+ * It is a function rather than an expression in the panel because Vue's
+ * `v-model.number` hands back `''` for a cleared input, and `''` is neither a
+ * number nor null: posted as it stands it fails the route's zod schema, so a
+ * host who clears one count gets "could not add those" for the whole list and
+ * no clue which line did it. The wrong version is silent in every static check
+ * — the field is typed `number | null`, so nothing type-checks the `''` that
+ * actually arrives at runtime.
+ */
+export function countFieldValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 1) return Math.floor(value)
+  return null
+}
+
 export function applySummary(added: number, skipped: number): string {
   const items = (n: number) => `${n} ${n === 1 ? 'item' : 'items'}`
   if (added === 0 && skipped === 0) return 'Nothing to add.'

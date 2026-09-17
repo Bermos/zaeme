@@ -126,7 +126,10 @@ async function apply() {
             title: r.title,
             category: r.category,
             unit: r.unit,
-            quantityNeeded: r.quantityNeeded,
+            // An emptied field means "no stated count", not `''` — which is
+            // what `v-model.number` actually hands back and what the route's
+            // schema would refuse for the whole list at once.
+            quantityNeeded: countFieldValue(r.quantityNeeded),
             note: r.note
           }))
         }
@@ -135,8 +138,8 @@ async function apply() {
     toast.add({ title: applySummary(result.added, result.skipped.length), color: 'success' })
     // Closed, and back to the starter list next time: reopening on the past
     // event somebody copied ten minutes ago is a surprising place to land.
-    // `from` is reset while `open` is false, so the watcher below does not fire
-    // a load into a closed panel.
+    // `from` is reset while `open` is already false, so its watcher does not
+    // fire a load into a closed panel.
     open.value = false
     loaded.value = false
     from.value = ''

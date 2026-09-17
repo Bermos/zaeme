@@ -36,6 +36,7 @@ import {
   applySummary,
   attendingHeadcount,
   bringListKey,
+  countFieldValue,
   headcountLine,
   isThinBringList,
   partitionNewItems,
@@ -280,6 +281,23 @@ describe('what the panel says', () => {
     expect(applySummary(1, 0)).toBe('Added 1 item.')
   })
 
+  it('reads an emptied count field as "no stated count"', () => {
+    // `v-model.number` hands back `''` for a cleared input, and `''` is neither
+    // a number nor null: posted as it stands the route's zod schema refuses the
+    // WHOLE list, so a host who clears one count is told "could not add those"
+    // with no clue which line did it. Nothing static catches this — the field is
+    // typed `number | null` and the `''` only exists at runtime.
+    expect(countFieldValue('')).toBeNull()
+    expect(countFieldValue(null)).toBeNull()
+    expect(countFieldValue(undefined)).toBeNull()
+    expect(countFieldValue(Number.NaN)).toBeNull()
+    // …and 0 is not a count either: the schema's floor is 1, and "we need zero
+    // of these" is not a thing a bring list says.
+    expect(countFieldValue(0)).toBeNull()
+    expect(countFieldValue(6)).toBe(6)
+    expect(countFieldValue(6.7)).toBe(6)
+  })
+
   it('opens by itself on an empty or thin list and hides on a full one', () => {
     expect(isThinBringList(0)).toBe(true)
     expect(isThinBringList(2)).toBe(true)
@@ -325,6 +343,11 @@ describe('the suggestion panel', () => {
     const body = scriptOf(sfc())
     expect(body).toMatch(/^const open = ref\(isThinBringList\(props\.itemCount\)\)$/m)
     expect(body).toMatch(/applySummary\(result\.added, result\.skipped\.length\)/)
+    // AND THE COUNT IS COERCED ON THE WAY OUT. `quantityNeeded: r.quantityNeeded`
+    // posts `''` for a field the host cleared, which the route's schema refuses
+    // for the whole list; the rule is executed in the block above.
+    expect(body).toMatch(/quantityNeeded: countFieldValue\(r\.quantityNeeded\)/)
+    expect(body).not.toMatch(/quantityNeeded: r\.quantityNeeded/)
     // …and does no arithmetic of its own beside it. Two copies of the scaling
     // rule is a screen able to disagree with the server about one list.
     expect(body).not.toMatch(/headcount\.value\s*\*/)
