@@ -31,7 +31,10 @@ import { bigint, boolean, check, foreignKey, index, integer, numeric, pgTable, t
  *  - `events_invite` / `events_rsvp` — the capability link and the answer;
  *    `invite.tier` marks the party phases (`core` poll wave vs `general`).
  *  - `events_date_option` + `events_date_vote` — the date-finding poll.
- *  - `events_contribution` — the bring list (food & drink coordination).
+ *  - `events_contribution` + `events_contribution_claim` — the bring list
+ *    (food & drink coordination): what is wanted, and who has claimed how much
+ *    of it. One claim row per person per item, so six bottles can be four
+ *    claimed and two to go (#44).
  *  - `events_timeline_item` — the itinerary.
  *  - `events_place` + `events_itinerary_leg` — the GEOGRAPHY of a trip (#30):
  *    the places an itinerary happens at (coordinates optional — a place can be
@@ -710,8 +713,26 @@ export const dateVote = pgTable('events_date_vote', {
 
 /**
  * The bring list ("who brings what"): items the host or guests add and guests
- * claim. Unclaimed = `claimedByEmail` null. Claimers use the same name+email
- * identity as RSVPs/votes.
+ * claim. Claimers use the same name+email identity as RSVPs/votes.
+ *
+ * TWO WAYS TO SAY HOW MUCH, and they are not redundant (#44):
+ *
+ *  - `quantity` is FREE TEXT and always has been — "some crisps", "for 8
+ *    people", "a big one". It stays, because most of a bring list is like that
+ *    and forcing a number on it would make the common case worse.
+ *  - `quantity_needed` + `unit` are the COUNTABLE case: 6 bottles. Only then
+ *    can the list answer "how much is still missing", which is the question
+ *    this table could not express at all until #44.
+ *
+ * `quantity_needed` NULL means nobody stated a count, and such an item behaves
+ * exactly as every item did before #44: claimed, or not. The rule lives in
+ * `shared/utils/bring-list.ts`, where one function answers it for the server
+ * and both screens.
+ *
+ * WHO HAS CLAIMED IT IS `events_contribution_claim`, not three columns here.
+ * `claimed_by_name`/`claimed_by_email`/`claimed_at` were dropped by
+ * `0014_petite_dust.sql`; they could hold exactly one claimer, so two friends
+ * could not split the salad and four of six bottles was not a state.
  */
 export const contribution = pgTable('events_contribution', {
   id: text('id').primaryKey(),
@@ -719,10 +740,11 @@ export const contribution = pgTable('events_contribution', {
   title: text('title').notNull(),
   category: text('category', { enum: ['food', 'drink', 'other'] }).notNull().default('other'),
   quantity: text('quantity'),
+  /** How many are wanted, when that is a number at all. NULL for "some crisps". */
+  quantityNeeded: integer('quantity_needed'),
+  /** What `quantity_needed` counts — "bottles", "portions". Free text, optional. */
+  unit: text('unit'),
   note: text('note'),
-  claimedByName: text('claimed_by_name'),
-  claimedByEmail: text('claimed_by_email'),
-  claimedAt: timestamp('claimed_at', { withTimezone: true }),
   /** Who added the item: a planner's userId, or a guest's email. */
   createdByUserId: text('created_by_user_id'),
   createdByGuestEmail: text('created_by_guest_email'),
@@ -730,7 +752,59 @@ export const contribution = pgTable('events_contribution', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date())
 }, table => [
   index('events_contribution_event_idx').on(table.eventId),
-  index('events_contribution_claimed_email_idx').on(table.claimedByEmail)
+  // The target of `events_contribution_claim`'s composite foreign key. `id` is
+  // already the primary key, so this is unique by construction; it exists so
+  // Postgres will accept `(event_id, contribution_id)` as a reference.
+  uniqueIndex('events_contribution_event_id_unique').on(table.eventId, table.id)
+])
+
+/**
+ * ONE PERSON'S CLAIM ON ONE BRING-LIST ITEM (#44).
+ *
+ * The row that makes "4 of the 6 bottles are spoken for" a fact rather than a
+ * string. Before this table the claim was three columns ON the item, so an item
+ * was claimed by exactly one person or by nobody — which meant a potluck could
+ * not say how much was still missing and two friends could not split a salad.
+ *
+ * `quantity_claimed` is how many of the item's `unit` this person is bringing,
+ * and defaults to 1: on an item with no stated need, "I'll bring it" is one
+ * claim of one, which is precisely what a claim used to be.
+ *
+ * UNIQUE ON `(contribution_id, email)` — one row per person per item. Claiming
+ * again is an adjustment of your own number (`claimContribution` upserts on
+ * exactly this key), never a second row that would silently double what the
+ * list thinks is coming.
+ *
+ * THE COMPOSITE FOREIGN KEY is the same rule the ledger and the tickets carry:
+ * a plain `contribution_id` would let a claim on one event name an item on
+ * another, with only a handler's `eventId` filter between somebody's name and
+ * the wrong party. `event_id` also references the event directly, so deleting
+ * an event takes its claims whichever way the cascade runs.
+ *
+ * NO `updated_at`: a claim is created, adjusted in place or deleted, and
+ * `claimed_at` is the fact the list shows.
+ */
+export const contributionClaim = pgTable('events_contribution_claim', {
+  id: text('id').primaryKey(),
+  eventId: text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
+  contributionId: text('contribution_id').notNull(),
+  name: text('name').notNull(),
+  /** Lowercased, like every other guest identity in this schema. */
+  email: text('email').notNull(),
+  quantityClaimed: integer('quantity_claimed').notNull().default(1),
+  claimedAt: timestamp('claimed_at', { withTimezone: true }).notNull().defaultNow()
+}, table => [
+  uniqueIndex('events_contribution_claim_item_email_unique').on(table.contributionId, table.email),
+  // The referencing side of the composite key: deleting an item has to find the
+  // claims pointing at it.
+  index('events_contribution_claim_contribution_idx').on(table.contributionId),
+  index('events_contribution_claim_event_idx').on(table.eventId),
+  index('events_contribution_claim_email_idx').on(table.email),
+  foreignKey({
+    columns: [table.eventId, table.contributionId],
+    foreignColumns: [contribution.eventId, contribution.id],
+    name: 'events_contribution_claim_event_contribution_fk'
+  }).onDelete('cascade')
 ])
 
 /* ------------------------------ series group ------------------------------ */

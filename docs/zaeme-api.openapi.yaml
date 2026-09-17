@@ -785,8 +785,8 @@ paths:
       tags: [contributions]
       summary: Read the bring-list.
       description: >-
-        List an event's bring-list (potluck) items with their category and who, if
-        anyone, has claimed each one.
+        List an event's bring-list (potluck) items with their category, how many
+        are wanted, and everybody who has claimed how much of each one.
       responses:
         '200':
           description: The bring-list.
@@ -805,7 +805,8 @@ paths:
       summary: Add a bring-list item.
       description: >-
         Add a bring-list (potluck) item to an event for attendees to claim, e.g.
-        "Main dish", "Drinks", "Napkins & plates".
+        "Main dish", "Drinks", "Napkins & plates". The item is added UNCLAIMED;
+        claiming happens on the invite link a guest holds.
       requestBody:
         required: true
         content:
@@ -823,6 +824,18 @@ paths:
                   type: string
                   maxLength: 100
                   description: 'How much is wanted, in words, e.g. "for 8 people".'
+                quantityNeeded:
+                  type: integer
+                  minimum: 1
+                  maximum: 10000
+                  description: >-
+                    How many are wanted, when that is a number (#44). Only then
+                    can the list say how many are still to go; leave it out for
+                    anything that is not countable and use `quantity` instead.
+                unit:
+                  type: string
+                  maxLength: 40
+                  description: 'What quantityNeeded counts — "bottles", "portions".'
                 note: { type: string, maxLength: 500 }
       responses:
         '201':
@@ -2463,18 +2476,71 @@ components:
             ifneedbe: { type: integer }
             'no': { type: integer }
 
+    ContributionClaim:
+      type: object
+      required: [name, email, quantityClaimed, claimedAt]
+      description: >-
+        One person's claim on one bring-list item (#44). At most one per person
+        per item: claiming again adjusts this row rather than adding a second.
+      properties:
+        name: { type: string }
+        email: { type: string, description: 'Lowercased — the same guest identity an RSVP carries.' }
+        quantityClaimed:
+          type: integer
+          description: 'How many of the item''s unit this person is bringing. 1 for an item with no stated count.'
+        claimedAt: { type: string, format: date-time }
+
     Contribution:
       type: object
-      required: [id, title]
+      required: [id, title, claimed, claims]
+      description: >-
+        A bring-list item and who has claimed how much of it.
+
+        BREAKING, ONCE, IN #44: `claimedByName`, `claimedByEmail` and
+        `claimedAt` are gone from this schema. They could describe exactly one
+        claimer, so "6 bottles needed, 4 claimed" was not expressible and two
+        people could not split a salad. `claims` replaces all three and is `[]`
+        for an unclaimed item.
+
+        TWO WAYS TO SAY HOW MUCH, and they are not alternatives to each other.
+        `quantity` is free text and unchanged — "some crisps", "for 8 people".
+        `quantityNeeded` + `unit` are the countable case, and only they make
+        `quantityRemaining` meaningful.
+
+        `claimed` KEEPS ITS OLD MEANING WHERE THERE IS NO COUNT: an item with
+        `quantityNeeded: null` is claimed when anybody has claimed it, exactly
+        as before this release. Where there is a count it means the claims meet
+        it. `quantityRemaining` is null — never 0 — for an item with no count,
+        so "nothing left to bring" cannot be read off an item that never had a
+        number.
       properties:
         id: { type: string }
         title: { type: string }
         category: { type: string, enum: [food, drink, other] }
-        quantity: { type: [string, 'null'] }
+        quantity:
+          type: [string, 'null']
+          description: 'How much is wanted, in words. The fallback for anything not countable.'
+        quantityNeeded:
+          type: [integer, 'null']
+          description: 'How many are wanted, when that is a number at all.'
+        unit:
+          type: [string, 'null']
+          description: 'What quantityNeeded counts — "bottles", "portions".'
         note: { type: [string, 'null'] }
-        claimedByName: { type: [string, 'null'] }
-        claimedByEmail: { type: [string, 'null'] }
-        claimedAt: { type: [string, 'null'], format: date-time }
+        quantityClaimed:
+          type: integer
+          description: 'The sum of every claim on this item.'
+        quantityRemaining:
+          type: [integer, 'null']
+          description: >-
+            How many are still wanted, floored at 0 (over-claiming is allowed).
+            Null when quantityNeeded is null.
+        claimed:
+          type: boolean
+          description: 'Whether this item is finished — see the schema description.'
+        claims:
+          type: array
+          items: { $ref: '#/components/schemas/ContributionClaim' }
 
     Expense:
       type: object

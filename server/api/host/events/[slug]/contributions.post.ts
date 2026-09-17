@@ -2,11 +2,19 @@ import { z } from 'zod'
 import { addContribution, assertPlanner, loadEventBySlug } from '../../../../domain/index'
 import { requireGuestUser } from '../../../../utils/auth'
 
-/** The host adds a bring-list item guests can claim (planner only). */
+/**
+ * The host adds a bring-list item guests can claim (planner only).
+ *
+ * `quantityNeeded` + `unit` are the countable case — "6 bottles" — and are what
+ * lets the list answer "2 to go". Seeding one claims nothing: this is the
+ * surface where a planner says what is WANTED.
+ */
 const bodySchema = z.object({
   title: z.string().min(1).max(200),
   category: z.enum(['food', 'drink', 'other']).optional(),
   quantity: z.string().max(100).optional().nullable(),
+  quantityNeeded: z.number().int().min(1).max(10000).optional().nullable(),
+  unit: z.string().max(40).optional().nullable(),
   note: z.string().max(500).optional().nullable()
 })
 

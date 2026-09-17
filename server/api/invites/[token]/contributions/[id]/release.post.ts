@@ -3,7 +3,7 @@ import { guestReleaseContribution } from '../../../../../domain/index'
 
 /** Release one's own claim on a bring-list item. */
 const bodySchema = z.object({
-  guestEmail: z.string().email()
+  guestEmail: z.email()
 })
 
 export default defineEventHandler(async (e) => {

@@ -220,7 +220,31 @@ export function pollOption(row: object) {
   }
 }
 
-/** `components.schemas.Contribution`. */
+/**
+ * `components.schemas.Contribution`.
+ *
+ * A BREAKING CHANGE FOR ENTERPRISE, made once and deliberately (#44). The three
+ * scalars `claimedByName`/`claimedByEmail`/`claimedAt` are GONE, because they
+ * could describe exactly one claimer and a bring list has to be able to say
+ * that four of six bottles are spoken for. What replaces them:
+ *
+ *   claims            every claimer, with how much each is bringing and when
+ *                     they said so. `[]` is the unclaimed item.
+ *   claimed           unchanged in meaning for an item with no stated count —
+ *                     somebody has claimed it — and "the claims meet the need"
+ *                     for one that has a count.
+ *   quantityNeeded    how many are wanted, or null. `quantity` (free text) is
+ *                     untouched and is still the fallback for "some crisps".
+ *   unit              what that count counts, or null.
+ *   quantityClaimed   the sum of the claims.
+ *   quantityRemaining how many are still wanted; NULL and not 0 when nobody
+ *                     stated a need, so a client cannot read "nothing left to
+ *                     bring" off an item that never had a number.
+ *
+ * Enterprise generates its tools from `docs/zaeme-api.openapi.yaml`, so the
+ * vendored snapshot there has to move with this: the contract test asserts a
+ * bijection over paths and methods and says nothing about fields.
+ */
 export function contribution(row: object) {
   const r = asRow(row)
   return {
@@ -228,10 +252,20 @@ export function contribution(row: object) {
     title: r.title,
     category: r.category,
     quantity: r.quantity ?? null,
+    quantityNeeded: r.quantityNeeded ?? null,
+    unit: r.unit ?? null,
     note: r.note ?? null,
-    claimedByName: r.claimedByName ?? null,
-    claimedByEmail: r.claimedByEmail ?? null,
-    claimedAt: r.claimedAt ?? null
+    quantityClaimed: r.quantityClaimed ?? 0,
+    quantityRemaining: r.quantityRemaining ?? null,
+    claimed: r.claimed ?? false,
+    claims: Array.isArray(r.claims)
+      ? r.claims.map((c: { name: string, email: string, quantityClaimed: number, claimedAt: Date }) => ({
+          name: c.name,
+          email: c.email,
+          quantityClaimed: c.quantityClaimed,
+          claimedAt: c.claimedAt
+        }))
+      : []
   }
 }
 
