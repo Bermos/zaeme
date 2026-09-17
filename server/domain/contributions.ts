@@ -672,9 +672,23 @@ export function bringListGaps(
  * be there. Widening it later is additive; un-widening after it ships is not.
  *
  * DEDUPED ON THE LOWERCASED ADDRESS, because one person can hold an account
- * RSVP and a guest RSVP on the same event and must not get two mails. The
- * account's own address wins where there is one, which is the precedence every
- * other send in this app uses.
+ * RSVP and a guest RSVP on the same event and must not get two mails.
+ *
+ * THE PRECEDENCE IS WITHIN A ROW, NOT ACROSS ROWS, and the difference is worth
+ * being exact about because an earlier version of this sentence was not. WITHIN
+ * a row the account's address wins over the typed one (`user?.email ??
+ * guestEmail`), which is what every other send in this app does. ACROSS rows it
+ * is FIRST SEEN WINS, and `loadBringListNudge` reads the RSVPs with no
+ * `ORDER BY` — so when one person holds both rows, which of the two supplies
+ * the greeting name and the invite token is not ranked by anything here.
+ *
+ * That is left unranked deliberately rather than frozen by an `ORDER BY`: one
+ * mail goes out either way, so the acceptance criterion does not depend on it,
+ * and neither row is the better one to prefer (the account row carries the name
+ * better-auth knows, the guest row usually carries the invite the link wants).
+ * Picking one by sort order would look like a decision while being an arbitrary
+ * choice about which of two correct addresses to greet. When somebody has a
+ * reason to prefer one, that reason goes here and the query gets its order.
  */
 export function nudgeRecipients(
   rows: readonly {
@@ -707,10 +721,49 @@ export interface BringListNudgeFacts {
   status: string
   /** A `Date` from the database, or the ISO string a serialised step hands back. */
   startsAt: Date | string | null
+  /** Read with `startsAt`, because together they say when this nudge was due. */
+  timezone: string | null
   itemCount: number
   gaps: readonly string[]
   recipients: readonly BringListNudgeRecipient[]
 }
+
+/**
+ * HOW LATE — OR HOW EARLY — A NUDGE MAY STILL BE DELIVERED, and the number is
+ * chosen from an arithmetic rather than picked as a round one.
+ *
+ * The signal's `ts` is fixed when the event is published and NOTHING
+ * reschedules it, so the rung below asks whether this delivery is still the
+ * right one for the event as it now stands: is `now` near what
+ * `bringListNudgeAt` says today? That needs a window, and the window has to
+ * separate two things.
+ *
+ * WHAT IT MUST ABSORB: a late delivery. A queue backlog, an outage, or a run
+ * that failed its first attempts and retried can put hours between the due
+ * instant and this code running. A tight window would turn every one of those
+ * into silence, on the one night the feature exists for.
+ *
+ * WHAT IT MUST CATCH: a moved event. And the separation is wide, because
+ * `bringListNudgeAt` reads the event's local calendar DAY and not its clock
+ * time — 18:00 the evening before, whatever hour the party starts. So moving a
+ * party from 20:00 to 10:00 on the same local day does not move the nudge AT
+ * ALL, and any move that does change the answer changes the local day, which
+ * moves it by a whole day: ~23 hours at the narrowest, that being a 24-hour day
+ * with a spring-forward inside it. `test/bring-list-nudge.test.ts` executes
+ * that claim over a year of days in four zones rather than leaving it as
+ * reasoning.
+ *
+ * Six hours sits between the two with room on both sides: four times longer
+ * than any plausible delivery delay, and a quarter of the smallest real move.
+ *
+ * WHAT IT DOES NOT SEPARATE, said plainly rather than left to be discovered: a
+ * change of ZONE alone, by six hours or less, moves the answer by less than the
+ * window — so the nudge still goes out at the old instant, up to six hours off
+ * the new local 18:00. A trip relabelled from Zürich to New York is exactly
+ * that case, and it lands near midnight local instead of at six. That is a
+ * worse hour, not a wrong party, and it is the side of the trade worth taking.
+ */
+export const NUDGE_DELIVERY_WINDOW_MS = 6 * 60 * 60 * 1000
 
 /**
  * Whether to send, and why not. The counts ride along either way, so an
@@ -736,6 +789,21 @@ export type BringListNudgeDecision
  *  - `already-started` next: the start can be moved after publication and
  *    nothing reschedules the signal, so a nudge really can arrive for a party
  *    that has happened.
+ *  - `rescheduled` is that same fact in the OTHER DIRECTION, and it is here
+ *    because leaving it out inverted the whole feature. An event published for
+ *    1 July and moved to 1 September keeps its 30 June signal: on 30 June every
+ *    yes-RSVP was told what was unclaimed for a party two months away — with
+ *    the mail's own `When:` line correctly reading September, so it arrives as
+ *    an obvious mistake — and on 31 August, the night this exists for, nothing
+ *    was sent at all. The promise exactly inverted, in both halves. So this
+ *    rung asks whether the delivery is still the right one for the event as it
+ *    NOW stands (`NUDGE_DELIVERY_WINDOW_MS` above says how near is near), and a
+ *    delivery that is not gets silence.
+ *
+ *    ITS CONSEQUENCE IS WORTH STATING: a moved event now gets NO nudge rather
+ *    than a wrong one, because nothing reschedules the signal. That is the
+ *    better half of a bad pair and not a fix — the 48h reminder has the same
+ *    shape, and Bermos/zaeme#91 is the pair of them together.
  *  - NO LIST and COMPLETE LIST are two refusals and not one, because they are
  *    two different facts that happen to earn the same silence. An event with no
  *    bring list is not a party that forgot.
@@ -756,6 +824,12 @@ export function bringListNudgeDecision(
   if (plan.status !== 'published') return no(`status-${plan.status}`)
   if (!plan.startsAt) return no('no-start')
   if (new Date(plan.startsAt).getTime() <= opts.now) return no('already-started')
+  // The same `startsAt` this ladder has been reading, asked the other question:
+  // not "has it happened" but "is this still when it was due". A `startsAt` that
+  // no longer resolves to a day at all lands here too, which is the same silence
+  // for a reason nobody can act on either.
+  const due = bringListNudgeAt(plan.startsAt, plan.timezone)?.getTime()
+  if (due === undefined || Math.abs(opts.now - due) > NUDGE_DELIVERY_WINDOW_MS) return no('rescheduled')
   if (plan.itemCount === 0) return no('no-bring-list')
   if (plan.gaps.length === 0) return no('list-complete')
   if (plan.recipients.length === 0) return no('nobody-said-yes')

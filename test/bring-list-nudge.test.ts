@@ -6,6 +6,7 @@ import {
   bringListNudgeDecision,
   gapLine,
   nudgeRecipients,
+  NUDGE_DELIVERY_WINDOW_MS,
   NUDGE_HOUR_LOCAL,
   type BringListNudgeFacts
 } from '../server/domain/contributions'
@@ -263,15 +264,42 @@ describe('18:00 the evening before, on the event\'s own clock', () => {
     expect(bringListNudgeAt(undefined, null)).toBeNull()
     expect(bringListNudgeAt('not a date', 'Europe/Zurich')).toBeNull()
   })
+
+  it('moves by at least the delivery window whenever the local day changes', () => {
+    // THE ARITHMETIC BEHIND `NUDGE_DELIVERY_WINDOW_MS`, executed rather than
+    // reasoned. The window has to be narrow enough that a real reschedule can
+    // never hide inside it, and the claim that justifies six hours is that the
+    // smallest move which changes this function's answer is a WHOLE DAY —
+    // because it reads the event's local calendar day, not its clock. The
+    // narrowest such day is a 23-hour one, the spring-forward Sunday, and this
+    // walks a year of them in four zones including two that observe the shift
+    // on different dates.
+    let narrowest = Infinity
+    for (const zone of ['Europe/Zurich', 'America/New_York', 'Pacific/Auckland', 'Asia/Kolkata']) {
+      for (let day = 0; day < 365; day++) {
+        const a = bringListNudgeAt(new Date(Date.UTC(2026, 0, 1 + day, 12, 0, 0)), zone)
+        const b = bringListNudgeAt(new Date(Date.UTC(2026, 0, 2 + day, 12, 0, 0)), zone)
+        narrowest = Math.min(narrowest, Math.abs(b!.getTime() - a!.getTime()))
+      }
+    }
+    expect(narrowest).toBe(23 * 3600_000)
+    expect(NUDGE_DELIVERY_WINDOW_MS).toBeLessThan(narrowest)
+  })
 })
 
 /* ------------------------------- the decision ------------------------------- */
 
+/**
+ * 30 June 16:00Z is 18:00 in Zürich — exactly when a party starting at 09:00
+ * CEST on 1 July is due its nudge. Every case below moves one thing away from
+ * that.
+ */
 const NOW = Date.parse('2026-06-30T16:00:00.000Z')
 
 const plan = (over: Partial<BringListNudgeFacts> = {}): BringListNudgeFacts => ({
   status: 'published',
   startsAt: new Date('2026-07-01T07:00:00Z'),
+  timezone: 'Europe/Zurich',
   itemCount: LIST.length,
   gaps: bringListGaps(LIST),
   recipients: [{ rsvpId: 'r1', email: 'ada@example.com', name: 'Ada', inviteToken: 'tok-ada' }],
@@ -302,6 +330,73 @@ describe('whether to send at all', () => {
     expect(decide({ startsAt: new Date('2026-06-01T07:00:00Z') }))
       .toMatchObject({ send: false, reason: 'already-started' })
     expect(decide({ startsAt: null })).toMatchObject({ send: false, reason: 'no-start' })
+  })
+
+  it('sends nothing on the OLD date when the party has been moved later', () => {
+    // THE REGRESSION THIS RUNG EXISTS FOR, in the shape it was executed in.
+    // Published for 1 July, moved to 1 September: the signal still lands on
+    // 30 June, and without this rung every yes-RSVP was told what was
+    // unclaimed for a party two months away — while the mail's own `When:`
+    // line correctly read September, so it arrived as an obvious mistake.
+    expect(decide({ startsAt: new Date('2026-09-01T07:00:00Z') }))
+      .toMatchObject({ send: false, reason: 'rescheduled' })
+  })
+
+  it('catches a move of a single day, which is the smallest one that moves the nudge', () => {
+    // The nudge reads the event's local DAY, so a day is the smallest move that
+    // changes its answer at all — and it has to be caught, or the window is
+    // wide enough to let a real reschedule through.
+    expect(decide({ startsAt: new Date('2026-07-02T07:00:00Z') }))
+      .toMatchObject({ send: false, reason: 'rescheduled' })
+    expect(decide({ startsAt: new Date('2026-06-30T20:00:00Z') }))
+      .toMatchObject({ send: false, reason: 'rescheduled' })
+  })
+
+  it('does NOT call a move within the same local day a reschedule', () => {
+    // 1 July at 22:00 CEST is the same evening-before nudge as 1 July at 09:00,
+    // because the rule is the local day and not the clock. Treating this as a
+    // reschedule would delete the nudge for a host who nudged the start by an
+    // hour.
+    expect(decide({ startsAt: new Date('2026-07-01T20:00:00Z') }))
+      .toMatchObject({ send: true, reason: null })
+  })
+
+  it('still sends when the delivery is late, which is what the window is for', () => {
+    // A queue backlog or a retried run must not become silence on the one night
+    // this feature exists for.
+    expect(bringListNudgeDecision(plan(), { now: NOW + 5 * 3600_000, mailConfigured: true }))
+      .toMatchObject({ send: true })
+    expect(bringListNudgeDecision(plan(), { now: NOW - 5 * 3600_000, mailConfigured: true }))
+      .toMatchObject({ send: true })
+  })
+
+  it('stops sending once the delivery is further out than the window', () => {
+    expect(bringListNudgeDecision(plan(), { now: NOW + 7 * 3600_000, mailConfigured: true }))
+      .toMatchObject({ send: false, reason: 'rescheduled' })
+    expect(bringListNudgeDecision(plan(), { now: NOW - 7 * 3600_000, mailConfigured: true }))
+      .toMatchObject({ send: false, reason: 'rescheduled' })
+  })
+
+  it('reads the zone as well as the start, because the zone decides the instant', () => {
+    // Same start, relabelled Auckland: 18:00 the evening before is now a
+    // different instant by more than the window, so this delivery is not it.
+    expect(decide({ timezone: 'Pacific/Auckland' }))
+      .toMatchObject({ send: false, reason: 'rescheduled' })
+  })
+
+  it('calls a start that no longer resolves a reschedule rather than crashing', () => {
+    // An `Invalid Date` is truthy, so it walks past `no-start`, and every
+    // comparison against it is false, so it walks past `already-started` too.
+    // Without this rung it reached the send loop.
+    expect(decide({ startsAt: new Date('nonsense') }))
+      .toMatchObject({ send: false, reason: 'rescheduled' })
+  })
+
+  it('prefers "already-started" over "rescheduled" for a party that has happened', () => {
+    // Both are true of an event moved into the past. The more specific fact is
+    // the one worth logging.
+    expect(decide({ startsAt: new Date('2026-06-01T07:00:00Z') }))
+      .toMatchObject({ reason: 'already-started' })
   })
 
   it('sends nothing when the list is COMPLETE', () => {
