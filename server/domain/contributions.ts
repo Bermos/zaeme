@@ -1,7 +1,14 @@
-import { and, asc, eq, inArray } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, lte, ne, or, sql } from 'drizzle-orm'
 import { createId } from '@paralleldrive/cuid2'
 import { createError } from 'h3'
 import { contributionTally } from '../../shared/utils/bring-list'
+import type { SuggestedItem, SuggestionCategory } from '../../shared/utils/bring-list-suggestions'
+import {
+  attendingHeadcount,
+  partitionNewItems,
+  suggestBringListItems,
+  suggestionsFor
+} from '../../shared/utils/bring-list-suggestions'
 import { tables, useDb } from './db'
 import { assertPlanner, loadEventBySlug } from './permissions'
 
@@ -304,4 +311,245 @@ export async function addContributionAsPlanner(userId: string, slug: string, inp
   const ev = await loadEventBySlug(slug)
   await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
   return addContribution(ev.id, input, { userId })
+}
+
+/* ------------------------- suggesting a whole list ------------------------- */
+
+/**
+ * NOBODY KNOWS WHAT A POTLUCK FOR TWELVE NEEDS (#45).
+ *
+ * One tap on an empty or thin bring list, producing a list the host edits
+ * before any of it is written. Two sources, one shape and one write path:
+ *
+ *  - the STATIC data in `shared/utils/bring-list-suggestions.ts`, scaled to the
+ *    yes-RSVPs; and
+ *  - a COPY of another event of the same type this host has already run.
+ *
+ * THE COPY IS A COPY AND NOT A TEMPLATE, which is the distinction the issue
+ * draws and the reason there is no new table and no migration here: nothing
+ * links the new items to the old event, nothing has to be kept up to date, and
+ * deleting the source afterwards costs this event nothing. It is a one-time
+ * read of a past list, in the same preview shape the static suggestions arrive
+ * in, and it BRINGS THE ITEMS AND NOT THE CLAIMS — which is guaranteed by the
+ * shape rather than by remembering: `SuggestedItem` has no field a claim could
+ * ride in on, `copyableItems` never names `events_contribution_claim`, and
+ * `applyBringListSuggestion` writes to `events_contribution` alone. Last year's
+ * guests are not this year's.
+ */
+export interface BringListSource {
+  slug: string
+  title: string
+  startsAt: Date | null
+  itemCount: number
+}
+
+export interface BringListSuggestion {
+  /** Where the preview came from: the checked-in data, or a past event. */
+  source: 'static' | 'event'
+  /** The past event it was copied from, when `source` is `'event'`. */
+  fromSlug: string | null
+  eventType: string
+  /** The yes-RSVPs (plus their +1s) the counts below were scaled to. */
+  headcount: number
+  /**
+   * Why there is nothing to suggest, or `null`. Non-empty items and a reason
+   * are mutually exclusive — a screen with a reason shows the sentence and NO
+   * button, which is what stops a concert getting a control that does nothing.
+   */
+  reason: string | null
+  items: SuggestedItem[]
+}
+
+/**
+ * Other events of the SAME TYPE this planner has already run, that have a bring
+ * list worth copying.
+ *
+ * "ALREADY RUN" IS THE CONSERVATIVE READING of the issue's "a host who has run
+ * a party before": started, or marked completed. An event with no date at all
+ * is not offered, because a draft nobody has scheduled is not a past party. The
+ * looser reading — any other event of the type, upcoming ones included — would
+ * also serve somebody running two parties in one month, and is left for the
+ * owner to ask for.
+ *
+ * `exists (...)` in the WHERE rather than a count filtered afterwards:
+ * filtering a limited page in JS can return nothing while offerable events sit
+ * on the next page.
+ */
+export async function listBringListSources(userId: string, slug: string): Promise<BringListSource[]> {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId)
+  return useDb()
+    .select({
+      slug: tables.event.slug,
+      title: tables.event.title,
+      startsAt: tables.event.startsAt,
+      itemCount: sql<number>`(select count(*)::int from events_contribution c where c.event_id = events_event.id)`
+    })
+    .from(tables.event)
+    .innerJoin(tables.eventPlanner, eq(tables.eventPlanner.eventId, tables.event.id))
+    .where(and(
+      eq(tables.eventPlanner.userId, userId),
+      eq(tables.event.type, ev.type),
+      ne(tables.event.id, ev.id),
+      or(lte(tables.event.startsAt, new Date()), eq(tables.event.status, 'completed')),
+      sql`exists (select 1 from events_contribution c where c.event_id = events_event.id)`
+    ))
+    .orderBy(desc(tables.event.startsAt))
+    .limit(20)
+}
+
+/**
+ * The editable preview. `from` copies a past event's items instead of scaling
+ * the static set; the headcount is reported either way, because it is what the
+ * static counts were computed from and what a host judges them against.
+ */
+export async function suggestBringList(
+  userId: string,
+  slug: string,
+  opts: { from?: string | null } = {}
+): Promise<BringListSuggestion> {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+
+  const rsvps = await useDb()
+    .select({ status: tables.rsvp.status, plusOne: tables.rsvp.plusOne })
+    .from(tables.rsvp)
+    .where(eq(tables.rsvp.eventId, ev.id))
+  const headcount = attendingHeadcount(rsvps)
+
+  if (opts.from) {
+    return {
+      source: 'event',
+      fromSlug: opts.from,
+      eventType: ev.type,
+      headcount,
+      reason: null,
+      items: await copyableItems(userId, ev, opts.from)
+    }
+  }
+  return {
+    source: 'static',
+    fromSlug: null,
+    eventType: ev.type,
+    headcount,
+    reason: suggestionsFor(ev.type).reason,
+    items: suggestBringListItems(ev.type, headcount)
+  }
+}
+
+/**
+ * A past event's items as preview rows. THE CLAIMS ARE NOT SELECTED AT ALL —
+ * not filtered out downstream, not nulled on the way past: this query names
+ * five columns of `events_contribution` and `events_contribution_claim` appears
+ * nowhere in it. There is no path from here to somebody else's name.
+ */
+async function copyableItems(
+  userId: string,
+  target: { id: string, type: string },
+  fromSlug: string
+): Promise<SuggestedItem[]> {
+  const source = await loadEventBySlug(fromSlug)
+  if (source.id === target.id) {
+    throw createError({ statusCode: 422, message: 'That is this event — pick another one to copy from' })
+  }
+  // The planner has to be a planner THERE too. Without this, any slug on the
+  // instance would hand its bring list to anybody who could name it.
+  await assertPlanner(source.id, userId)
+  if (source.type !== target.type) {
+    throw createError({
+      statusCode: 422,
+      message: `A ${source.type} list does not fit a ${target.type} — copy from another ${target.type}`
+    })
+  }
+  const rows = await useDb()
+    .select({
+      id: tables.contribution.id,
+      title: tables.contribution.title,
+      category: tables.contribution.category,
+      unit: tables.contribution.unit,
+      quantityNeeded: tables.contribution.quantityNeeded,
+      note: tables.contribution.note
+    })
+    .from(tables.contribution)
+    .where(eq(tables.contribution.eventId, source.id))
+    .orderBy(asc(tables.contribution.category), asc(tables.contribution.createdAt))
+  return rows.map(r => ({
+    key: `copy:${r.id}`,
+    title: r.title,
+    category: r.category as SuggestionCategory,
+    unit: r.unit,
+    quantityNeeded: r.quantityNeeded,
+    note: r.note
+  }))
+}
+
+export interface ApplyBringListResult {
+  added: number
+  /** The titles already on the list, left exactly as they were. */
+  skipped: string[]
+  contributions: ContributionView[]
+}
+
+/**
+ * Write the preview the host edited. Nothing is claimed and nothing is updated:
+ * items that are new are inserted, and items whose title is already on this
+ * event are SKIPPED and reported back.
+ *
+ * APPLYING TWICE MUST NOT DUPLICATE is an acceptance criterion, and the two
+ * taps that make it hard are simultaneous ones — a slow request and an
+ * impatient thumb. Reading the titles and then inserting is two statements, so
+ * both requests would read "no Wine" and both would insert one. There is no
+ * unique index to lean on (this issue adds no migration, and a unique
+ * `(event_id, lower(title))` would also refuse a PERSON typing a second Wine,
+ * which is their business), so the event row is locked `for update` for the
+ * duration — the same lock `changeEventCurrency` takes, and the only other
+ * writer of it. Every apply on one event therefore serialises, and the second
+ * sees the first's rows.
+ *
+ * SKIPPED RATHER THAN UPDATED, deliberately: a host who lowered Wine from 6 to
+ * 4 and tapped again must not have their 4 pushed back up to 6. What is on the
+ * list wins over a suggestion about it.
+ */
+export async function applyBringListSuggestion(
+  userId: string,
+  slug: string,
+  items: readonly AddContributionInput[]
+): Promise<ApplyBringListResult> {
+  const ev = await loadEventBySlug(slug)
+  await assertPlanner(ev.id, userId, { roles: ['owner', 'co_planner'] })
+
+  let added = 0
+  let skipped: string[] = []
+  await useDb().transaction(async (tx) => {
+    const [held] = await tx
+      .select({ id: tables.event.id })
+      .from(tables.event)
+      .where(eq(tables.event.id, ev.id))
+      .for('update')
+      .limit(1)
+    if (!held) throw createError({ statusCode: 404, message: 'Event not found' })
+
+    const existing = await tx
+      .select({ title: tables.contribution.title })
+      .from(tables.contribution)
+      .where(eq(tables.contribution.eventId, ev.id))
+    const split = partitionNewItems(items, existing.map(r => r.title))
+    skipped = split.duplicates.map(i => i.title)
+    added = split.fresh.length
+    if (split.fresh.length) {
+      await tx.insert(tables.contribution).values(split.fresh.map(i => ({
+        id: createId(),
+        eventId: ev.id,
+        title: i.title,
+        category: i.category ?? 'other',
+        quantity: i.quantity ?? null,
+        quantityNeeded: i.quantityNeeded ?? null,
+        unit: i.unit ?? null,
+        note: i.note ?? null,
+        createdByUserId: userId,
+        createdByGuestEmail: null
+      })))
+    }
+  })
+  return { added, skipped, contributions: await listContributions(ev.id) }
 }

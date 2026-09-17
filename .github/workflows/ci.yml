@@ -543,11 +543,78 @@ concurrency:
 # number field decorative and left a source-text assertion green, so the rule
 # most likely to be got wrong now lives where vitest can run it. 879 -> 911.
 #
+# AND 52 ARE THE LIST THE HOST NO LONGER HAS TO INVENT (#45): one tap on an
+# empty bring list, a static set scaled to the yes-RSVPs, edited before it is
+# applied — and a copy of a past event of the same type, which brings the items
+# and not the claims. Nothing was added to `/api/v1` for it, so all 52 are on
+# the host session and every one of them would skip without the cookie.
+#
+# SIX ARE THE ARITHMETIC ON THE WIRE, and the fixture is twelve heads built as
+# six friends each bringing somebody, beside three people who are NOT eating
+# (a maybe, a no, and "cheering from afar") each with a +1 of their own. A
+# scaler that counted RSVP rows answers 6 and halves every number; one that
+# reused `summariseRsvps().headcount` answers 15 and inflates them. The right
+# answer — six bottles of wine, twenty-four beers, three bags of ice, eighteen
+# cups — differs from both. The sixth is that LOOKING WRITES NOTHING: the
+# event's own list is still empty after the suggestion has been read.
+#
+# SIX ARE THE TYPES THE ISSUE DID NOT NAME, which is the gap this branch
+# closes rather than inherits. The issue describes suggestions for `series`,
+# `party` and `trip`; the schema has five, and the two it omits include
+# `hosted` — THE DEFAULT, and what `scheduleOccurrence` makes every showing of
+# a series. Under the issue as written the commonest event on any instance
+# would have got a button that does nothing. So the default answers with a real
+# list, and a gig answers with a SENTENCE: `suggest_state` prints
+# `source/headcount/itemCount/reason-or-none`, and `0/none` — no items and no
+# reason — is the shape of a dead control that no type may print.
+#
+# TEN ARE THE WRITE, and they are about the body rather than the status. The
+# host applies two of the six lines at a count the GET never proposed, which a
+# handler that re-derived the suggestion instead of writing what it was sent
+# would fail while passing everything above it. Then the same list is applied
+# AGAIN: `added` is 0, `skipped` names both lines, and `bring_copies` counts
+# the Wines — `bring_state` cannot see this one at all, because it finds the
+# first match and a list holding two Wines reads exactly like a list holding
+# one. Applying `  wine  ` proves the title is compared trimmed and folded, and
+# that a duplicate is SKIPPED rather than updated: the host's 4 is not pushed
+# back up to the suggested 6.
+#
+# SIXTEEN ARE THE COPY, and the fixture is built around the wrong answer: the
+# past party's sangria is CLAIMED, in full, by somebody with an address, before
+# anything is copied. The preview carries neither the address nor a `claims`
+# key, the applied item arrives `4/0/4/open/nobody`, and last year's list still
+# holds its claim afterwards. `source_items` ties each offer to its own slug —
+# a `contains` on `"itemCount":2` is satisfied by any previous run's fixture —
+# and answers the negative half too: an upcoming party with a list on it is NOT
+# one you have run, and neither is a TRIP that has one (which is why a line is
+# put on the trip first: without it that exclusion would hold for the wrong
+# reason), and neither is this event.
+#
+# THE OTHER 14 are the refusals and the credential. A trip's list does not fit
+# a party (422), nor does this event's own (422); an empty list, a count of
+# zero and an item with no title are each a 400; and the surface is the host
+# session in both directions — the service token is 401 against both verbs, the
+# capability URL has no such route at all (404), and a second account can
+# suggest on its OWN party while being 403 against this one and, crucially,
+# against COPYING FROM it. That last one is the hole the check exists for: a
+# bring list carries what a group eats, drinks and has trouble with, and
+# without the planner check on the SOURCE event any slug on the instance would
+# hand its list to anybody who could name it.
+#
+# WHAT THESE 52 CANNOT SEE is the panel a host actually taps: this suite is
+# curl and never loads a Vue page, which is how #82 shipped a broken headline
+# past 879 and #85 a claim-destroying pre-fill past 909. That half is
+# `test/bring-list-suggestions.test.ts` — the scaling, the duplicate rule, the
+# headcount and the two sentences EXECUTED as shared functions, the
+# items-or-a-reason invariant asserted over the enum read out of the schema,
+# and the call sites in `BringListSuggest.vue` and the host page pinned in
+# `<script setup>` as well as in `<template>`. 911 -> 963.
+#
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '911'
+  MIN_SMOKE_CHECKS: '963'
 
 jobs:
   ci:
