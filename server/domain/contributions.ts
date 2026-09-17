@@ -468,6 +468,13 @@ async function copyableItems(
       category: tables.contribution.category,
       unit: tables.contribution.unit,
       quantityNeeded: tables.contribution.quantityNeeded,
+      // THE FREE-TEXT AMOUNT, and it is not optional to a copy. Most of a real
+      // bring list says how much HERE — "two big bowls", "for 8 people" — and
+      // never as a count, so leaving this column out made a copy a list of
+      // bare nouns. It was invisible to the host who chose it, because the host
+      // page does not render this column and `BringList.vue` does: the loss
+      // showed up on the guests' invite page and nowhere the host looks.
+      quantity: tables.contribution.quantity,
       note: tables.contribution.note
     })
     .from(tables.contribution)
@@ -479,6 +486,7 @@ async function copyableItems(
     category: r.category as SuggestionCategory,
     unit: r.unit,
     quantityNeeded: r.quantityNeeded,
+    quantity: r.quantity,
     note: r.note
   }))
 }

@@ -84,7 +84,12 @@ describe('every event type the schema can hold', () => {
     // reason is a button that looks live and does nothing — which is precisely
     // what `hosted` and `concert` would have had under the issue as written.
     for (const type of schemaTypes()) {
-      const set = suggestionsFor(type)
+      // READ THE TABLE DIRECTLY, not through `suggestionsFor`: that helper falls
+      // back to `hosted` for anything it does not know, so a sixth type added to
+      // the schema would pass this loop wearing the default's answer. The
+      // fallback is right at runtime and wrong for this assertion.
+      const set = SUGGESTIONS[type as keyof typeof SUGGESTIONS]
+      expect(set, `${type} has no entry of its own`).toBeDefined()
       expect(set.items.length > 0, `${type} suggests nothing and says why not`).toBe(set.reason === null)
     }
   })
@@ -160,6 +165,31 @@ describe('scaling a list to the headcount', () => {
     expect(suggestedQuantity(corkscrew, 40)).toBe(1)
   })
 
+  it('reserves that for TOOLS, and nothing anybody eats', () => {
+    // THE MISTAKE THIS EXISTS FOR, found in review: `trip.spreads` ("Jam and
+    // butter") carried `perPerson: null` and sat at two jars for four people
+    // and for forty, beside three trip lines that all scaled. A flat line is a
+    // claim that one of the thing is enough for any group — true of a
+    // corkscrew, false of anything that gets eaten or drunk — so the rule is
+    // asserted over the whole table rather than over the one line that was
+    // wrong. Add a flat `food` or `drink` line later and this fails.
+    const flat = Object.values(SUGGESTIONS)
+      .flatMap(s => s.items)
+      .filter(i => i.perPerson === null)
+    expect(flat.map(i => i.key)).toEqual(['trip.corkscrew'])
+    expect(flat.every(i => i.category === 'other')).toBe(true)
+  })
+
+  it('scales the breakfast a trip actually eats', () => {
+    const by = (heads: number, title: string) =>
+      suggestBringListItems('trip', heads).find(i => i.title === title)?.quantityNeeded
+    expect(by(4, 'Jam and butter')).toBe(2)
+    expect(by(20, 'Jam and butter')).toBe(5)
+    // …and it is not alone: every other line of that list moves with it.
+    expect(by(12, 'Bread for breakfast')).toBe(6)
+    expect(by(12, 'Coffee')).toBe(3)
+  })
+
   it('floors an empty guest list at one head rather than at zero', () => {
     // THE CASE A HOST MEETS FIRST: an event published this morning has no
     // yes-RSVPs, and `0 * anything` is a list saying nobody should bring
@@ -175,6 +205,16 @@ describe('scaling a list to the headcount', () => {
 
   it('suggests nothing at all for a type that has a reason instead', () => {
     expect(suggestBringListItems('concert', 12)).toEqual([])
+  })
+
+  it('states a scaled amount as a NUMBER and carries no free text', () => {
+    // `quantity` is the free-text amount ("two big bowls") and exists on this
+    // shape for the COPY. A static line says how much as a count, which is the
+    // point of scaling it, and a free-text amount beside a count would be two
+    // answers to one question on the same row.
+    expect(suggestBringListItems('party', 12).every(i => i.quantity === null)).toBe(true)
+    // …but the FIELD is on every row, or a copy has nowhere to put it.
+    expect(suggestBringListItems('party', 12).every(i => 'quantity' in i)).toBe(true)
   })
 })
 
@@ -400,6 +440,28 @@ describe('the copy of a past event', () => {
     expect(fn, 'copyableItems is no longer declared this way').not.toBe('')
     expect(fn).not.toMatch(/contributionClaim/)
     expect(fn).toMatch(/\.from\(tables\.contribution\)/)
+  })
+
+  it('brings the FREE-TEXT amount, which is most of what a real list says', () => {
+    // THE OMISSION THIS EXISTS FOR, found in review. `quantity` was not in the
+    // select, so "Crisps — two big bowls" copied as "Crisps" — and the host who
+    // chose the copy could not see it, because `app/pages/host/[slug].vue` does
+    // not render that column while `app/components/BringList.vue` renders it to
+    // every invite holder. The loss landed only on the guests' page.
+    const fn = /async function copyableItems\([\s\S]*?\n\}/.exec(domain())?.[0] ?? ''
+    expect(fn).toMatch(/quantity: tables\.contribution\.quantity/)
+    expect(fn).toMatch(/quantity: r\.quantity/)
+    // …and the write path puts it on the row rather than dropping it there.
+    const apply = /export async function applyBringListSuggestion\([\s\S]*?\n\}/.exec(domain())?.[0] ?? ''
+    expect(apply).toMatch(/quantity: i\.quantity \?\? null/)
+  })
+
+  it('renders that amount to the host, who could not see it anywhere else', () => {
+    const body = templateOf(read('app', 'components', 'BringListSuggest.vue'))
+    expect(body).toMatch(/v-if="r\.quantity"/)
+    expect(body).toMatch(/\{\{ r\.quantity \}\}/)
+    // …and sends it on, or the preview would show what the applied item lacks.
+    expect(scriptOf(read('app', 'components', 'BringListSuggest.vue'))).toMatch(/quantity: r\.quantity/)
   })
 
   it('writes items and nothing else when the host applies one', () => {

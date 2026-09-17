@@ -27,6 +27,8 @@ interface SuggestedRow {
   category: 'food' | 'drink' | 'other'
   unit: string | null
   quantityNeeded: number | null
+  /** The free-text amount — "two big bowls". Null on a static suggestion. */
+  quantity: string | null
   note: string | null
 }
 
@@ -130,6 +132,10 @@ async function apply() {
             // what `v-model.number` actually hands back and what the route's
             // schema would refuse for the whole list at once.
             quantityNeeded: countFieldValue(r.quantityNeeded),
+            // THE FREE-TEXT AMOUNT RIDES ALONG on a copy. Leaving it out here
+            // would undo the fix one layer up: the preview would carry "two big
+            // bowls" and the applied item would not.
+            quantity: r.quantity,
             note: r.note
           }))
         }
@@ -240,6 +246,18 @@ async function apply() {
           <div class="min-w-0 flex-1">
             <p class="truncate text-sm">
               {{ r.title }}
+              <!--
+                THE FREE-TEXT AMOUNT, SHOWN, exactly as `BringList.vue` shows it
+                to a guest. A copy carries it, and the host choosing the copy is
+                the one person who was previously unable to see it: the host
+                page's own bring list does not render this column, so a copy
+                that dropped it looked complete here and lossy on every invite
+                page.
+              -->
+              <span
+                v-if="r.quantity"
+                class="text-xs text-muted"
+              >({{ r.quantity }})</span>
             </p>
             <p
               v-if="r.note"

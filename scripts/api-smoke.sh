@@ -323,6 +323,44 @@ source_items() {
     })' "$2"
 }
 
+# `bring_quantity <body> <title>` / `suggest_quantity <body> <title>` — the
+# FREE-TEXT amount on a named item, on a written list and on a preview (#45).
+#
+# `bring_state` cannot answer this and that is exactly how a review found the
+# copy dropping the column: it reports `quantity_needed`, the COUNT, and the
+# free text beside it ("two big bowls", "for 8 people") is a different column
+# that most real bring lists carry instead. The original copy fixture held one
+# item with a count and one with neither, so the two cases where the free text
+# is empty anyway — green over a column that never arrived.
+#
+# `none` for null and `no-such-item` for absent, because "this item has no
+# free-text amount" and "this item is not on the list" are the two answers a
+# dropped column can wear.
+bring_quantity() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const list = Array.isArray(b) ? b : (b.contributions ?? (b.contribution ? [b.contribution] : []))
+      const item = list.find(x => x && x.title === process.argv[1])
+      if (!item) return process.stdout.write("no-such-item")
+      process.stdout.write(item.quantity === null || item.quantity === undefined ? "none" : String(item.quantity))
+    })' "$2"
+}
+
+suggest_quantity() {
+  printf '%s' "$1" | node -e '
+    let s = ""
+    process.stdin.on("data", d => s += d).on("end", () => {
+      let b
+      try { b = JSON.parse(s) } catch { return process.stdout.write("unparseable") }
+      const item = (b.suggestion?.items ?? []).find(x => x && x.title === process.argv[1])
+      if (!item) return process.stdout.write("no-such-item")
+      process.stdout.write(item.quantity === null || item.quantity === undefined ? "none" : String(item.quantity))
+    })' "$2"
+}
+
 # `suggest_body <body>` — a preview turned into the POST body that applies it,
 # VERBATIM (#45). The copy check applies what the server actually offered rather
 # than a hand-written stand-in, and the difference is the whole point: a
@@ -1374,6 +1412,12 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGPAST/contributions" \
     -d '{"title":"Sangria","category":"drink","quantityNeeded":4,"unit":"jugs"}' > /dev/null
   body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGPAST/contributions" -d '{"title":"Candles","category":"other"}' > /dev/null
+  # THE ITEM MOST REAL BRING LISTS ARE MADE OF, and the one this fixture was
+  # missing: a FREE-TEXT amount and no count at all. Sangria has a count and
+  # Candles has neither, so both were cases where `quantity` is empty anyway —
+  # which is how a copy that dropped the column stayed green over it.
+  body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGPAST/contributions" \
+    -d '{"title":"Olives","category":"food","quantity":"two big bowls"}' > /dev/null
   SAID=$(bring_id "$(body "${AUTH[@]}" "$API/events/$SGPAST/contributions")" 'Sangria')
   check "somebody claimed the sangria last time"   200 "${JSON[@]}" -X POST "$BASE/api/invites/$PTOK/contributions/$SAID/claim" \
     -d "{\"guestName\":\"Ada\",\"guestEmail\":\"ada-45-$SUFFIX@example.com\",\"quantity\":4}"
@@ -1389,15 +1433,25 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   body "${AUTH[@]}" "${JSON[@]}" -X POST "$API/events/$SGUP/contributions" -d '{"title":"Fireworks"}' > /dev/null
 
   SGSRC=$(body "${HOST_COOKIE[@]}" "$SGGET")
-  equals "the past party is offered, with its size"  "$(source_items "$SGSRC" "$SGPAST")" "2"
+  equals "the past party is offered, with its size"  "$(source_items "$SGSRC" "$SGPAST")" "3"
   equals "a party that has not happened yet is not"  "$(source_items "$SGSRC" "$SGUP")" "no-such-source"
   equals "...nor is a TRIP with a list on it"        "$(source_items "$SGSRC" "$SGTRIP")" "no-such-source"
   equals "...nor this event itself"                  "$(source_items "$SGSRC" "$SGSLUG")" "no-such-source"
 
+  # THE FIXTURE ITSELF, PINNED. Every assertion below about the free text is
+  # satisfied by "the source never had any", so the source is asserted first.
+  equals "last year's list carried a free-text amount" "$(bring_quantity "$(body "${AUTH[@]}" "$API/events/$SGPAST/contributions")" 'Olives')" "two big bowls"
+
   COPY=$(body "${HOST_COOKIE[@]}" "$SGGET?from=$SGPAST")
-  equals "copying it previews that evening's items" "$(suggest_state "$COPY")" "event/12/2/none"
+  equals "copying it previews that evening's items" "$(suggest_state "$COPY")" "event/12/3/none"
   equals "...with the count that was on them"       "$(suggest_count "$COPY" 'Sangria')" "4"
   equals "...and a free-text item stays free text"  "$(suggest_count "$COPY" 'Candles')" "none"
+  # …AND THE FREE TEXT COMES WITH IT. "Brings the items" is not "brings the
+  # titles": on a list made of "Crisps — two big bowls" this column is where the
+  # amount lives, and dropping it produced a column of bare nouns that only the
+  # GUESTS could see — `BringList.vue` renders it, the host page does not.
+  equals "...and the free-text AMOUNT comes across"  "$(suggest_quantity "$COPY" 'Olives')" "two big bowls"
+  equals "...while a scaled line states a number instead" "$(suggest_quantity "$SUG" 'Wine')" "none"
   excludes "...and NOT the person who claimed it"   "$COPY" "ada-45-$SUFFIX"
   excludes "...nor a claims array at all"           "$COPY" '"claims"'
 
@@ -1405,9 +1459,15 @@ if [ -n "${ZAEME_TEST_SESSION_COOKIE:-}" ]; then
   # cannot carry a field the preview should never have had, so a leak would ride
   # through it invisibly.
   CAP=$(body "${HOST_COOKIE[@]}" "${JSON[@]}" -X POST "$SGGET" -d "$(suggest_body "$COPY")")
-  contains "the copy lands as ordinary items"       "$CAP" '"added":2'
+  contains "the copy lands as ordinary items"       "$CAP" '"added":3'
   equals "...and the sangria arrives UNCLAIMED"     "$(bring_state "$CAP" 'Sangria')" "4/0/4/open/nobody"
   equals "...and the free-text item has no count"   "$(bring_state "$CAP" 'Candles')" "none/0/none/open/nobody"
+  # WRITTEN, not merely previewed — the half a preview assertion cannot reach.
+  equals "...and the amount is on the WRITTEN row"  "$(bring_quantity "$CAP" 'Olives')" "two big bowls"
+  # …and it did not become a count on the way: the two columns are not the same
+  # answer, and a free-text amount silently read as a number would make "two big
+  # bowls" an item somebody has to finish.
+  equals "...and did not turn into a count"         "$(bring_state "$CAP" 'Olives')" "none/0/none/open/nobody"
   equals "...while LAST year's list still has its claim" "$(bring_state "$(body "${AUTH[@]}" "$API/events/$SGPAST/contributions")" 'Sangria')" "4/4/0/done/ada-45-$SUFFIX@example.com"
 
   # ---- the refusals ----

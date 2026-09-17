@@ -543,10 +543,10 @@ concurrency:
 # number field decorative and left a source-text assertion green, so the rule
 # most likely to be got wrong now lives where vitest can run it. 879 -> 911.
 #
-# AND 52 ARE THE LIST THE HOST NO LONGER HAS TO INVENT (#45): one tap on an
+# AND 57 ARE THE LIST THE HOST NO LONGER HAS TO INVENT (#45): one tap on an
 # empty bring list, a static set scaled to the yes-RSVPs, edited before it is
 # applied — and a copy of a past event of the same type, which brings the items
-# and not the claims. Nothing was added to `/api/v1` for it, so all 52 are on
+# and not the claims. Nothing was added to `/api/v1` for it, so all 57 are on
 # the host session and every one of them would skip without the cookie.
 #
 # SIX ARE THE ARITHMETIC ON THE WIRE, and the fixture is twelve heads built as
@@ -579,11 +579,25 @@ concurrency:
 # that a duplicate is SKIPPED rather than updated: the host's 4 is not pushed
 # back up to the suggested 6.
 #
-# SIXTEEN ARE THE COPY, and the fixture is built around the wrong answer: the
-# past party's sangria is CLAIMED, in full, by somebody with an address, before
-# anything is copied. The preview carries neither the address nor a `claims`
-# key, the applied item arrives `4/0/4/open/nobody`, and last year's list still
-# holds its claim afterwards. `source_items` ties each offer to its own slug —
+# TWENTY-ONE ARE THE COPY, and the fixture is built around two wrong answers.
+# The past party's sangria is CLAIMED, in full, by somebody with an address,
+# before anything is copied: the preview carries neither the address nor a
+# `claims` key, the applied item arrives `4/0/4/open/nobody`, and last year's
+# list still holds its claim afterwards.
+#
+# AND ONE ITEM HAS A FREE-TEXT AMOUNT AND NO COUNT — "Olives, two big bowls" —
+# which is what most real bring lists are made of and what this fixture was
+# missing until review. `bring_state` reports the COUNT, so a copy that dropped
+# `quantity` was green over both of the original two items (one had a count, one
+# had neither, and in both the free text is empty anyway). It is asserted on the
+# SOURCE first, then on the preview, then on the WRITTEN row — and that it did
+# not become a count on the way, because a free-text amount silently read as a
+# number makes "two big bowls" something a guest has to finish. The loss it
+# guards is invisible where a host looks: `app/pages/host/[slug].vue` does not
+# render that column and `app/components/BringList.vue` renders it to every
+# invite holder, so the copy looked complete to the person who chose it.
+#
+# `source_items` ties each offer to its own slug —
 # a `contains` on `"itemCount":2` is satisfied by any previous run's fixture —
 # and answers the negative half too: an upcoming party with a list on it is NOT
 # one you have run, and neither is a TRIP that has one (which is why a line is
@@ -608,13 +622,13 @@ concurrency:
 # headcount and the two sentences EXECUTED as shared functions, the
 # items-or-a-reason invariant asserted over the enum read out of the schema,
 # and the call sites in `BringListSuggest.vue` and the host page pinned in
-# `<script setup>` as well as in `<template>`. 911 -> 963.
+# `<script setup>` as well as in `<template>`. 911 -> 968.
 #
 # Keep this EXACT. A floor that is slack by the width of somebody else's group
 # is a floor that lets that group stop running — which is the silent degradation
 # this assertion exists to prevent, arriving by rebase rather than by rename.
 env:
-  MIN_SMOKE_CHECKS: '963'
+  MIN_SMOKE_CHECKS: '968'
 
 jobs:
   ci:

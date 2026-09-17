@@ -151,7 +151,12 @@ export const SUGGESTIONS: Readonly<Record<SuggestibleEventType, SuggestionSet>> 
       { key: 'trip.bread', title: 'Bread for breakfast', category: 'food', unit: 'loaves', perPerson: 0.5, minimum: 1 },
       { key: 'trip.coffee', title: 'Coffee', category: 'drink', unit: 'packs', perPerson: 0.25, minimum: 1 },
       { key: 'trip.milk', title: 'Milk', category: 'drink', unit: 'litres', perPerson: 0.25, minimum: 1 },
-      { key: 'trip.spreads', title: 'Jam and butter', category: 'food', unit: 'jars', perPerson: null, minimum: 2 },
+      // JARS ARE EATEN, CORKSCREWS ARE NOT. `perPerson: null` is reserved for a
+      // thing one of which is enough however many come, and this line had it by
+      // mistake: four people and forty both got two jars, beside three
+      // neighbours that all scaled. A quarter of a jar a head over a few days
+      // puts a chalet of eight on two and a party of twenty on five.
+      { key: 'trip.spreads', title: 'Jam and butter', category: 'food', unit: 'jars', perPerson: 0.25, minimum: 2 },
       { key: 'trip.corkscrew', title: 'A corkscrew', category: 'other', unit: null, perPerson: null, minimum: 1, note: 'One is plenty' }
     ]
   },
@@ -226,10 +231,30 @@ export interface SuggestedItem {
   category: SuggestionCategory
   unit: string | null
   quantityNeeded: number | null
+  /**
+   * THE FREE-TEXT AMOUNT — "two big bowls", "for 8 people" — and NOT the count
+   * beside it. `null` for every static suggestion, because a scaled line states
+   * its amount as a number; it exists on this shape for the COPY, where most of
+   * what a real bring list says about how much lives in this column and nowhere
+   * else.
+   *
+   * Dropping it made a copy look complete to the person who chose it and
+   * lossy to everybody else: `app/pages/host/[slug].vue` never renders this
+   * column, and `app/components/BringList.vue` renders it to every invite
+   * holder — so "Crisps — two big bowls" arrived on the guests' page as
+   * "Crisps" while the host's page looked right.
+   */
+  quantity: string | null
   note: string | null
 }
 
-/** The static set for a type, scaled — the preview before the host touches it. */
+/**
+ * The static set for a type, scaled — the preview before the host touches it.
+ *
+ * `quantity` is `null` on every line here on purpose: these say how much as a
+ * NUMBER (`quantityNeeded` + `unit`), which is the whole point of scaling them,
+ * and a free-text amount beside a count is two answers to one question.
+ */
 export function suggestBringListItems(type: string, headcount: number): SuggestedItem[] {
   return suggestionsFor(type).items.map(t => ({
     key: t.key,
@@ -237,6 +262,7 @@ export function suggestBringListItems(type: string, headcount: number): Suggeste
     category: t.category,
     unit: t.unit,
     quantityNeeded: suggestedQuantity(t, headcount),
+    quantity: null,
     note: t.note ?? null
   }))
 }
